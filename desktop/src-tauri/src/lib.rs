@@ -68,6 +68,7 @@ struct BackendManager {
     token: String,
     job_handle: usize,
     launch_spec: Mutex<Option<BackendLaunchSpec>>,
+    data_root: Mutex<Option<PathBuf>>,
     child: Mutex<Option<Child>>,
     shutting_down: AtomicBool,
     restart_count: AtomicU32,
@@ -82,6 +83,7 @@ impl BackendManager {
             token,
             job_handle: create_job_object()?,
             launch_spec: Mutex::new(None),
+            data_root: Mutex::new(None),
             child: Mutex::new(None),
             shutting_down: AtomicBool::new(false),
             restart_count: AtomicU32::new(0),
@@ -130,6 +132,12 @@ impl BackendManager {
             .expect("backend launch spec lock poisoned")
             .clone()
             .ok_or_else(|| "backend launch specification is unavailable".to_owned())?;
+        let data_root = self
+            .data_root
+            .lock()
+            .expect("backend data root lock poisoned")
+            .clone()
+            .ok_or_else(|| "application data root is unavailable".to_owned())?;
         std::fs::create_dir_all(&launch_spec.log_directory)
             .map_err(|error| format!("failed to create sidecar log directory: {error}"))?;
         let log_path = launch_spec.log_directory.join("sidecar.log");
@@ -149,6 +157,7 @@ impl BackendManager {
             .arg("--port")
             .arg(self.port.to_string())
             .env("ASH_LAUNCH_TOKEN", &self.token)
+            .env("ASH_DATA_ROOT", data_root)
             .env("PYTHONUNBUFFERED", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::from(log))
@@ -180,8 +189,12 @@ impl BackendManager {
         Ok(child)
     }
 
-    fn start(self: &Arc<Self>, app: AppHandle) {
+    fn start(self: &Arc<Self>, app: AppHandle, data_root: PathBuf) {
         self.set_status(&app, "starting", None);
+        *self
+            .data_root
+            .lock()
+            .expect("backend data root lock poisoned") = Some(data_root);
         match resolve_launch_spec(&app) {
             Ok(launch_spec) => {
                 *self
@@ -507,13 +520,15 @@ pub fn run() {
     );
 
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(Arc::clone(&manager))
         .invoke_handler(tauri::generate_handler![backend_connection, backend_status])
         .setup({
             let manager = Arc::clone(&manager);
             move |app| {
-                prepare_app_data_root(app.handle()).map_err(std::io::Error::other)?;
-                manager.start(app.handle().clone());
+                let data_root =
+                    prepare_app_data_root(app.handle()).map_err(std::io::Error::other)?;
+                manager.start(app.handle().clone(), data_root);
                 Ok(())
             }
         })

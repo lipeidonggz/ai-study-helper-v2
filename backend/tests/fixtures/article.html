@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta property="og:site_name" content="示例学习站" />
+    <title>Agent 隔离设计 - 示例学习站</title>
+    <style>.hidden { display: none; }</style>
+    <script>window.__data = { ready: true };</script>
+  </head>
+  <body>
+    <nav>站点导航不应进入正文</nav>
+    <main>
+      <article>
+        <h1>Agent 隔离设计</h1>
+        <p>这是一段前置摘要，介绍文档的学习目标、边界和阅读方式。</p>
+        <h2>环境边界</h2>
+        <p>沙箱负责进程边界，出口控制负责网络边界，虚拟机负责整机边界。</p>
+        <p>三类机制关注不同风险，不能互相替代。</p>
+        <h2>环境边界</h2>
+        <ul>
+          <li>只读文件系统</li>
+          <li>
+            最小工具权限
+            <ol>
+              <li>只读数据库</li>
+              <li>禁止写入工作区外文件</li>
+            </ol>
+          </li>
+        </ul>
+        <pre><code class="language-python">def check_scope(path):
+    return path.startswith("/workspace")</code></pre>
+        <h3>对照表</h3>
+        <table>
+          <caption>边界类型对照</caption>
+          <thead><tr><th>机制</th><th>边界</th></tr></thead>
+          <tbody>
+            <tr><td>沙箱</td><td>进程</td></tr>
+            <tr><td>出口控制</td><td>网络</td></tr>
+          </tbody>
+        </table>
+        <figure>
+          <img src="diagram.png" alt="隔离层级示意图" />
+          <figcaption>从进程到网络的防护范围。</figcaption>
+        </figure>
+      </article>
+    </main>
+    <footer>页脚不应进入正文</footer>
+  </body>
+</html>

@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta property="og:site_name" content="人工验收资料库" />
+    <title>复杂 HTML 学习资料 - 人工验收资料库</title>
+    <style>
+      .ad { display: none; }
+    </style>
+    <script>window.__pageState = { ready: true };</script>
+  </head>
+  <body>
+    <header>全局页头，不应进入正文</header>
+    <nav>站点导航，不应进入正文</nav>
+    <main>
+      <article>
+        <h1>复杂 HTML 学习资料</h1>
+        <p>
+          本文用于人工验收章节恢复、列表、代码、表格、图片说明和重复标题。
+          这段前置摘要应被归入第一个章节，不能丢失。
+        </p>
+
+        <h2>学习目标</h2>
+        <p>读者需要理解结构化提取为何比简单去标签更可靠。</p>
+        <p>答案中的证据块必须能够回到原文和明确章节。</p>
+
+        <h3>具体范围</h3>
+        <ul>
+          <li>保留标题层级与原文顺序</li>
+          <li>
+            保留复杂语义边界
+            <ol>
+              <li>列表项不能合并成无边界字符串</li>
+              <li>代码缩进与换行不能折叠</li>
+            </ol>
+          </li>
+          <li>表格行组必须保持连续</li>
+        </ul>
+
+        <h2>示例代码</h2>
+        <p>下面的函数演示一个范围检查，代码块应保持完整换行。</p>
+        <pre><code class="language-python">def in_workspace(path: str) -> bool:
+    normalized = path.replace("\\", "/")
+    return normalized.startswith("/workspace/")
+
+def explain():
+    return "scope checked"</code></pre>
+
+        <h2>对照表格</h2>
+        <table>
+          <caption>提取阶段与职责</caption>
+          <thead>
+            <tr><th>阶段</th><th>职责</th><th>输出</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>S0</td><td>获取并留痕</td><td>SourceArtifact</td></tr>
+            <tr><td>S1</td><td>提取语义节点</td><td>ExtractedDocument</td></tr>
+            <tr><td>S3</td><td>恢复章节结构</td><td>SectionTree</td></tr>
+            <tr><td>S4</td><td>切分证据块</td><td>BlockSet</td></tr>
+          </tbody>
+        </table>
+
+        <h2>边界情况</h2>
+        <p>第一次出现的同名章节应生成普通路径。</p>
+
+        <h2>边界情况</h2>
+        <p>第二次出现的同名章节应生成带序号路径，但原始标题保持不变。</p>
+
+        <figure>
+          <img src="scope.png" alt="范围从外到内逐层收紧" />
+          <figcaption>图片说明进入正文，视觉内容不做 OCR。</figcaption>
+        </figure>
+      </article>
+    </main>
+    <aside>推荐阅读，不应进入正文</aside>
+    <footer>全局页脚，不应进入正文</footer>
+  </body>
+</html>

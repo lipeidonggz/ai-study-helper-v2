@@ -1,8 +1,8 @@
-# 09 · 技术选型 v0.3：Windows 单机桌面、混合检索与评测闭环
+# 09 · 技术选型 v0.4：Windows 单机桌面、混合检索与评测闭环
 
 上游：[01](01-product-requirements.md)（产品需求）、 [03](03-cases-and-gold-standard.md)（用例与金标准）、 [04](04-architecture-design-method.md)（架构方法）、 [05](05-storage-and-retrieval-strategy.md)（存储策略）、 [06](06-retrieval-pure-agent.md)（检索、trace、部署）、 [07](07-html-ingestion-design.md)（HTML 入库）、 [08](08-evaluation-console-design.md)（评测台）。
 
-**状态：技术选型 v0.3，已审核（2026-10-20），作为当前实现基线。** 只依据 01–08 的产品与架构设计，不把项目中已有实现当作选型依据；记录关键技术判断的变化过程，而不只保留最终结论。
+**状态：技术选型 v0.4，已审核（2026-10-20），作为当前实现基线。** 只依据 01–08 的产品与架构设计，不把项目中已有实现当作选型依据；记录关键技术判断的变化过程，而不只保留最终结论。v0.4 依据 [ADR 0004](../decisions/0004-lightweight-language-detection.md) 将语言识别从 Lingua 改为版本化确定性文字体系检测。
 
 [← 返回文档索引](../README.md)
 
@@ -225,7 +225,7 @@ Windows x64 官方 wheel 可离线打包；单进程稳定读写；产品与评�
 | S0 文件读取 | pathlib＋SHA-256＋charset-normalizer | 先落盘原始字节；编码只影响文本读取，不覆盖源 artifact。 |
 | S0 URL 获取 | httpx＋自定义 SSRF guard | 显式超时、重定向上限、响应体积、Content-Type 和 DNS／IP 私网检查；禁 Cookie 和执行脚本。 |
 | S1 DOM 解析 | lxml＋readability-lxml＋自定义语义遍历 | Readability 负责正文候选，lxml 负责保真遍历标题、段落、列表、引用、代码、表格和图片说明。 |
-| 语言识别 | lingua（限首版语言集） | 只在生成文档／block 语言提示时使用；不确定时标记 unknown，不能阻断入库。 |
+| 语言识别 | 自有 `script-ratio-v1` 确定性检测 | 优先使用可靠 `lang`／语言元数据；缺失时比较汉字与拉丁字母信号，输出 zh／en／mixed／unknown。只生成文档／block 语言提示，不确定时不能阻断入库。 |
 | S3 建树 | 确定性 Python 映射 | 不调用模型猜章节；按 heading 层级和稳定消歧规则生成 section_path。 |
 | S4 切块 | 自有 splitter＋版本化 ChunkSizingEstimator | 以段落和结构为主要边界；表格优先整体；只对超限单元做确定性二次拆分。 |
 | S5 embedding | Qwen API adapter，固定 1024 维 | 批大小、并发、重试和 usage 都显式记录；输入 hash 与索引同版本。 |
@@ -239,6 +239,13 @@ Windows x64 官方 wheel 可离线打包；单进程稳定读写；产品与评�
 - 入库切块的 `ChunkSizingEstimator` 与具体对话模型解耦：固定版本、可用 Unicode 字符类别和保守系数实现，输出只作范围提示。
 - 请求上下文预算优先使用 Hugging Face `tokenizers` 加载随包固定版本的 DeepSeek tokenizer artifact；若供应商 tokenizer 无法稳定离线分发，则使用标定过的保守估算器，并通过 provider usage 回写偏差。
 - 不使用 OpenAI 的 `tiktoken` 冒充 DeepSeek 精确 tokenizer；它只能作为近似，且必须明确版本和误差。
+
+### 7.2 语言提示
+
+- 文档语言优先读取且只信任首版支持范围内的可靠声明：`html lang`、`meta[name=language]` 或 `meta[http-equiv=content-language]` 中的 `zh-*`／`en-*`。
+- 声明缺失或不受支持时，对正文中的汉字与拉丁字母计算比例；信号不足、无法达到确定性阈值时输出 `unknown`，不能默认成中文。
+- block 语言优先根据 block 自身文本判断；样本不足时才回退到已知的文档 `zh`／`en` 语言，仍无法判断则保持 `unknown`。
+- 检测器名称和阈值随版本固定；本版为 `script-ratio-v1`。调整阈值或判定顺序必须提升版本并重新验证文档与 block 语言。
 
 ## 8. Agent 与云模型接入
 
@@ -429,4 +436,4 @@ trace writer 与主循环解耦：队列满或写盘失败只把 trace 标成 pa
 
 ---
 
-* 09 · 技术选型 v0.3 · 2026-10-20 · 状态：已审核，作为当前实现基线 *
+* 09 · 技术选型 v0.4 · 2026-10-20 · 状态：已审核，作为当前实现基线 *

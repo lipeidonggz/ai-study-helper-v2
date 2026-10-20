@@ -832,7 +832,7 @@ trace manifest 同时记录 `replay_scope=metadata|evidence|retrieval`：`metada
 | `char_start`／`char_end` | 在原文中的字符偏移；字符级可溯源 |
 | `content_hash` | 去重与版本核对 |
 | `context_token_estimate` | 由固定 `ChunkSizingEstimator` 产生的近似大小提示；供默认块目标、`SectionStats` 和范围规划。它不是运行时结果预算的精确依据，也不随对话模型切换保存多套版本 |
-| `lang` | zh／en／mixed（文档级或块级） |
+| `lang` | zh／en／mixed／unknown（文档级或块级）；`unknown` 表示语言信号不足，不能作为“无内容”或检索失败信号 |
 
 ### 11.3 文档级与章节级
 

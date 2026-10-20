@@ -8,22 +8,42 @@ version = "0.1.0"
 description = "Local backend sidecar for ai-study-helper v2"
 requires-python = ">=3.13,<3.14"
 dependencies = [
+  "charset-normalizer>=3.4,<4",
   "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
+  "lxml>=6,<7",
   "pydantic>=2.11,<3",
+  "readability-lxml>=0.8,<1",
   "tzdata>=2025.2",
   "uvicorn[standard]>=0.35,<1",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "httpx>=0.28,<1",
   "pyinstaller>=6,<7",
+  "pyright>=1.1.400,<2",
   "pytest>=8.4,<10",
+  "ruff>=0.12,<1",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q -p no:cacheprovider"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.pyright]
+include = ["app"]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.13"
+typeCheckingMode = "standard"
+reportMissingTypeStubs = false
 
 [tool.setuptools.packages.find]
 include = ["app*"]

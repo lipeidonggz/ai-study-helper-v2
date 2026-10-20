@@ -4,7 +4,6 @@ import httpx
 
 from app.main import create_app
 
-
 TOKEN = "test-launch-token"
 
 
