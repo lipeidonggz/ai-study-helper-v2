@@ -3,7 +3,7 @@ use std::{
     fs::OpenOptions,
     mem::size_of,
     net::TcpListener,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
@@ -17,6 +17,8 @@ use uuid::Uuid;
 
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
+#[cfg(not(debug_assertions))]
+use tauri::Manager;
 #[cfg(windows)]
 use windows_sys::Win32::{
     Foundation::{CloseHandle, HANDLE},
@@ -46,10 +48,19 @@ struct BackendStatus {
     message: Option<String>,
 }
 
+#[derive(Clone)]
+struct BackendLaunchSpec {
+    executable: PathBuf,
+    working_directory: PathBuf,
+    arguments: Vec<String>,
+    log_directory: PathBuf,
+}
+
 struct BackendManager {
     port: u16,
     token: String,
     job_handle: usize,
+    launch_spec: Mutex<Option<BackendLaunchSpec>>,
     child: Mutex<Option<Child>>,
     shutting_down: AtomicBool,
     restart_count: AtomicU32,
@@ -63,6 +74,7 @@ impl BackendManager {
             port,
             token,
             job_handle: create_job_object()?,
+            launch_spec: Mutex::new(None),
             child: Mutex::new(None),
             shutting_down: AtomicBool::new(false),
             restart_count: AtomicU32::new(0),
@@ -105,19 +117,15 @@ impl BackendManager {
     }
 
     fn spawn_child(&self) -> Result<Child, String> {
-        let backend_dir = backend_dir();
-        let python = python_path(&backend_dir);
-        if !python.is_file() {
-            return Err(format!(
-                "Python sidecar interpreter not found at {}",
-                python.display()
-            ));
-        }
-
-        let runtime_dir = backend_dir.join(".runtime");
-        std::fs::create_dir_all(&runtime_dir)
-            .map_err(|error| format!("failed to create runtime directory: {error}"))?;
-        let log_path = runtime_dir.join("sidecar.log");
+        let launch_spec = self
+            .launch_spec
+            .lock()
+            .expect("backend launch spec lock poisoned")
+            .clone()
+            .ok_or_else(|| "backend launch specification is unavailable".to_owned())?;
+        std::fs::create_dir_all(&launch_spec.log_directory)
+            .map_err(|error| format!("failed to create sidecar log directory: {error}"))?;
+        let log_path = launch_spec.log_directory.join("sidecar.log");
         let log = OpenOptions::new()
             .create(true)
             .append(true)
@@ -127,11 +135,10 @@ impl BackendManager {
             .try_clone()
             .map_err(|error| format!("failed to clone sidecar log: {error}"))?;
 
-        let mut command = Command::new(&python);
+        let mut command = Command::new(&launch_spec.executable);
         command
-            .current_dir(&backend_dir)
-            .arg("-m")
-            .arg("app.main")
+            .current_dir(&launch_spec.working_directory)
+            .args(&launch_spec.arguments)
             .arg("--port")
             .arg(self.port.to_string())
             .env("ASH_LAUNCH_TOKEN", &self.token)
@@ -168,6 +175,19 @@ impl BackendManager {
 
     fn start(self: &Arc<Self>, app: AppHandle) {
         self.set_status(&app, "starting", None);
+        match resolve_launch_spec(&app) {
+            Ok(launch_spec) => {
+                *self
+                    .launch_spec
+                    .lock()
+                    .expect("backend launch spec lock poisoned") = Some(launch_spec);
+            }
+            Err(error) => {
+                self.set_status(&app, "failed", Some(error));
+                self.start_monitor(app);
+                return;
+            }
+        }
         match self.spawn_child() {
             Ok(child) => {
                 *self.child.lock().expect("backend child lock poisoned") = Some(child);
@@ -368,15 +388,63 @@ impl Drop for BackendManager {
     }
 }
 
+#[cfg(debug_assertions)]
 fn backend_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../backend")
 }
 
-fn python_path(backend_dir: &Path) -> PathBuf {
+#[cfg(debug_assertions)]
+fn python_path(backend_dir: &std::path::Path) -> PathBuf {
     if let Ok(path) = std::env::var("ASH_BACKEND_PYTHON") {
         return PathBuf::from(path);
     }
     backend_dir.join(".venv").join("Scripts").join("python.exe")
+}
+
+#[cfg(debug_assertions)]
+fn resolve_launch_spec(_app: &AppHandle) -> Result<BackendLaunchSpec, String> {
+    let backend_dir = backend_dir();
+    let python = python_path(&backend_dir);
+    if !python.is_file() {
+        return Err(format!(
+            "Python sidecar interpreter not found at {}",
+            python.display()
+        ));
+    }
+
+    Ok(BackendLaunchSpec {
+        executable: python,
+        working_directory: backend_dir.clone(),
+        arguments: vec!["-m".to_owned(), "app.main".to_owned()],
+        log_directory: backend_dir.join(".runtime"),
+    })
+}
+
+#[cfg(not(debug_assertions))]
+fn resolve_launch_spec(app: &AppHandle) -> Result<BackendLaunchSpec, String> {
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("failed to resolve Tauri resource directory: {error}"))?;
+    let backend_dir = resource_dir.join("backend");
+    let executable = backend_dir.join("ai-study-helper-backend.exe");
+    if !executable.is_file() {
+        return Err(format!(
+            "packaged sidecar not found at {}",
+            executable.display()
+        ));
+    }
+    let log_directory = app
+        .path()
+        .app_log_dir()
+        .map_err(|error| format!("failed to resolve application log directory: {error}"))?;
+
+    Ok(BackendLaunchSpec {
+        executable,
+        working_directory: backend_dir,
+        arguments: Vec::new(),
+        log_directory,
+    })
 }
 
 fn free_loopback_port() -> Result<u16, String> {

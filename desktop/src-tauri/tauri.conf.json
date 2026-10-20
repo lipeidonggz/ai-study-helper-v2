@@ -5,7 +5,7 @@
   "identifier": "com.lipeidong.aistudyhelper",
   "build": {
     "beforeDevCommand": "corepack pnpm --dir ../frontend dev",
-    "beforeBuildCommand": "corepack pnpm --dir ../frontend build",
+    "beforeBuildCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/build-backend.ps1 && corepack pnpm --dir ../frontend build",
     "devUrl": "http://127.0.0.1:1420",
     "frontendDist": "../../frontend/dist"
   },
@@ -33,6 +33,9 @@
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.ico"
-    ]
+    ],
+    "resources": {
+      "resources/backend/": "backend/"
+    }
   }
 }

@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-产品需求、用例、架构、检索、入库、评测与技术选型已经完成。当前已实现第一个垂直切片：Tauri 启动并监管 FastAPI sidecar，完成本地鉴权、状态展示、有限重启和退出清理。
+产品需求、用例、架构、检索、入库、评测与技术选型已经完成。当前已实现桌面运行基础：Tauri 启动并监管 FastAPI sidecar，同时支持 PyInstaller one-folder release 分发、本地鉴权、有限重启和进程树清理。
 
 本项目采用 clean-room 方式重建。旧仓库只作为学习档案，不作为实现来源：
 
@@ -40,7 +40,8 @@ DeepSeek API / Qwen embedding API
 
 ```powershell
 py -3.13 -m venv backend\.venv
-backend\.venv\Scripts\python.exe -m pip install -e "backend[dev]"
+backend\.venv\Scripts\python.exe -m pip install -r backend\requirements.lock
+backend\.venv\Scripts\python.exe -m pip install -e backend --no-deps
 corepack pnpm install
 ```
 
@@ -59,10 +60,20 @@ corepack pnpm backend:test
 
 sidecar 开发日志写入 `backend/.runtime/sidecar.log`，Vite 日志写入 `frontend/.runtime/`；两个运行目录都不进入版本控制。
 
+构建 PyInstaller sidecar 与 release 桌面二进制：
+
+```powershell
+corepack pnpm backend:package
+corepack pnpm --dir desktop tauri build --no-bundle
+```
+
+release sidecar 位于 `desktop/src-tauri/target/release/backend/`，日志写入 Tauri 的应用日志目录。
+
 ## 设计文档
 
 - [设计文档与实现记录索引](docs/README.md)
 - [001 · 桌面 sidecar 最小启动链](docs/development/slices/001-desktop-sidecar-bootstrap.md)
+- [002 · PyInstaller one-folder sidecar 与 release 冒烟](docs/development/slices/002-packaged-sidecar.md)
 
 ## 开发原则
 

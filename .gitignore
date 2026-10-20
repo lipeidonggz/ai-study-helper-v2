@@ -14,6 +14,10 @@ dist/
 # Tauri / Rust
 target/
 desktop/src-tauri/gen/
+desktop/src-tauri/resources/backend/
+
+# Python packaging
+backend/build/
 
 # Local runtime data
 backend/.runtime/

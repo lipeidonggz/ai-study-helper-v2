@@ -7,8 +7,8 @@
 ## 当前状态
 
 - 阶段：实现阶段，第一个垂直切片已完成。
-- 实现状态：第一个桌面 sidecar 最小启动切片已完成。
-- 下一步：验证 PyInstaller one-folder sidecar 与 Windows 打包链。
+- 实现状态：桌面 sidecar 启动链与 PyInstaller release sidecar 已完成。
+- 下一步：验证 NSIS 安装、WebView2 引导、升级和卸载数据策略。
 
 ## 设计基线
 
@@ -43,7 +43,9 @@
 当前已记录：
 
 - [0001 · 文档与实现记录结构](decisions/0001-documentation-and-record-structure.md)
+- [0002 · 使用 PyInstaller one-folder 分发后端](decisions/0002-package-backend-as-pyinstaller-directory.md)
 - [001 · 桌面 sidecar 最小启动链（已完成）](development/slices/001-desktop-sidecar-bootstrap.md)
+- [002 · PyInstaller one-folder sidecar 与 release 冒烟（已完成）](development/slices/002-packaged-sidecar.md)
 
 ## 旧仓库
 

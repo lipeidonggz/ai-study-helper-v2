@@ -10,12 +10,14 @@ requires-python = ">=3.13,<3.14"
 dependencies = [
   "fastapi>=0.116,<1",
   "pydantic>=2.11,<3",
+  "tzdata>=2025.2",
   "uvicorn[standard]>=0.35,<1",
 ]
 
 [project.optional-dependencies]
 dev = [
   "httpx>=0.28,<1",
+  "pyinstaller>=6,<7",
   "pytest>=8.4,<10",
 ]
 

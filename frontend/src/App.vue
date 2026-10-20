@@ -182,10 +182,10 @@ onBeforeUnmount(() => {
 
     <section class="next-step">
       <p class="next-label">NEXT SLICE</p>
-      <h2>Windows 打包与 sidecar 发布链</h2>
+      <h2>Windows 安装与首次启动</h2>
       <p>
-        当前切片验证开发模式。下一步将把 Python 后端打成 PyInstaller
-        one-folder sidecar，验证正式应用能够随安装包启动、退出并清理进程。
+        Python 后端已经打包为 PyInstaller one-folder sidecar。下一步将验证
+        NSIS 安装器、WebView2 引导、按用户安装、卸载保留数据与升级回滚。
       </p>
     </section>
   </main>

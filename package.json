@@ -7,6 +7,7 @@
     "dev": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1",
     "build": "corepack pnpm --dir desktop tauri build",
     "check": "corepack pnpm --dir frontend check && corepack pnpm --dir desktop check",
+    "backend:package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-backend.ps1",
     "backend:test": "powershell -NoProfile -Command \"& (Resolve-Path 'backend\\.venv\\Scripts\\python.exe').Path -m pytest backend\\tests\""
   }
 }
