@@ -1,0 +1,169 @@
+<svg aria-labelledby="arch-title arch-desc" class="arch-svg" role="img" viewBox="0 0 1440 1000" xmlns="http://www.w3.org/2000/svg">
+<title id="arch-title">文档学习问答与评测台技术架构图</title>
+<desc id="arch-desc">产品桌面应用、独立评测台、Python 核心模块、SQLite 与 LanceDB 本地数据、以及 DeepSeek 和 Qwen 外部 API 的模块关系。</desc>
+<defs>
+<marker id="arrowhead" markerHeight="9" markerWidth="9" orient="auto" refX="7" refY="4.5">
+<path d="M0,0 L9,4.5 L0,9 Z" fill="#57606a"></path>
+</marker>
+<marker id="arrowhead-dash" markerHeight="9" markerWidth="9" orient="auto" refX="7" refY="4.5">
+<path d="M0,0 L9,4.5 L0,9 Z" fill="#8c959f"></path>
+</marker>
+</defs>
+<style>
+            .zone { fill:#ffffff; stroke:#8c959f; stroke-width:1.3; }
+            .zone-soft { fill:#f6f8fa; stroke:#d0d7de; stroke-width:1; }
+            .zone-title { fill:#24292f; font-size:16px; font-weight:700; }
+            .zone-note { fill:#57606a; font-size:12px; }
+            .module-title { fill:#24292f; font-size:14px; font-weight:700; }
+            .module-tech { fill:#57606a; font-size:11.5px; }
+            .ui { fill:#e8f0fe; stroke:#3b82f6; stroke-width:1.2; }
+            .svc { fill:#eaf7ee; stroke:#2da44e; stroke-width:1.2; }
+            .agent { fill:#f3e8ff; stroke:#8250df; stroke-width:1.2; }
+            .data { fill:#fff4e0; stroke:#bf6b04; stroke-width:1.2; }
+            .ext { fill:#fdecec; stroke:#cf222e; stroke-width:1.2; }
+            .opt { fill:#f6f8fa; stroke:#8c959f; stroke-width:1.2; stroke-dasharray:6 4; }
+            .flow { stroke:#57606a; stroke-width:1.6; fill:none; marker-end:url(#arrowhead); }
+            .flow-dash { stroke:#8c959f; stroke-width:1.4; fill:none; stroke-dasharray:6 5; marker-end:url(#arrowhead-dash); }
+            .edge-label { fill:#57606a; font-size:10.5px; }
+            .legend { fill:#57606a; font-size:11px; }
+          </style>
+<rect class="zone" height="790" rx="16" width="940" x="20" y="20"></rect>
+<text class="zone-title" x="42" y="48">产品桌面应用 · Windows x64</text>
+<text class="zone-note" x="42" y="68">用户只感知一个应用；所有内部组件由 Tauri 管理</text>
+<rect class="ui" height="68" rx="10" width="290" x="45" y="88"></rect>
+<text class="module-title" x="62" y="113">Vue 3 Web UI</text>
+<text class="module-tech" x="62" y="133">TypeScript · Vite · Pinia · Vue Query</text>
+<rect class="zone-soft" height="68" rx="10" width="250" x="360" y="88"></rect>
+<text class="module-title" x="378" y="113">Tauri 2 桌面壳</text>
+<text class="module-tech" x="378" y="133">WebView2 · 127.0.0.1 · per-launch token</text>
+<rect class="zone-soft" height="68" rx="10" width="300" x="635" y="88"></rect>
+<text class="module-title" x="653" y="113">本地 HTTP + SSE</text>
+<text class="module-tech" x="653" y="133">短请求 + 单向流；不开放局域网访问</text>
+<rect class="zone-soft" height="390" rx="12" width="890" x="45" y="178"></rect>
+<text class="zone-title" x="62" y="202">Python sidecar · PyInstaller one-folder</text>
+<text class="zone-note" x="62" y="220">FastAPI · Pydantic v2 · Uvicorn · SQLAlchemy 2</text>
+<rect class="svc" height="68" rx="9" width="200" x="70" y="240"></rect>
+<text class="module-title" x="86" y="265">FastAPI API</text>
+<text class="module-tech" x="86" y="285">REST · SSE · health</text>
+<rect class="agent" height="68" rx="9" width="250" x="300" y="240"></rect>
+<text class="module-title" x="316" y="265">AgentRuntime</text>
+<text class="module-tech" x="316" y="285">LangGraph · Harness · 预算 · 停止条件</text>
+<rect class="svc" height="68" rx="9" width="325" x="580" y="240"></rect>
+<text class="module-title" x="596" y="265">ModelGateway</text>
+<text class="module-tech" x="596" y="285">统一流式事件 · usage · 错误 · request ID</text>
+<rect class="svc" height="76" rx="9" width="200" x="70" y="340"></rect>
+<text class="module-title" x="86" y="365">HTML Ingestion</text>
+<text class="module-tech" x="86" y="385">httpx · lxml · readability</text>
+<text class="module-tech" x="86" y="401">S0–S6 · 快照发布</text>
+<rect class="svc" height="76" rx="9" width="250" x="300" y="340"></rect>
+<text class="module-title" x="316" y="365">5 个检索工具</text>
+<text class="module-tech" x="316" y="385">list / outline / search / blocks</text>
+<text class="module-tech" x="316" y="401">scan_term · 契约化 payload</text>
+<rect class="svc" height="76" rx="9" width="325" x="580" y="340"></rect>
+<text class="module-title" x="596" y="365">Retrieval</text>
+<text class="module-tech" x="596" y="385">dense exact search · BM25/FTS</text>
+<text class="module-tech" x="596" y="401">范围过滤 · RRF · 稳定排序</text>
+<rect class="svc" height="72" rx="9" width="200" x="70" y="448"></rect>
+<text class="module-title" x="86" y="473">后台任务</text>
+<text class="module-tech" x="86" y="493">SQLite job table · worker</text>
+<rect class="svc" height="72" rx="9" width="250" x="300" y="448"></rect>
+<text class="module-title" x="316" y="473">TraceEmitter</text>
+<text class="module-tech" x="316" y="493">OpenTelemetry 模型 · 本地 exporter</text>
+<rect class="opt" height="72" rx="9" width="325" x="580" y="448"></rect>
+<text class="module-title" x="596" y="473">会话与记忆 Port（预留）</text>
+<text class="module-tech" x="596" y="493">ConversationStore · MemoryPolicy</text>
+<rect class="data" height="105" rx="10" width="230" x="70" y="610"></rect>
+<text class="module-title" x="88" y="638">SQLite</text>
+<text class="module-tech" x="88" y="660">文档 / 章节 / block / manifest</text>
+<text class="module-tech" x="88" y="679">任务 / 会话 / 活动快照指针</text>
+<text class="module-tech" x="88" y="698">SQLAlchemy + Alembic</text>
+<rect class="data" height="105" rx="10" width="250" x="330" y="610"></rect>
+<text class="module-title" x="348" y="638">LanceDB</text>
+<text class="module-tech" x="348" y="660">dense 1024d 精确检索</text>
+<text class="module-tech" x="348" y="679">BM25 / FTS · 快照版本</text>
+<text class="module-tech" x="348" y="698">10 万 block 首版基线</text>
+<rect class="data" height="105" rx="10" width="295" x="610" y="610"></rect>
+<text class="module-title" x="628" y="638">文件系统</text>
+<text class="module-tech" x="628" y="660">SourceArtifact · ExtractedDocument</text>
+<text class="module-tech" x="628" y="679">trace JSONL · artifacts</text>
+<text class="module-tech" x="628" y="698">备份 / 诊断包</text>
+<path class="flow" d="M190 156 L190 240"></path>
+<path class="flow" d="M270 274 L300 274"></path>
+<path class="flow" d="M550 274 L580 274"></path>
+<path class="flow" d="M425 308 L425 340"></path>
+<path class="flow" d="M550 378 L580 378"></path>
+<path class="flow" d="M170 448 L170 416"></path>
+<path class="flow" d="M70 378 L55 378 L55 660 L70 660"></path>
+<path class="flow" d="M905 378 L920 378 L920 660 L580 660"></path>
+<path class="flow" d="M425 520 L425 540 L750 540 L750 610"></path>
+<text class="edge-label" x="278" y="267">调用</text>
+<text class="edge-label" x="556" y="267">生成</text>
+<text class="edge-label" x="432" y="330">工具</text>
+<text class="edge-label" x="754" y="602">trace</text>
+<rect class="zone" height="790" rx="16" width="440" x="980" y="20"></rect>
+<text class="zone-title" x="1002" y="48">评测台 · 独立开发工具</text>
+<text class="zone-note" x="1002" y="68">独立 Tauri 窗口、进程和数据根；不进入用户产品安装包</text>
+<rect class="ui" height="70" rx="10" width="390" x="1005" y="90"></rect>
+<text class="module-title" x="1023" y="116">Vue 3 评测 Web UI</text>
+<text class="module-tech" x="1023" y="137">套件 · 运行台 · 矩阵 · trace · 诊断 · 基线</text>
+<rect class="svc" height="68" rx="10" width="390" x="1005" y="198"></rect>
+<text class="module-title" x="1023" y="223">Evaluation Service</text>
+<text class="module-tech" x="1023" y="243">FastAPI · 预检 · 调度 · 预算 · SSE 进度</text>
+<rect class="agent" height="88" rx="9" width="185" x="1005" y="305"></rect>
+<text class="module-title" x="1020" y="330">ExecutionRun</text>
+<text class="module-tech" x="1020" y="350">Attempt · trace_status</text>
+<text class="module-tech" x="1020" y="370">并发 / 延迟分流</text>
+<rect class="agent" height="88" rx="9" width="185" x="1210" y="305"></rect>
+<text class="module-title" x="1225" y="330">EvaluationRevision</text>
+<text class="module-tech" x="1225" y="350">Checker · Judge</text>
+<text class="module-tech" x="1225" y="370">聚合规则 · 报告投影</text>
+<rect class="agent" height="78" rx="9" width="390" x="1005" y="430"></rect>
+<text class="module-title" x="1023" y="456">复用同一 Agent 核心</text>
+<text class="module-tech" x="1023" y="477">AgentRuntime · Tools · ModelGateway · 契约</text>
+<text class="module-tech" x="1023" y="495">相同代码，独立运行；不复制另一条问答链</text>
+<rect class="data" height="86" rx="9" width="185" x="1005" y="548"></rect>
+<text class="module-title" x="1020" y="574">eval.db</text>
+<text class="module-tech" x="1020" y="594">Suite / Case / Criterion</text>
+<text class="module-tech" x="1020" y="614">Judgment / Baseline</text>
+<rect class="data" height="86" rx="9" width="185" x="1210" y="548"></rect>
+<text class="module-title" x="1225" y="574">评测现场</text>
+<text class="module-tech" x="1225" y="594">traces / artifacts</text>
+<text class="module-tech" x="1225" y="614">完整或分级保留</text>
+<rect class="zone-soft" height="68" rx="9" width="390" x="1005" y="674"></rect>
+<text class="module-title" x="1023" y="699">只读冻结 collection 快照</text>
+<text class="module-tech" x="1023" y="719">suite 共享同一现场；写产品数据不进入评测库</text>
+<path class="flow" d="M1200 160 L1200 198"></path>
+<path class="flow" d="M1200 266 L1200 305"></path>
+<path class="flow" d="M1098 393 L1098 430"></path>
+<path class="flow" d="M1302 393 L1302 430"></path>
+<path class="flow" d="M1098 508 L1098 548"></path>
+<path class="flow" d="M1302 508 L1302 548"></path>
+<path class="flow" d="M1200 634 L1200 674"></path>
+<path class="flow-dash" d="M580 662 L940 662 L940 708 L1005 708"></path>
+<text class="edge-label" x="944" y="682">固定快照</text>
+<rect class="zone-soft" height="140" rx="16" width="1400" x="20" y="840"></rect>
+<text class="zone-title" x="42" y="866">外部网络边界</text>
+<text class="zone-note" x="42" y="886">仅连接用户配置的云端模型；不提供远程访问</text>
+<rect class="ext" height="70" rx="10" width="300" x="310" y="885"></rect>
+<text class="module-title" x="330" y="911">DeepSeek API</text>
+<text class="module-tech" x="330" y="932">OpenAI Python SDK · deepseek-flash</text>
+<rect class="ext" height="70" rx="10" width="310" x="640" y="885"></rect>
+<text class="module-title" x="660" y="911">阿里云百炼 · Qwen Embedding</text>
+<text class="module-tech" x="660" y="932">DashScope SDK · qwen3.7-text-embedding · 1024d</text>
+<rect class="opt" height="70" rx="10" width="320" x="980" y="885"></rect>
+<text class="module-title" x="1000" y="911">LangSmith / 其他 tracing</text>
+<text class="module-tech" x="1000" y="932">可选 exporter；不是运行前提</text>
+<path class="flow-dash" d="M900 308 L940 308 L940 855 L640 855 L640 885"></path>
+<path class="flow-dash" d="M640 855 L475 855 L475 885"></path>
+<text class="edge-label" x="944" y="835">HTTPS</text>
+<rect class="ui" height="12" rx="2" width="12" x="1060" y="736"></rect>
+<text class="legend" x="1080" y="747">UI</text>
+<rect class="svc" height="12" rx="2" width="12" x="1120" y="736"></rect>
+<text class="legend" x="1140" y="747">服务</text>
+<rect class="agent" height="12" rx="2" width="12" x="1180" y="736"></rect>
+<text class="legend" x="1200" y="747">Agent／评测</text>
+<rect class="data" height="12" rx="2" width="12" x="1270" y="736"></rect>
+<text class="legend" x="1290" y="747">本地数据</text>
+<rect class="opt" height="12" rx="2" width="12" x="1360" y="736"></rect>
+<text class="legend" x="1380" y="747">可选</text>
+</svg>

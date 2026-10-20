@@ -1,0 +1,89 @@
+<svg aria-labelledby="ingest-flow-title ingest-flow-desc" role="img" viewBox="0 0 900 430" xmlns="http://www.w3.org/2000/svg"><style>.stage { fill:#eef6ff; stroke:#79b8ff; stroke-width:1.5; }
+.external { fill:#fff8c5; stroke:#d4a72c; stroke-width:1.5; }
+.output { fill:#ecfdf5; stroke:#2da44e; stroke-width:1.5; }
+.main-edge { fill:none; stroke:#0969da; stroke-width:2.4; }
+.dep-edge { fill:none; stroke-width:1.5; stroke-dasharray:5 4; opacity:0.86; }
+.dep-source { stroke:#2da44e; }
+.dep-extracted { stroke:#8250df; }
+.dep-doc { stroke:#bf3989; }
+.dep-section { stroke:#0e7490; }
+.dep-bundle { stroke:#d97706; stroke-width:1.8; }
+.dep-source-head { fill:#2da44e; }
+.dep-extracted-head { fill:#8250df; }
+.dep-doc-head { fill:#bf3989; }
+.dep-section-head { fill:#0e7490; }
+.dep-bundle-head { fill:#d97706; }
+text { font-family:"Segoe UI","Microsoft YaHei",sans-serif; fill:#1f2328; }
+.stage-title { font-size:12px; font-weight:700; }
+.stage-note, .edge-note { font-size:10px; fill:#656d76; }</style>
+<title id="ingest-flow-title">HTML 入库阶段数据流向</title>
+<desc id="ingest-flow-desc">实线表示主数据链；不同颜色的虚线分别表示 SourceArtifact、ExtractedDocument、DocumentVersion 和 SectionTree 的跨阶段复用；橙色总线表示 S6 汇总对账输入。</desc>
+<defs>
+<marker id="arrow-main" markerHeight="7" markerWidth="7" orient="auto-start-reverse" refX="9" refY="5" viewBox="0 0 10 10">
+<path d="M0,0 L10,5 L0,10 z" fill="#0969da"></path>
+</marker>
+</defs>
+<!-- secondary direct dependencies -->
+<path class="dep-edge dep-source" d="M85 113 C85 165 425 165 425 113"></path>
+<polygon class="dep-source-head" points="425,113 420,121 430,121"></polygon>
+<path class="dep-edge dep-extracted" d="M255 113 C255 180 595 180 595 113"></path>
+<polygon class="dep-extracted-head" points="595,113 590,121 600,121"></polygon>
+<path class="dep-edge dep-extracted" d="M255 113 C255 195 785 180 785 113"></path>
+<polygon class="dep-extracted-head" points="785,113 780,121 790,121"></polygon>
+<path class="dep-edge dep-doc" d="M425 113 C425 185 830 170 830 220"></path>
+<polygon class="dep-doc-head" points="830,220 822,213 838,213"></polygon>
+<path class="dep-edge dep-section" d="M595 113 C595 180 720 170 720 220"></path>
+<polygon class="dep-section-head" points="720,220 712,213 728,213"></polygon>
+<!-- bundle S2/S3/S4 artifact references into one S6 dependency -->
+<line class="dep-edge dep-bundle" x1="425" x2="425" y1="113" y2="140"></line>
+<line class="dep-edge dep-bundle" x1="595" x2="595" y1="113" y2="140"></line>
+<line class="dep-edge dep-bundle" x1="760" x2="760" y1="113" y2="140"></line>
+<line class="dep-edge dep-bundle" x1="425" x2="760" y1="140" y2="140"></line>
+<path class="dep-edge dep-bundle" d="M640 140 C640 180 500 190 500 220"></path>
+<polygon class="dep-bundle-head" points="500,220 492,213 508,213"></polygon>
+<text class="edge-note" text-anchor="middle" x="592" y="132">S6 对账输入</text>
+<!-- main path -->
+<line class="main-edge" marker-end="url(#arrow-main)" x1="150" x2="190" y1="84" y2="84"></line>
+<line class="main-edge" marker-end="url(#arrow-main)" x1="320" x2="360" y1="84" y2="84"></line>
+<line class="main-edge" marker-end="url(#arrow-main)" x1="490" x2="530" y1="84" y2="84"></line>
+<line class="main-edge" marker-end="url(#arrow-main)" x1="660" x2="700" y1="84" y2="84"></line>
+<line class="main-edge" marker-end="url(#arrow-main)" x1="785" x2="785" y1="113" y2="220"></line>
+<line class="main-edge" marker-end="url(#arrow-main)" x1="700" x2="530" y1="249" y2="249"></line>
+<line class="main-edge" marker-end="url(#arrow-main)" x1="445" x2="510" y1="278" y2="355"></line>
+<line class="main-edge" marker-end="url(#arrow-main)" x1="190" x2="360" y1="249" y2="249"></line>
+<!-- stages -->
+<rect class="stage" height="58" rx="9" width="130" x="20" y="55"></rect>
+<text class="stage-title" text-anchor="middle" x="85" y="78">S0 获取并留痕</text>
+<text class="stage-note" text-anchor="middle" x="85" y="95">文件 / HTTP（静态 / SSR）</text>
+<rect class="stage" height="58" rx="9" width="130" x="190" y="55"></rect>
+<text class="stage-title" text-anchor="middle" x="255" y="78">S1 提取</text>
+<text class="stage-note" text-anchor="middle" x="255" y="95">规范化内容 AST</text>
+<rect class="stage" height="58" rx="9" width="130" x="360" y="55"></rect>
+<text class="stage-title" text-anchor="middle" x="425" y="78">S2 建档</text>
+<text class="stage-note" text-anchor="middle" x="425" y="95">身份 + 版本</text>
+<rect class="stage" height="58" rx="9" width="130" x="530" y="55"></rect>
+<text class="stage-title" text-anchor="middle" x="595" y="78">S3 建树</text>
+<text class="stage-note" text-anchor="middle" x="595" y="95">章节 path + 节点归属</text>
+<rect class="stage" height="58" rx="9" width="170" x="700" y="55"></rect>
+<text class="stage-title" text-anchor="middle" x="785" y="78">S4 切块与 sizing</text>
+<text class="stage-note" text-anchor="middle" x="785" y="95">BlockSet + SectionStats</text>
+<rect class="stage" height="58" rx="9" width="170" x="700" y="220"></rect>
+<text class="stage-title" text-anchor="middle" x="785" y="243">S5 建索引</text>
+<text class="stage-note" text-anchor="middle" x="785" y="260">Qwen dense + BM25</text>
+<rect class="stage" height="58" rx="9" width="170" x="360" y="220"></rect>
+<text class="stage-title" text-anchor="middle" x="445" y="243">S6 封装与发布</text>
+<text class="stage-note" text-anchor="middle" x="445" y="260">对账屏障 → CAS 切指针</text>
+<rect class="external" height="58" rx="9" width="170" x="20" y="220"></rect>
+<text class="stage-title" text-anchor="middle" x="105" y="243">当前活动指针</text>
+<text class="stage-note" text-anchor="middle" x="105" y="260">S6 的额外输入</text>
+<rect class="output" height="50" rx="9" width="300" x="360" y="355"></rect>
+<text class="stage-title" text-anchor="middle" x="510" y="376">ActiveCollectionPointer</text>
+<text class="stage-note" text-anchor="middle" x="510" y="393">新请求读新快照；旧请求固定旧快照</text>
+<!-- main-edge labels -->
+<text class="edge-note" text-anchor="middle" x="170" y="44">SourceArtifact</text>
+<text class="edge-note" text-anchor="middle" x="340" y="44">ExtractedDocument</text>
+<text class="edge-note" text-anchor="middle" x="510" y="44">DocumentVersion</text>
+<text class="edge-note" text-anchor="middle" x="680" y="44">SectionTree + nodes</text>
+<text class="edge-note" text-anchor="middle" transform="rotate(90 794 166)" x="794" y="166">BlockSet</text>
+<text class="edge-note" text-anchor="middle" x="615" y="240">IndexBundle</text>
+</svg>

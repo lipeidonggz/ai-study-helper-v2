@@ -26,15 +26,16 @@ DeepSeek API / Qwen embedding API
 
 ## 设计基线
 
-- [产品需求](memory/0052-product-requirements.html)
-- [Agent 开发方法](memory/0053-how-to-build-an-agent.html)
-- [用例与金标准](memory/0054-cases-and-gold-standard.html)
-- [架构设计方法](memory/0055-architecture-design-method.html)
-- [存储与检索策略](memory/0056-architecture-part1-storage.html)
-- [检索侧设计](memory/0057-retrieval-pure-agent.html)
-- [HTML 入库设计](memory/0058-html-ingestion-design.html)
-- [评测台设计](memory/0059-evaluation-console-design.html)
-- [技术选型](memory/0060-technology-selection.html)
+- [设计文档索引](docs/README.md)
+- [01 · 产品需求](docs/design/01-product-requirements.md)
+- [02 · Agent 开发方法](docs/design/02-how-to-build-an-agent.md)
+- [03 · 用例与金标准](docs/design/03-cases-and-gold-standard.md)
+- [04 · 架构设计方法](docs/design/04-architecture-design-method.md)
+- [05 · 存储与检索策略](docs/design/05-storage-and-retrieval-strategy.md)
+- [06 · 检索侧设计](docs/design/06-retrieval-pure-agent.md)
+- [07 · HTML 入库设计](docs/design/07-html-ingestion-design.md)
+- [08 · 评测台设计](docs/design/08-evaluation-console-design.md)
+- [09 · 技术选型](docs/design/09-technology-selection.md)
 
 ## 开发原则
 
