@@ -26,6 +26,24 @@
 
 01–09 已于 2026-10-20 审核，并作为当前实现基线。后续修改必须保留变更原因，同时更新本索引。
 
+## 记录分类
+
+实现阶段不在设计基线中追加流水账。不同类型的记录使用不同入口：
+
+| 位置 | 用途 | 命名 |
+| --- | --- | --- |
+| [`design/`](design/) | 已审核的产品与架构设计基线 | `NN-短描述.md` |
+| [`decisions/`](decisions/) | 技术取舍与 ADR | `NNNN-短描述.md` |
+| `development/slices/` | 垂直切片的实现记录 | `NNN-短描述.md` |
+| `development/experiments/` | 性能、质量和兼容性实验 | `YYYY-MM-DD-短描述.md` |
+| `operations/` | 安装、排障、备份与升级说明 | 按使用场景命名 |
+
+临时任务、进行中状态和开放式讨论优先放在 GitHub Issue、Project 或 PR；只有形成长期结论后才整理进 `docs/`。
+
+当前已记录：
+
+- [0001 · 文档与实现记录结构](decisions/0001-documentation-and-record-structure.md)
+
 ## 旧仓库
 
 旧学习项目保留在 [lipeidonggz/ai-study-helper](https://github.com/lipeidonggz/ai-study-helper)。其中的代码、测试、数据与历史结论仅作参考，不构成本仓库的实现输入。
