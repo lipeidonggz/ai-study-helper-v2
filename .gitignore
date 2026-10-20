@@ -13,8 +13,11 @@ dist/
 
 # Tauri / Rust
 target/
+desktop/src-tauri/gen/
 
-# Local data and secrets
+# Local runtime data
+backend/.runtime/
+frontend/.runtime/
 data/
 .env
 .env.*

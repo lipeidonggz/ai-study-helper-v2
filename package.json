@@ -1,0 +1,12 @@
+{
+  "name": "ai-study-helper-v2",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.18.3",
+  "scripts": {
+    "dev": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1",
+    "build": "corepack pnpm --dir desktop tauri build",
+    "check": "corepack pnpm --dir frontend check && corepack pnpm --dir desktop check",
+    "backend:test": "powershell -NoProfile -Command \"& (Resolve-Path 'backend\\.venv\\Scripts\\python.exe').Path -m pytest backend\\tests\""
+  }
+}

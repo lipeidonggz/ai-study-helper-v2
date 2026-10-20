@@ -6,9 +6,9 @@
 
 ## 当前状态
 
-- 阶段：设计完成，进入实现启动。
-- 实现状态：尚未开始业务代码。
-- 下一步：建立 Tauri + Vue + Python sidecar 的最小可运行骨架。
+- 阶段：实现阶段，第一个垂直切片已完成。
+- 实现状态：第一个桌面 sidecar 最小启动切片已完成。
+- 下一步：验证 PyInstaller one-folder sidecar 与 Windows 打包链。
 
 ## 设计基线
 
@@ -43,6 +43,7 @@
 当前已记录：
 
 - [0001 · 文档与实现记录结构](decisions/0001-documentation-and-record-structure.md)
+- [001 · 桌面 sidecar 最小启动链（已完成）](development/slices/001-desktop-sidecar-bootstrap.md)
 
 ## 旧仓库
 
