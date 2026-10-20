@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>0056 · 架构设计 第一部分：存储结构与检索策略</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <style>
+    .muted { color: var(--muted); }
+    .ok { color: #1a7f37; font-weight: 600; }
+    .no { color: #cf222e; font-weight: 600; }
+    .warn { color: #9a6700; font-weight: 600; }
+    .tbl-wide { font-size: 0.85em; }
+    .tbl-wide td, .tbl-wide th { vertical-align: top; }
+    .key { background: #eef6ff; border-left: 4px solid #3b82f6; border-radius: 6px;
+           padding: 10px 14px; margin: 10px 0; }
+    code { word-break: break-all; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="page-head">
+      <h1>0056 · 架构设计 第一部分：存储结构与检索策略</h1>
+      <p class="subtitle">
+        这是<a href="0053-how-to-build-an-agent.html">0053</a>五步流程<b>第 ④ 步（架构决策）</b>的第一个产出。
+        方法与质量属性盘点见 <a href="0055-architecture-design-method.html">0055</a>。
+      </p>
+      <p class="subtitle">
+        <b>状态：草案，待沛东审核。</b>
+        输入：<a href="0052-product-requirements.html">0052 产品需求</a>、
+        <a href="0054-cases-and-gold-standard.html">0054 用例与金标准</a>（18 条）。
+      </p>
+      <p class="subtitle"><a href="index.html">← 返回记忆主页</a></p>
+    </header>
+
+    <section class="card">
+      <h2>1. 为什么先定存储结构</h2>
+      <p>
+        这个产品对用户只有两个功能：<b>把文档加进来</b>，和<b>基于这些文档问答</b>。
+        两个功能共享同一个底层选择——<b>文档怎么拆、怎么存</b>。这个选择不先定，后面的模块划分、接口、索引都没有落点。
+      </p>
+      <p>
+        而存储不能由"文档加入"一侧来定：文档加入只要求"能把内容读进来"，
+        真正决定结构的是<b>问答要从存储里取出什么</b>。所以顺序是：
+      </p>
+      <div class="key">
+        <b>问答需要检索出什么 → 决定检索要具备什么能力 → 决定存储要支持什么。</b>
+      </div>
+      <p>
+        下面的推导就沿这条线走：先看 18 条用例对检索提出了什么要求，再看候选存储各自有什么特性，
+        最后自然落到"第一阶段用哪一种"。
+      </p>
+      <p class="muted">文档加入侧的解析、切分、清洗属于<b>入库设计</b>，本部分不展开；这里只从问答侧反推存储要支持什么。</p>
+    </section>
+
+    <section class="card">
+      <h2>2. 18 条用例需要什么样的检索</h2>
+      <p>
+        判断标准是：<b>含答案的目标块，在验证语料（10 篇同域文章）里能不能进入 top-k</b>；对"有没有"这一类，还要能<b>确认"确实没有"</b>。
+        能进，说明一次检索就够；进不去，或需要证否，就说明还需要额外的手段。
+        <b>10 篇只是验证集，不是产品规模上限</b>——候选方案必须在语料变大时依然成立。
+      </p>
+      <table class="tbl-wide">
+        <thead><tr><th>能力</th><th>用例</th><th>检索要做什么</th></tr></thead>
+        <tbody>
+          <tr><td><b>单点事实</b></td><td>2、3、10、12</td><td>用专名或数字锚，一次命中目标块</td></tr>
+          <tr><td><b>单点但需覆盖多块</b></td><td>4、5</td><td>同一节内的几个块要一起拿到</td></tr>
+          <tr><td><b>证否与归属</b></td><td>1、14</td><td>要能确认"没有"，要能核对原文用词</td></tr>
+          <tr><td><b>跨源对照</b></td><td>6、8、9、11</td><td>多篇分别取证据，再合并</td></tr>
+          <tr><td><b>要全／枚举／整节</b></td><td>7、13、15</td><td>按范围取全，并检查有没有漏</td></tr>
+          <tr><td><b>消歧</b></td><td>16</td><td>向用户澄清</td></tr>
+          <tr><td><b>不涉及检索</b></td><td>17、18</td><td>路由与生成契约</td></tr>
+        </tbody>
+      </table>
+      <p>
+        把这张表读成一句话：<b>单点类靠"一次命中"，其余靠"多轮 ＋ 范围限定 ＋ 覆盖检查"。</b>
+        单点类有专名或数字可锚，一次混合检索（向量＋关键词）就能进 top-k；
+        跨源、要全、整节、证否、消歧这几类，单次 top-k 天然不可靠——要么漏块、要么漏篇，要么根本无法证否。
+      </p>
+      <p>
+        所以检索不能只有一种用法。它需要在同一套索引上有两条路线：
+        <b>经典 RAG</b>（一次检索 → 生成）覆盖单点类；<b>Agentic RAG</b>（理解／澄清 → 规划 → 按范围检索 → 覆盖检查 → 再检索 → 生成）覆盖其余。
+        这不是两套系统，而是同一套数据上的两种调用方式。
+      </p>
+      <p>把上面的能力要求，加上产品红线，可以归并成五条对存储的检索要求：</p>
+      <table class="tbl-wide">
+        <thead><tr><th>#</th><th>要求</th><th>来自哪里</th></tr></thead>
+        <tbody>
+          <tr><td>R1</td><td><b>可溯源</b>：每个说法能回到原文位置</td><td>Q2 红线——自称来自文档的必须真能找到</td></tr>
+          <tr><td>R2</td><td><b>范围限定</b>：能按篇、按节取</td><td>跨源与要全类（6、7、8、9、11、13、15）</td></tr>
+          <tr><td>R3</td><td><b>语义召回</b>：能按意思找——材料中英混合、查询也可能中英混合</td><td>单点与解释类（2、4、5）</td></tr>
+          <tr><td>R4</td><td><b>精确锚点</b>：数字、专名能精确命中</td><td>83%、MCP、gVisor、AGENTS.md 这类锚</td></tr>
+          <tr><td>R5</td><td><b>按范围取全</b>：能把某个范围的全部块取出来，而不是只取 top-k</td><td>要全／枚举／整节（7、13、15）</td></tr>
+        </tbody>
+      </table>
+      <p class="muted">R1 不是从 18 条用例里长出来的，而是产品红线；其余四条来自第 2 节的能力归组。</p>
+    </section>
+
+    <section class="card">
+      <h2>3. 候选存储有哪些，为什么是这三个</h2>
+      <p>候选不是拍脑袋挑的。把"知识以什么形态存、检索怎么取"展开，能想到九种做法：</p>
+      <table class="tbl-wide">
+        <thead><tr><th>形态</th><th>具体做法</th><th>是否进入比较</th><th>理由</th></tr></thead>
+        <tbody>
+          <tr><td>原文直读</td><td>查询时把全文／全库放进上下文；或由 agent 逐篇读</td><td class="no">不进入</td><td>成本随语料线性增长、扩展性显然不够；10 篇只是验证集，不是产品规模</td></tr>
+          <tr><td>块级索引</td><td>向量、关键词，或两者混合</td><td class="ok">进入</td><td>最直接支撑单点检索</td></tr>
+          <tr><td>摘要树（RAPTOR 类）</td><td>层级摘要</td><td class="muted">并入 Wiki 一族</td><td>同属"预编译摘要"，差别只在层级</td></tr>
+          <tr><td>Wiki</td><td>概念／实体／summary 页 ＋ 页间链接</td><td class="ok">进入</td><td>预编译，面状覆盖</td></tr>
+          <tr><td>严格图</td><td>预先定义实体类型与关系约束的图</td><td class="no">不进入</td><td>需要用户对资料所属领域足够熟悉才能建模与使用；目标用户是学习者，天然冲突</td></tr>
+          <tr><td>非严格图（GraphRAG）</td><td>自动抽取实体与关系建边</td><td class="ok">进入</td><td>关系／枚举</td></tr>
+          <tr><td>结构化存储</td><td>关系库／表格</td><td class="no">不进入</td><td>语料是非结构化文本；表格化会丢原文，无法溯源</td></tr>
+          <tr><td>参数化记忆</td><td>微调／蒸馏进模型</td><td class="no">不进入</td><td>用户文档是动态的；无法溯源</td></tr>
+          <tr><td>缓存／会话记忆</td><td>运行时缓存</td><td class="no">不进入</td><td>正交，不是知识存储</td></tr>
+        </tbody>
+      </table>
+      <p>剔除五种：三种不适用或正交（结构化存储／参数化记忆／缓存）、原文直读（成本与扩展性不成立）、严格图（与学习者目标冲突）；摘要树并入 Wiki 一族。剩下三种进入特性比较：</p>
+      <table class="tbl-wide">
+        <thead><tr><th>候选</th><th>是什么</th><th>特性（成本 ＋ 支持的检索方式）</th></tr></thead>
+        <tbody>
+
+          <tr>
+            <td><b>增强的向量块</b></td>
+            <td>块存储 ＋ 元数据（篇／节／来源／位置）＋ 向量索引 ＋ 倒排索引</td>
+            <td><b>成本</b>：最低——入库即用，无额外编译。<br><b>检索方式</b>：向量（语义、跨语言）＋ 关键词（数字／专名）＋ 元数据范围过滤；可承载经典 RAG 与 Agentic RAG。</td>
+          </tr>
+          <tr>
+            <td><b>预编译 Wiki</b></td>
+            <td>概念／实体／summary 页 ＋ 页间链接</td>
+            <td><b>成本</b>：高——编译 token 约为原文 10 倍（WeKnora 实验量级）。<br><b>检索方式</b>：按页／按链接遍历，适合面状覆盖与跨页概念归集；页内是改写，回源需额外建立"页面段落 → 块"的引用。</td>
+          </tr>
+          <tr>
+            <td><b>非严格图（GraphRAG）</b></td>
+            <td>自动抽取实体与关系建边</td>
+            <td><b>成本</b>：高——要做实体／关系抽取与建边。<br><b>检索方式</b>：枚举、跨源连接、关系查询；效果取决于抽取质量。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>4. 用检索要求逐条对照</h2>
+      <p>把第 2 节归纳出的五条要求（R1–R5），逐条压到三种候选上：</p>
+      <table class="tbl-wide">
+        <thead><tr><th>检索要求</th><th>增强的向量块</th><th>预编译 Wiki</th><th>非严格图（GraphRAG）</th></tr></thead>
+        <tbody>
+          <tr><td><b>R1 可溯源</b></td><td class="ok">✔ 块级 provenance</td><td class="warn">△ 页内改写，需建页→块引用</td><td class="warn">△ 节点／边需回指块</td></tr>
+          <tr><td><b>R2 范围限定</b></td><td class="ok">✔ 元数据过滤</td><td class="warn">△ 按页组织</td><td class="warn">△ 无原生范围过滤，只能靠实体／关系间接圈定</td></tr>
+          <tr><td><b>R3 语义召回</b></td><td class="ok">✔ 向量索引</td><td class="warn">△ 页面要另建索引</td><td class="warn">△ 需实体归一</td></tr>
+          <tr><td><b>R4 精确锚点</b></td><td class="ok">✔ 倒排索引</td><td class="warn">△ 取决于是否保留原词</td><td class="warn">△ 实体可、数字弱</td></tr>
+          <tr><td><b>R5 按范围取全</b></td><td class="ok">✔ 按元数据遍历</td><td class="warn">△ 页集合未必对应原文全集</td><td class="warn">△ 可枚举，但覆盖依赖抽取质量</td></tr>
+          <tr><td><b>成本随语料增长</b></td><td class="ok">基本不变（按查询取块）</td><td class="warn">一次性编译，约 10 倍 token</td><td class="no">最高：实体／关系抽取与建边，且抽取质量不稳定</td></tr>
+        </tbody>
+      </table>
+      <p>
+        结果是：<b>增强的向量块是唯一在满足全部五条要求的同时、把成本与语料规模解耦的候选。</b>
+        Wiki 和图各自能补上一两项（Wiki 的面状覆盖、图的关系与枚举），
+        但都建立在额外编译成本上，而且都多出一个共同的缺口——<b>回源</b>。
+      </p>
+      <p>
+        更关键的是：<b>18 条用例里没有一条要求"预编译的知识形态"。</b>
+        它们要的是"把块取对、取全、取准"——这正是增强向量块 ＋ Agentic 检索能做的事。
+      </p>
+    </section>
+
+    <section class="card">
+      <h2>5. 结论：第一阶段的存储与检索策略</h2>
+      <table class="tbl-wide">
+        <thead><tr><th>#</th><th>决策</th><th>依据</th><th>代价与风险</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>D1</td>
+            <td><b>存储＝增强的向量块</b>（块 ＋ 元数据 ＋ 向量 ＋ 倒排）</td>
+            <td>唯一在最低成本下满足 R1–R5 的候选</td>
+            <td>要维护双索引一致性；元数据质量直接决定范围检索</td>
+          </tr>
+          <tr>
+            <td>D2</td>
+            <td><b>检索＝经典 RAG ＋ Agentic RAG</b>，跑在同一套块索引上</td>
+            <td>单点靠一次命中；跨源／要全／证否／消歧靠多轮</td>
+            <td>多轮带来延迟与 token 成本，需要收敛与预算控制</td>
+          </tr>
+          <tr>
+            <td>D3</td>
+            <td><b>Wiki 与图不做第一阶段的硬依赖</b></td>
+            <td>18 条用例不要求预编译形态；两者成本高且回源要补</td>
+            <td>若缺口提前出现，补编译会打断节奏——需保留接入口</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>
+        一句话：<b>先用"块 ＋ 元数据 ＋ 双索引"把取块做对，再用 Agentic 循环把"取全、跨源、证否"补齐；预编译等实测缺口出现再说。</b>
+        严格图在 §3 已排除：它要求用户对资料所属领域足够熟悉，与"学习者"目标天然冲突；成本是第二重理由。非严格图的优势（枚举、跨源、关系）已能由"块 ＋ 元数据 ＋ Agentic"部分覆盖。
+      </p>
+    </section>
+
+    <section class="card">
+      <h2>6. 什么情况下再引入 Wiki 或图</h2>
+      <table class="tbl-wide">
+        <thead><tr><th>演进</th><th>接在哪</th><th>触发条件</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><b>Wiki</b></td>
+            <td>预编译层 ＋ 检索的一条新通道</td>
+            <td>实测出现"面状覆盖／跨页概念归集"缺口，且块＋元数据＋Agentic 反复解决不了；<b>接入时必须带"页面段落 → 块"的引用</b>，否则可溯源红线在新路径上失效</td>
+          </tr>
+          <tr>
+            <td><b>图</b></td>
+            <td>预编译层 ＋ 关系查询通道</td>
+            <td>关系型／条件取全类持续失败，且接受抽取与编译成本</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>7. 质量属性核验（对照 0055）</h2>
+      <p>把 <a href="0055-architecture-design-method.html">0055</a> 表 A（Q1–Q8）与表 B（10 条）逐条对照本决策。</p>
+      <div class="key">
+        <b>这里只做冲突检查</b>：看这个决策会不会和质量属性打架。<b>不冲突就算通过</b>——它不负责证明每条属性都被满足；满足与否，要靠后续的模块与机制去落实。
+      </div>
+      <table class="tbl-wide">
+        <thead><tr><th>质量属性</th><th>结论</th><th>依据与缺口</th></tr></thead>
+        <tbody>
+          <tr><td><b>Q1 正确性</b></td><td class="warn">⚠️ 部分</td><td>覆盖性由 R5 ＋ Agentic 支撑；<b>排除性不归存储</b>，靠判官与生成契约</td></tr>
+          <tr><td><b>Q2 可信性（可溯源）</b></td><td class="ok">✅ 已覆盖</td><td>R1 块级 provenance 直接满足</td></tr>
+          <tr><td><b>Q3 完整性 ＋ 遗漏透明</b></td><td class="ok">✅ 已覆盖（结构层）</td><td>R2 范围限定 ＋ R5 取全 ＋ Agentic 覆盖检查；"没列全要声明"是生成侧，需配套</td></tr>
+          <tr><td><b>Q4 诚实性（不编造）</b></td><td class="muted">➖ 不属本决策</td><td>生成侧契约，需后续<b>架构决策记录</b>承接</td></tr>
+          <tr><td><b>Q5 一致性</b></td><td class="warn">⚠️ 风险</td><td>Agentic 多轮会让路径产生差异；需 N／K、抖动与收敛策略</td></tr>
+          <tr><td><b>Q6 表达合适</b></td><td class="muted">➖ 不属本决策</td><td>生成侧</td></tr>
+          <tr><td><b>Q7 边界合规</b></td><td class="muted">➖ 不属本决策</td><td>路由／编排侧</td></tr>
+          <tr><td><b>Q8 响应速度</b></td><td class="warn">⚠️ 风险</td><td>检索本身不慢；<b>Agentic 多轮会增加首字延迟</b>，需轮次上限与预算</td></tr>
+          <tr><td><b>成本</b></td><td class="ok">✅ 已覆盖</td><td>D1／D3：增强向量块成本最低；Wiki 约 10 倍 token、图更高，均后置</td></tr>
+          <tr><td><b>安全</b></td><td class="warn">⚠️ 未覆盖</td><td>文档作为<b>不可信输入</b>、工具最小权限、出站限制均未在本文落地；RAG 会把文档内容带进提示词，注入面真实存在</td></tr>
+          <tr><td><b>隐私／数据主权</b></td><td class="muted">➖ 显式忽略</td><td>按 0055：自用、公开语料</td></tr>
+          <tr><td><b>可靠性／降级</b></td><td class="warn">⚠️ 部分</td><td>编译旁路已满足；<b>检索为空、解析失败、截断</b>未覆盖——正是"静默失败"的高发区</td></tr>
+          <tr><td><b>可观测性</b></td><td class="warn">⚠️ 部分</td><td>R1 给了块级来源；检索证据、token、工具调用、trace 尚未设计</td></tr>
+          <tr><td><b>可测试／可评估</b></td><td class="ok">✅ 已覆盖</td><td>决策可直接用 18 条用例检验；判官与参数在 0054</td></tr>
+          <tr><td><b>可复现性</b></td><td class="warn">⚠️ 部分</td><td>元数据有来源与位置；<b>模型／提示词／语料版本</b>未在本文</td></tr>
+          <tr><td><b>可维护／可演进</b></td><td class="ok">✅ 已覆盖</td><td>Wiki／非严格图挂点明确，编译是旁路</td></tr>
+          <tr><td><b>易用性</b></td><td class="muted">➖ 显式忽略</td><td>按 0055</td></tr>
+          <tr><td><b>性能（吞吐／并发）</b></td><td class="muted">➖ 显式忽略</td><td>按 0055：单用户</td></tr>
+        </tbody>
+      </table>
+      <p><b>汇总</b>：✅ 5 条、⚠️ 7 条、➖ 6 条、❌ 0 条——<b>没有冲突，本节通过</b>。✅／⚠️／➖ 只表示本决策覆盖到哪一步，不代表属性已经满足或未满足；7 个 ⚠️ 缺口需要后续承接。</p>
+      <div class="key">
+        <b>三条最要紧的待办</b>：<br>
+        ① <b>安全</b>——文档＝不可信输入、工具最小权限、出站限制；RAG 会把文档内容带进提示词，注入面真实存在。<br>
+        ② <b>Q8 延迟</b>——Agentic 多轮是 D2 的直接代价，需要轮次上限与预算，否则首字延迟目标守不住。<br>
+        ③ <b>可靠性降级</b>——检索为空、解析失败、截断必须有信号，否则会重演"静默失败"。
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>8. 这一决定把哪些问题留给下一层</h2>
+      <p>本部分只定了<b>存储形态</b>（增强向量块）与<b>检索策略</b>（经典＋Agentic）；下面三组问题尚未分析，按顺序推进。</p>
+
+      <p><b>① 检索侧（优先分析）</b></p>
+      <ul>
+        <li><b>查询理解与路由</b>：越界判断、消歧澄清——规则还是 LLM；</li>
+        <li><b>检索行为</b>：经典与 Agentic 的触发条件、多轮规划、覆盖检查、停止条件；</li>
+        <li><b>证据组装</b>：去重、排序、跨源保证、枚举上限；</li>
+        <li><b>参数</b>（top-k、RRF 常数、轮次、预算）：由 18 条用例的实测（召回@k、延迟、轮次分布）决定，不给拍脑袋的值；</li>
+        <li>是否引入重排。</li>
+      </ul>
+
+      <p><b>② 入库侧</b></p>
+      <ul>
+        <li>解析、清洗、切分（大小／重叠／按标题层级）、语言识别、去重、增量更新；</li>
+        <li>元数据字段清单（与检索过滤的契约：篇／节／位置／语言／哈希等）。</li>
+      </ul>
+
+      <p><b>③ 技术选型（在 ① ② 之后）</b></p>
+      <ul>
+        <li>向量索引、关键词索引、embedding、元数据存储、编排实现的具体组件；</li>
+        <li>依据是 ① ② 的结论，不在本部分先行拍板。</li>
+      </ul>
+
+      <p><b>其他</b></p>
+      <ul>
+        <li>评测技术选型（0054 只定用例与统计口径，没定工具）；</li>
+        <li>模块划分（存储与两侧分析定稿后再做）。</li>
+      </ul>
+    </section>
+
+    <footer class="page-foot">
+      0056 · 架构设计 第一部分：存储结构与检索策略 · 2026-10-17 · 状态：草案，待审核
+    </footer>
+  </div>
+</body>
+</html>

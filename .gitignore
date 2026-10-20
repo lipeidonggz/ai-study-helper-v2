@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Frontend
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Tauri / Rust
+target/
+
+# Local data and secrets
+data/
+.env
+.env.*
+!.env.example
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Logs and traces
+*.log
+traces/
+artifacts/
+
+# IDE / OS
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store

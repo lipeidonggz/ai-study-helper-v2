@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>0052 · 文档学习问答 · 产品需求文档（PRD）</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <style>
+    .muted { color: var(--muted); }
+    .ok { color: #1a7f37; font-weight: 600; }
+    .no { color: #cf222e; font-weight: 600; }
+    .warn { color: #9a6700; font-weight: 600; }
+    .tbl-wide { font-size: 0.85em; }
+    .tbl-wide td, .tbl-wide th { vertical-align: top; }
+    .ask { background: #fff8e5; border: 1px solid #e3c26a; border-left: 4px solid #d4a017;
+           border-radius: 6px; padding: 10px 14px; margin: 10px 0; }
+    .rule { background: var(--code-bg); border-left: 3px solid rgba(127,127,127,0.35);
+            border-radius: 6px; padding: 8px 12px; margin: 8px 0; line-height: 1.7; }
+    code { word-break: break-all; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="page-head">
+      <h1>0052 · 文档学习问答 · 产品需求文档（PRD）</h1>
+      <p class="subtitle"><b>本文是产品需求文档（PRD）</b>：定位 → 用"用户以学习为目的会问哪些问题"推导<b>问题空间（15 类）</b> → <b>范围与边界（产品视角，含「两类特殊问题：照答但金标准不同」）</b> → <b>质量属性与验收标准</b>。</p>
+      <p class="subtitle"><b>状态：草案，待沛东审核。</b><b>相关经验记录</b>（<b>仅作知识经验参考，不构成本产品的设计依据</b>）：<a href="https://github.com/lipeidonggz/ai-study-helper/blob/master/memory/0023-rag-v1-scope.html">0023</a>／<a href="https://github.com/lipeidonggz/ai-study-helper/blob/master/memory/0024-rag-v1-cases.html">0024</a>／<a href="https://github.com/lipeidonggz/ai-study-helper/blob/master/memory/0026-rag-eval-evolution.html">0026</a>／<a href="https://github.com/lipeidonggz/ai-study-helper/blob/master/memory/0051-ourcases-three-arms.html">0051</a></p>
+      <p class="subtitle"><a href="index.html">← 返回记忆主页</a></p>
+    </header>
+
+    <section class="card">
+      <h2>1. 产品定位</h2>
+      <p class="rule">允许<b>以学习为目的</b>的用户<b>添加各种文档</b>，然后<b>基于这些文档以及大模型内化的知识</b>，提供<b>学习方面的知识问答能力</b>。</p>
+      <table class="tbl-wide">
+        <thead><tr><th></th><th>内容</th></tr></thead>
+        <tbody>
+          <tr><td class="ok"><b>做</b></td><td>① 接受用户自带的文档（多份、各种形态）；② 基于「<b>用户文档 ＋ 模型内置知识</b>」回答学习类的知识问题；③ 允许用模型内置知识补全；<b>不要求每条答案逐句标注来源</b>，但用户问起时必须能说清哪句来自文档、哪句是模型补充，且<b>不得把模型补充说成文档内容</b></td></tr>
+          <tr><td class="no"><b>不做</b></td><td>① <b>不做学习方向／学习规划的指导</b>（"先学什么、按什么顺序学"不答）；② 不做操作执行（不写代码、不改文件）；③ 不做导航／办事类（不是搜索引擎，也不是任务代理）</td></tr>
+        </tbody>
+      </table>
+      <p><b>与前版的差别（这是本次的收窄）</b>：旧路子把"学习过程主线（初步 → 内化 → 产出）"当作<b>产品骨架</b>，并承诺覆盖多个学习环节——那等于要产品对"学习本身"有主张。新版只承诺一件事：<b>基于「文档 ＋ 模型内置知识」的知识问答</b>。学习阶段不再是骨架，只作为"用户为什么要问"的背景。</p>
+    </section>
+
+    <section class="card">
+      <h2>2. 需求分析：从产品定义推导问题空间</h2>
+
+      <h3>2.1 定义锁定了四个结构</h3>
+      <table class="tbl-wide">
+        <thead><tr><th>定义里的要素</th><th>它锁定了什么</th></tr></thead>
+        <tbody>
+          <tr><td><b>以学习为目的的用户</b></td><td>用户<b>目的恒定</b>（只为学）⇒ "问答目的"这一维在本产品里基本是<b>常量</b>，不构成分类依据</td></tr>
+          <tr><td><b>添加各种文档</b></td><td>语料是<b>用户自带的、多份的、形态各异的</b>——不是我们准备的固定集合</td></tr>
+          <tr><td><b>基于这些文档以及大模型内化的知识</b></td><td><b>两个知识来源并列</b>：文档内 ／ 模型内置 ／ 两者（这句话本身送出了一把现成的刀）</td></tr>
+          <tr><td><b>问答能力（且不做学习指导）</b></td><td>只出答案：不执行操作、不规划学习路径</td></tr>
+        </tbody>
+      </table>
+
+      <h3>2.2 「以学习为目的」改变了什么</h3>
+      <p>它<b>不增加"取信息"类的问题</b>（纯查数据的用户也会问），它改变的是问题的<b>层次</b>：</p>
+      <table class="tbl-wide">
+        <thead><tr><th>纯查数据的人</th><th>以学习为目的的人</th></tr></thead>
+        <tbody>
+          <tr><td>问"有没有／是什么／在哪"</td><td>问同样的问题，但要的是"<b>能理解的说法</b>"，不是一个孤立的数值</td></tr>
+          <tr><td>不会问</td><td><b>为什么／怎么做／什么关系</b>——要求解释与连接，而不是一个点</td></tr>
+          <tr><td>不会问</td><td><b>有哪些／整体是什么／有没有冲突</b>——要求覆盖、整合与发现分歧</td></tr>
+          <tr><td>不会问</td><td><b>这个说法对吗／哪个对</b>——要求带依据的判断</td></tr>
+          <tr><td>不会问</td><td><b>这句是文档说的还是你补的</b>——要求来源分明</td></tr>
+        </tbody>
+      </table>
+      <p class="rule">一句话：<b>学习目的的作用是"从取用升级为理解、判断、成体系、辨来源"</b>。</p>
+
+      <h3>2.3 问题空间：15 类</h3>
+      <p class="muted">分组只为好读，不是分类轴。每类给 3 个示例，尽量在「单篇／跨篇、事实／机制、直接问／情境问」上拉开；示例都尽量锚在真实的 Agent 学习语料上，后面可直接当用例候选。</p>
+      <table class="tbl-wide">
+        <thead><tr><th>#</th><th>类型</th><th>示例问句（每类 3 个）</th><th>答案的取材范围</th></tr></thead>
+        <tbody>
+          <tr><td colspan="4"><b>A. 取一个点</b></td></tr>
+          <tr><td>1</td><td>有没有</td>
+            <td>·Anthropic《How we contain Claude》里提到过 MCP 吗？<br>·OpenAI《Harness engineering》里有没有提到具体用哪个库？（它说过让 Codex 不要引入什么吗）<br>·这两篇里，有没有哪一篇讨论过"成本／开销"？</td>
+            <td>用户上传的这批文档</td></tr>
+          <tr><td>2</td><td>是什么（取值／定义）</td>
+            <td>·Anthropic《How we contain Claude》里，Claude Code auto mode 能拦住多少比例的过度行为？<br>·OpenAI《Harness engineering》说 AGENTS.md 大约应该多少行？<br>·Anthropic《How we contain Claude》里说的"爆炸半径"具体指什么？</td>
+            <td>指名的某一篇</td></tr>
+          <tr><td>3</td><td>在哪（出处）</td>
+            <td>·"把允许列表理解成能力授予、而不是目标过滤器"这句出自哪篇？原文怎么说？<br>·"Humans steer. Agents execute."在OpenAI《Harness engineering》里出现在哪个位置、上下文是什么？<br>·我记得有篇说"用户批准了约 93% 的权限提示"——这句在哪，前后文是什么？</td>
+            <td>具体某篇的某一段</td></tr>
+          <tr><td colspan="4"><b>B. 求理解</b></td></tr>
+          <tr><td>4</td><td>为什么</td>
+            <td>·为什么说"审批疲劳"会让人类监督失效？<br>·OpenAI《Harness engineering》为什么反对把 AGENTS.md 写成大而全的百科全书？<br>·为什么 Claude Cowork 要把凭证留在主机钥匙串、而不是放进虚拟机里？</td>
+            <td>某一篇（可能需另一篇或常识补全）</td></tr>
+          <tr><td>5</td><td>怎么做／怎么发生</td>
+            <td>·Claude Cowork 是怎么把 agent 关进虚拟机的？分哪几步？<br>·OpenAI《Harness engineering》里 Codex 跑一次端到端任务，从复现 bug 到合并 PR 经历了哪些步骤？<br>·"通过已批准域名外泄"这起事故是怎么发生的？中间经过哪些环节？</td>
+            <td>某一篇的过程描述</td></tr>
+          <tr><td>6</td><td>什么关系</td>
+            <td>·沙箱、出口控制、虚拟机在 containment 里各挡什么、彼此怎么配合？<br>·"仓库知识作为记录系统"和"agent 可读性"在OpenAI《Harness engineering》里是什么关系？<br>·审批疲劳、auto mode、OS 级沙箱这三个概念之间是什么关系？</td>
+            <td>一篇内的多个对象，也可能跨篇</td></tr>
+          <tr><td colspan="4"><b>C. 求全貌</b></td></tr>
+          <tr><td>7</td><td>有哪些（要全）</td>
+            <td>·Anthropic《How we contain Claude》里一共承认了哪几起"我们漏掉的风险"？<br>·OpenAI《Harness engineering》里提到 agent 能自主产出哪些东西（列全）？<br>·这两篇加起来，一共给了哪些"约束／防护手段"？各自针对什么？</td>
+            <td><b>范围由提问限定</b>（一篇或整批文档）</td></tr>
+          <tr><td>8</td><td>整体是什么</td>
+            <td>·OpenAI《Harness engineering》和 Anthropic《How we contain Claude》合起来，给"agent 时代的工程"画了什么整体图景？<br>·Anthropic《Building Effective Agents》和 OpenAI《A Practical Guide to Building Agents》都在讲"怎么搭 agent"，合起来看它们的完整方法论是什么？<br>·我这批文档（教程＋业界文章）整体覆盖了 agent 学习的哪些方面，哪些方面是空的？</td>
+            <td>多篇</td></tr>
+          <tr><td>9</td><td>有没有冲突</td>
+            <td>·OpenAI《Harness engineering》说人类不一定要评审 PR，而 Anthropic《How we contain Claude》说人类审批会退化、不可靠——这两篇对「人在回路」是不是在唱反调？<br>·OpenAI《Harness engineering》主张把上下文推入仓库，Anthropic《How we contain Claude》把持久记忆列为可被投毒的新风险——关于「记忆该放在哪里」，这两篇的说法一致吗？<br>·Anthropic《Building Effective Agents》主张"从最简单的方案开始"，而 OpenAI《Harness engineering》在讲高度自主的脚手架——这两者矛盾吗？</td>
+            <td>多篇之间</td></tr>
+          <tr><td colspan="4"><b>D. 求判断</b></td></tr>
+          <tr><td>10</td><td>对吗</td>
+            <td>·"AGENTS.md 写得越详细越好"——按 OpenAI《Harness engineering》的说法，这个说法对吗？<br>·"只要沙箱做好了，模型层防御就不重要了"——按 Anthropic《How we contain Claude》的观点，这个判断成立吗？<br>·"多智能体一定比单智能体好"——这批文档支持这个说法吗？</td>
+            <td>某篇的观点（判断依据来自该篇）</td></tr>
+          <tr><td>11</td><td>哪个对</td>
+            <td>·OpenAI《Harness engineering》主张「人类掌舵、智能体执行」，而 Anthropic《How we contain Claude》主张先把环境边界焊死、不把安全建立在人类监督上——该听谁的？<br>·关于人工审批，OpenAI《Harness engineering》说人可以不必评审 PR，Anthropic《How we contain Claude》说审批会退化、不可靠——两篇冲突时我该按哪篇做？<br>·Anthropic《Building Effective Agents》说先从最简单的方案开始，而 OpenAI《Harness engineering》讲的是高度自主的脚手架——我该信哪个？</td>
+            <td>多篇，或文档与模型内置知识</td></tr>
+          <tr><td colspan="4"><b>E. 求补充</b></td></tr>
+          <tr><td>12</td><td>该处没讲的</td>
+            <td>·Anthropic《How we contain Claude》提到的 gVisor 是什么？凭什么它比自建代理更可靠？<br>·OpenAI《Harness engineering》里出现的 p-limit 是什么？团队为什么不用现成的、偏要自己实现？<br>·教程和文章里都提到 MCP 协议——它具体是什么？这两篇都没展开。</td>
+            <td>该处未展开 ⇒ 从<b>其它已上传文档或模型内置知识</b>补</td></tr>
+          <tr><td>13</td><td>还有什么</td>
+            <td>·除了沙箱／虚拟机／出口控制，还有哪些隔离手段？<br>·除了这几篇提过的，agent 的记忆机制还有哪些常见做法？<br>·这几篇都提到"护栏（guardrails）"，除此之外还有哪些做法？（不限于这几篇，我这批文档里有没有别的提到）</td>
+            <td class="warn"><b>全部知识库文档 ∪ 模型内置知识</b>（不是"文档之外"）</td></tr>
+          <tr><td colspan="4"><b>F. 求归属与形态</b></td></tr>
+          <tr><td>14</td><td>是文档说的还是你补的</td>
+            <td>·"MCP 是新的攻击面"这个说法，在 Anthropic《How we contain Claude》里有原文依据吗？还是模型补充的？<br>·"93% 的批准率说明审批不可靠"这个结论，是原文给的，还是从原文数字归纳出来的？<br>·"某公司用虚拟机隔离挡住了数据外泄"这个例子，是哪一篇里的，还是模型知识？</td>
+            <td>文档 vs 模型内置知识（<b>用户问起时需能准确归属</b>）</td></tr>
+          <tr><td>15</td><td>换个形态</td>
+            <td>·把Anthropic《How we contain Claude》里的三种隔离模式整理成一张表：模式／产品／机制／威胁模型／代价。<br>·把OpenAI《Harness engineering》里"Codex 一次端到端任务"的流程做成分步 checklist。<br>·把这批文档里关于"评测"的说法汇总成一张对照表（谁提的／主张什么／依据）。</td>
+            <td>指定范围（通常一篇或几篇）</td></tr>
+        </tbody>
+      </table>
+      <p class="muted"><b>示例的指代口径</b>：示例问句<b>默认指代明确</b>（点篇名或作者）——用户要对比、追问时，心里本来就知道是哪两篇。<b>模糊只留给刻意设计的消歧题。</b><b>经验</b>：题面只给「一篇 OpenAI 的、一篇 Anthropic 的」而库里有多篇时，系统会选错对象（<b>错在对象，不在质量</b>）——所以模糊只应出现在刻意设计的消歧题里。同一原则也适用于锚点列里的「某一篇」：那是类型描述，不是问句。</p>
+
+    </section>
+
+
+    <section class="card">
+      <h2>3. 范围与边界（产品视角）</h2>
+      <p class="muted">本节只按<b>产品定位</b>说话：这个产品承诺什么、不承诺什么。<b>不引入「当前实现到什么程度」</b>。</p>
+
+      <h3>3.1 承诺范围</h3>
+      <table class="tbl-wide">
+        <thead><tr><th>维度</th><th>承诺</th></tr></thead>
+        <tbody>
+          <tr><td>输入</td><td>用户<b>以学习为目的</b>添加的<b>各种文档</b>（多份、形态不限）；它与模型内置知识共同构成"可回答的范围"</td></tr>
+          <tr><td>输出</td><td><b>知识问答</b>：回答问题、给出依据；<b>用户问起时区分来源</b>；<b>答案里不给裁决结论，也不替用户做学习安排</b></td></tr>
+          <tr><td>知识边界</td><td>答案可以来自 ①用户文档 ②模型内置知识 ③两者；<b>来源可分辨</b>（用户问起时必须能说清，<b>不要求每条答案逐句标注</b>）</td></tr>
+          <tr><td>形态</td><td>单轮问答（一问一答）；<b>多轮对话＝下个迭代计划项</b></td></tr>
+          <tr><td>使用边界</td><td><b>单用户 ＋ 单知识库</b>：一个用户就自己的一批文档提问；不涉及多用户协作，也不涉及多库并存与跨库检索</td></tr>
+          <tr><td>产品能力</td><td><b>查证入口</b>：用户对答案里某个说法有疑义时，可一键检索相关段落。它是质量属性 Q2（可信性）的落地方式——<b>它是能力，不是一种问题类型</b>（作为问题，它已被 §2.3 的第 3、14 类覆盖）</td></tr>
+        </tbody>
+      </table>
+      <p class="muted"><b>来源口径（2026-10-16 定）</b>：不要求每条答案逐句标注来源；<b>用户问起时必须能准确归属</b>（见 §2.3 第 14 类）；<b>自称来自文档的必须真能找到</b>（§4.2 红线）。这三句话合起来才是"来源"这一条完整的口径——"来源要分明"是能力，不是每条答案的格式要求。</p>
+
+      <h3>3.2 明确不做</h3>
+      <table class="tbl-wide">
+        <thead><tr><th>不做</th><th>产品理由</th></tr></thead>
+        <tbody>
+          <tr><td><b>学习方向／学习规划的指导</b>（"我该先学什么、按什么顺序学"）</td><td>那是<b>学习安排</b>，不是知识问答；本产品只对材料里的知识负责</td></tr>
+          <tr><td><b>多用户与多知识库</b>（账号体系、协作／分享／权限；多库并存、库间切换、跨库检索）</td><td>产品只服务"一个人问自己的一批文档"这一场景；多用户与多库是另一层的事，不属本产品边界</td></tr>
+          <tr><td>操作执行（写代码、改文件）；导航与办事类（搜索引擎、任务代理）</td><td>与"知识问答"无关</td></tr>
+        </tbody>
+      </table>
+      <p class="muted">注：还有两件事容易被误读成"不做"，其实不是——<b>不替用户下结论</b>、<b>不承诺代做成品</b>。它们是<b>答案形态与金标准的边界</b>，问题照答，见 §3.3。</p>
+
+            <h3>3.3 两类特殊问题：<b>照答，但金标准不同</b>（不是"不做"）</h3>
+      <p>这两类用户<b>一定会问</b>，产品也<b>一定回答</b>。它们的特殊性不在"做不做"，而在<b>金标准的合格线画在哪</b>——不是"给出结论"，而是"把得出结论所需的材料摆清"。</p>
+      <table class="tbl-wide">
+        <thead><tr><th>#</th><th>类型</th><th>照答什么</th><th>金标准与其它类的差别</th></tr></thead>
+        <tbody>
+          <tr><td><b>11</b></td><td>哪个对（两边冲突时该听谁的）</td>
+              <td>两方<b>各自怎么说</b> ＋ 各自的<b>依据</b>（＝ 9 指出分歧 ＋ 10 各自主张）</td>
+              <td><b>不判「选了哪边」</b>；判「分歧是否被正确指出、双方依据是否准确」。产品不把裁决写进答案，也不把「选边选得对」当作通过条件</td></tr>
+          <tr><td><b>15</b></td><td>换个形态（整理成表格／清单／checklist）</td>
+              <td>内容本身（按 1–14 类的方式正确给出）</td>
+              <td>判<b>内容的重述是否忠实、完整、正确</b>；<b>不判工件形态</b>（排版、清单完备度等留待后续迭代）</td></tr>
+        </tbody>
+      </table>
+      <p class="rule">一句话：<b>这两类问题照答，差别只在合格线画在哪</b>——其它类画在"答案对不对"，这两类画在"材料摆得全不全、准不准"。</p>
+      <p class="rule"><b>另有两处边界的口径（保持现状）</b>：<br>
+      · <b>10「对吗」留在范围内</b>：它问的是「<b>按某篇的观点</b>这个说法成立吗」，答案可引原文，属<b>知识核对</b>，不是替用户裁决。<br>
+      · <b>7「有哪些」与 15「换形态」的区分成立</b>：<b>7 的清单是答案的自然形态</b>（用户问的就是"有哪些"），<b>15 才是把已知内容按用户指定格式重排成工件</b>——前者的内容与完整性在本迭代的验收范围内，后者的"工件形态"不在。</p>
+
+</section>
+
+    <section class="card">
+      <h2>4. 质量属性与验收标准（产品视角）</h2>
+      <p class="muted">本节只回答三件事：<b>要满足哪些质量</b>、<b>每条是红线还是可度量</b>、<b>红线具体是什么</b>。<br>
+      具体<b>指标与阈值</b>取决于"每个用例考什么、考到什么程度"，属<b>用例与金标准设计</b>，不写在本文；<br>
+      而<b>判定规则</b>（把多次测量结果折成"通过／不通过"）<b>写在本文 §4.3</b>。</p>
+
+      <h3>4.1 质量属性</h3>
+      <table class="tbl-wide">
+        <thead><tr><th>#</th><th>质量属性</th><th>用户视角的含义</th><th>性质</th></tr></thead>
+        <tbody>
+          <tr><td>Q1</td><td><b>正确性</b></td><td>讲的东西是<b>对的</b>（与材料／事实一致）</td><td>可度量（覆盖性）＋ <b>见下注</b></td></tr>
+          <tr><td>Q2</td><td><b>可信性（可核对）</b></td><td>关键说法<b>能回查到出处</b>（用户问起时能定位；自称来自文档的必须真能找到）</td><td>能力（查证入口）＋ 红线（见 4.2）</td></tr>
+          <tr><td>Q3</td><td><b>完整性（覆盖）</b></td><td>该说的<b>说到</b>；说不全<b>要讲清漏了什么</b></td><td>可度量 ＋ <b>红线</b>（遗漏透明）</td></tr>
+          <tr><td>Q4</td><td><b>诚实性（不编造）</b></td><td>不知道就说不知道；<b>不把模型补充说成文档内容</b></td><td>红线（见 4.2）</td></tr>
+          <tr><td>Q5</td><td><b>一致性（稳定）</b></td><td>同一个问题问几次，答案不该<b>翻来覆去</b></td><td>可度量</td></tr>
+          <tr><td>Q6</td><td><b>表达合适</b></td><td>讲得<b>清楚</b>，形态贴合问法（问定义给定义、问对比给对照、问清单给清单）</td><td>可度量</td></tr>
+          <tr><td>Q7</td><td><b>边界合规</b></td><td>越界请求<b>按任务类型</b>处理（不是一律拒答，也不是有求必应）</td><td>红线（见 4.2）</td></tr>
+          <tr><td>Q8</td><td><b>响应速度</b></td><td>等太久就不好用</td><td>可度量（目标值未定）</td></tr>
+        </tbody>
+      </table>
+      <p class="muted"><b>Q1 的两半（重要边界）</b>：<br>
+      · <b>覆盖性</b>（该有的都有）——<b>能逐点核对</b>：要点清单是有界的；<br>
+      · <b>排除性</b>（不该有的不能有）——<b>只能按「已知错误类型清单」验，不追求全</b>。理由：错误空间是开放的（任何没被材料支持的内容被说出来都算错），
+      「<b>排除了所有错误</b>」这件事<b>本身无法验证</b>——这是本质限制，不是工具问题。<br>
+      &nbsp;&nbsp;可行的形态：把高风险错误写成<b>显式的事实边界断言</b>（用例里的 <code>boundary_claims</code>，例如「某文未以某命名其主张」），逐条核对；
+      <b>错误类型清单从真实失败样本回填</b>（如「概念嫁接」那一类：两个来源各自都真，错在把两者说成同一机制——<b>逐点核验抓不到它</b>）。<br>
+      ⇒ 因此产品承诺必须<b>明说「未知类型会漏」</b>，不得暗示「内容一定正确」。</p>
+
+      <h3>4.2 红线（必须满足；违反即不合格）</h3>
+      <ol>
+        <li><b>引用无伪证</b>：凡给出引用承诺，来源必须真实存在、归属正确、内容与原文吻合。</li>
+        <li><b>来源可溯源</b>：凡自称来自文档的说法，必须真能从文档找到——<b>不得冒充</b>（这一条同时管住"编造"）。</li>
+        <li><b>遗漏透明</b>：面对"要全"的问题（§2.3 的第 7、13 类），若没列全，<b>必须具名说清漏了哪一类</b>。</li>
+        <li><b>边界合规</b>：越界请求按任务类型处理。</li>
+      </ol>
+
+      <h3>4.3 判定规则 <span class="ok">（已定）</span></h3>
+      <p><b>为什么需要它</b>：这个系统的回答是<b>概率性</b>的——同一个问题问两次，答案可能不一样。所以<b>任何单次结果都不能当结论</b>，必须先把"多次结果"折成一个判断。</p>
+
+      <p><b>规则分两层</b>：</p>
+      <ol>
+        <li><b>单用例判定</b>：同一用例跑 <b>N</b> 次，其中 <b>≥ K 次满足该用例的金标准</b> ⇒ 该用例<b>判定通过</b>。<br>
+        <span class="muted">"满足金标准"＝该用例的<b>必选全满足</b>、<b>边界零违反</b>（边界含通用边界，即 §4.2 的四条红线）。</span></li>
+        <li><b>用例集准出</b>：整套用例集需<b>同时</b>满足三条——<br>
+        ① <b>红线类用例必须全过</b>（标为必须通过的，一条都不能不过）；<br>
+        ② <b>每一类问题都要有代表用例达标</b>（不能靠整体平均掩盖某一类崩塌）；<br>
+        ③ <b>整体通过率达到目标</b>（目标按类分别定，不设一条笼统的总分线）。</li>
+      </ol>
+
+      <p><b>三条原则（为什么这样定）</b>：</p>
+      <ul>
+        <li><b>不看单次</b>：单次结果只作观测，不作结论；</li>
+        <li><b>分类看，不看总分</b>：平均分最容易掩盖的正是"某一类全崩"；</li>
+        <li><b>红线不可平均</b>：红线是"零违反"，不能折算成"违反率 5% 也算过"。</li>
+      </ul>
+
+      <p><b>同时要报抖动</b>：除了"通过／不通过"，还要报同一配置多次之间的<b>结果波动</b>——波动本身就是 Q5（一致性）的读数，也决定了 N 要取多大才可信。</p>
+
+      <p class="muted"><b>待定数值</b>：N（跑几次）、K（几次算过）、各类目标值——都由<b>用例与金标准设计</b>给定（每个用例考什么，决定它跑几次、几次算过）。本节定的是<b>规则的形状</b>。</p>
+
+      <p class="muted">连带提醒：引用一旦不强制溯源（见 4.1 Q2 与 4.2 的措辞），"说错了但没引"就完全压在 Q1（正确性）上；而 Q1 的<b>排除性那一半本就验不全</b>（见 §4.1 注）——所以引用不能当作"内容正确性"的兜底。</p>
+    </section>
+
+
+
+    <p class="muted">记录创建：2026-10-16 · 产品定义与问题空间从零推导 · 状态：草案，待审核。</p>
+  </div>
+</body>
+</html>
