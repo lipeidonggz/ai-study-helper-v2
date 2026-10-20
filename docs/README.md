@@ -7,8 +7,8 @@
 ## 当前状态
 
 - 阶段：实现阶段，第一个垂直切片已完成。
-- 实现状态：桌面 sidecar 启动链与 PyInstaller release sidecar 已完成。
-- 下一步：验证 NSIS 安装、WebView2 引导、升级和卸载数据策略。
+- 实现状态：桌面运行链、PyInstaller release sidecar 与 NSIS 按用户安装已完成。
+- 下一步：开始本地 HTML 导入和正文/章节/block 提取切片。
 
 ## 设计基线
 
@@ -44,8 +44,10 @@
 
 - [0001 · 文档与实现记录结构](decisions/0001-documentation-and-record-structure.md)
 - [0002 · 使用 PyInstaller one-folder 分发后端](decisions/0002-package-backend-as-pyinstaller-directory.md)
+- [0003 · Windows 按用户安装与本地数据根](decisions/0003-windows-installer-and-data-root.md)
 - [001 · 桌面 sidecar 最小启动链（已完成）](development/slices/001-desktop-sidecar-bootstrap.md)
 - [002 · PyInstaller one-folder sidecar 与 release 冒烟（已完成）](development/slices/002-packaged-sidecar.md)
+- [003 · Windows 安装、首次启动与数据保留（已完成）](development/slices/003-windows-installer.md)
 
 ## 旧仓库
 

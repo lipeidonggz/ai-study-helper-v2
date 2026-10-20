@@ -1,6 +1,6 @@
 use serde::Serialize;
 use std::{
-    fs::OpenOptions,
+    fs::{self, OpenOptions},
     mem::size_of,
     net::TcpListener,
     path::PathBuf,
@@ -12,13 +12,11 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
-#[cfg(not(debug_assertions))]
-use tauri::Manager;
 #[cfg(windows)]
 use windows_sys::Win32::{
     Foundation::{CloseHandle, HANDLE},
@@ -31,6 +29,15 @@ use windows_sys::Win32::{
 
 const MAX_RESTART_ATTEMPTS: u32 = 2;
 const HEALTHY_RESTART_RESET: Duration = Duration::from_secs(30);
+const APP_DATA_DIRECTORIES: &[&str] = &[
+    "config",
+    "db",
+    "collections",
+    "prompts/experiments",
+    "traces",
+    "logs",
+    "backups",
+];
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -376,6 +383,31 @@ fn create_job_object() -> Result<usize, String> {
     Ok(0)
 }
 
+fn prepare_app_data_root(app: &AppHandle) -> Result<PathBuf, String> {
+    let root = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| format!("failed to resolve application data directory: {error}"))?;
+    for relative in APP_DATA_DIRECTORIES {
+        fs::create_dir_all(root.join(relative))
+            .map_err(|error| format!("failed to create application data directory: {error}"))?;
+    }
+
+    let config_path = root.join("config").join("app.json");
+    if !config_path.exists() {
+        fs::write(
+            config_path,
+            format!(
+                "{{\n  \"schema_version\": 1,\n  \"created_by\": \"{}\"\n}}\n",
+                env!("CARGO_PKG_VERSION")
+            ),
+        )
+        .map_err(|error| format!("failed to initialize application config: {error}"))?;
+    }
+
+    Ok(root)
+}
+
 impl Drop for BackendManager {
     fn drop(&mut self) {
         self.terminate_job();
@@ -480,6 +512,7 @@ pub fn run() {
         .setup({
             let manager = Arc::clone(&manager);
             move |app| {
+                prepare_app_data_root(app.handle()).map_err(std::io::Error::other)?;
                 manager.start(app.handle().clone());
                 Ok(())
             }

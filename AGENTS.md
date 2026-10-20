@@ -106,4 +106,4 @@ GitHub Issue、Project 和 PR 用于临时任务、进行中状态和开放式�
 
 ## 当前阶段
 
-设计阶段完成，已进入实现。前两个垂直切片完成 Tauri、Vue、Python sidecar 的最小启动、进程生命周期与 PyInstaller one-folder release 分发；下一步验证 NSIS 安装、WebView2 引导、升级和卸载数据策略，不提前实现完整 RAG 或评测台。
+设计阶段完成，已进入实现。前三个垂直切片完成桌面运行链、PyInstaller one-folder release 分发以及 NSIS 按用户安装；下一步开始本地 HTML 导入、正文提取、章节树与 block 预览，不提前实现完整 RAG 或评测台。

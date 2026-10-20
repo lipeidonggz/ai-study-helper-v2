@@ -182,10 +182,10 @@ onBeforeUnmount(() => {
 
     <section class="next-step">
       <p class="next-label">NEXT SLICE</p>
-      <h2>Windows 安装与首次启动</h2>
+      <h2>本地 HTML 导入与结构预览</h2>
       <p>
-        Python 后端已经打包为 PyInstaller one-folder sidecar。下一步将验证
-        NSIS 安装器、WebView2 引导、按用户安装、卸载保留数据与升级回滚。
+        安装与分发基础已经完成。下一步将接入选定的 HTML 正文提取管线，
+        展示文档标题、章节树和可引用 block，同时保留解析失败的明确状态。
       </p>
     </section>
   </main>
