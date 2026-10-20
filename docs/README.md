@@ -6,9 +6,9 @@
 
 ## 当前状态
 
-- 阶段：实现阶段，第一个垂直切片已完成。
-- 实现状态：桌面运行链、PyInstaller release sidecar 与 NSIS 按用户安装已完成。
-- 下一步：开始本地 HTML 导入和正文/章节/block 提取切片。
+- 阶段：实现阶段，前四个垂直切片已完成。
+- 实现状态：桌面运行链、PyInstaller release sidecar、NSIS 按用户安装以及 HTML 导入与结构预览已完成。
+- 下一步：规划并开始正式文档持久化与 collection 发布切片。
 
 ## 设计基线
 
@@ -22,9 +22,9 @@
 | [06](design/06-retrieval-pure-agent.md) | 检索工具、Agent 循环、提示词、trace 与部署 | 已审核 · 实现基线 |
 | [07](design/07-html-ingestion-design.md) | HTML 入库与 collection 快照 | 已审核 · 实现基线 |
 | [08](design/08-evaluation-console-design.md) | 评测台、诊断与回归 | 已审核 · 实现基线 |
-| [09](design/09-technology-selection.md) | 技术选型与总体架构 | 已审核 · 实现基线 |
+| [09](design/09-technology-selection.md) | 技术选型与总体架构 | v0.4 · 实现基线 |
 
-01–09 已于 2026-10-20 审核，并作为当前实现基线。后续修改必须保留变更原因，同时更新本索引。
+01–09 已于 2026-10-20 审核，并作为当前实现基线；09 已依据 ADR 0004 更新为 v0.4。后续修改必须保留变更原因，同时更新本索引。
 
 ## 记录分类
 
@@ -42,12 +42,16 @@
 
 当前已记录：
 
+- [实现待办](development/backlog.md)
 - [0001 · 文档与实现记录结构](decisions/0001-documentation-and-record-structure.md)
 - [0002 · 使用 PyInstaller one-folder 分发后端](decisions/0002-package-backend-as-pyinstaller-directory.md)
 - [0003 · Windows 按用户安装与本地数据根](decisions/0003-windows-installer-and-data-root.md)
+- [0004 · 使用轻量确定性语言检测](decisions/0004-lightweight-language-detection.md)
 - [001 · 桌面 sidecar 最小启动链（已完成）](development/slices/001-desktop-sidecar-bootstrap.md)
 - [002 · PyInstaller one-folder sidecar 与 release 冒烟（已完成）](development/slices/002-packaged-sidecar.md)
 - [003 · Windows 安装、首次启动与数据保留（已完成）](development/slices/003-windows-installer.md)
+- [004 · HTML 导入与结构预览（已完成）](development/slices/004-html-ingestion-preview.md)
+- [004 · HTML 导入人工验收清单（已完成）](development/manual-tests/004-html-ingestion.md)
 
 ## 旧仓库
 
