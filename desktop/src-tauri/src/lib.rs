@@ -376,7 +376,7 @@ impl BackendManager {
 }
 
 #[cfg(windows)]
-    /// 创建随桌面进程关闭而终止子进程的 Job Object。
+/// 创建随桌面进程关闭而终止子进程的 Job Object。
 fn create_job_object() -> Result<usize, String> {
     let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
     if handle.is_null() {
@@ -408,12 +408,12 @@ fn create_job_object() -> Result<usize, String> {
 }
 
 #[cfg(not(windows))]
-    /// 非 Windows 环境下不使用 Job Object。
+/// 非 Windows 环境下不使用 Job Object。
 fn create_job_object() -> Result<usize, String> {
     Ok(0)
 }
 
-    /// 创建 LocalAppData 下的产品数据目录和首次启动配置。
+/// 创建 LocalAppData 下的产品数据目录和首次启动配置。
 fn prepare_app_data_root(app: &AppHandle) -> Result<PathBuf, String> {
     let root = app
         .path()
@@ -465,7 +465,7 @@ fn python_path(backend_dir: &std::path::Path) -> PathBuf {
 }
 
 #[cfg(debug_assertions)]
-    /// 解析开发模式下从 backend venv 启动 sidecar 的参数。
+/// 解析开发模式下从 backend venv 启动 sidecar 的参数。
 fn resolve_launch_spec(_app: &AppHandle) -> Result<BackendLaunchSpec, String> {
     let backend_dir = backend_dir();
     let python = python_path(&backend_dir);
@@ -485,7 +485,7 @@ fn resolve_launch_spec(_app: &AppHandle) -> Result<BackendLaunchSpec, String> {
 }
 
 #[cfg(not(debug_assertions))]
-    /// 解析发布模式下随 Tauri resource 打包的 sidecar。
+/// 解析发布模式下随 Tauri resource 打包的 sidecar。
 fn resolve_launch_spec(app: &AppHandle) -> Result<BackendLaunchSpec, String> {
     let resource_dir = app
         .path()
@@ -512,7 +512,7 @@ fn resolve_launch_spec(app: &AppHandle) -> Result<BackendLaunchSpec, String> {
     })
 }
 
-    /// 申请一个仅绑定回环地址的临时端口。
+/// 申请一个仅绑定回环地址的临时端口。
 fn free_loopback_port() -> Result<u16, String> {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .map_err(|error| format!("failed to reserve loopback port: {error}"))?;

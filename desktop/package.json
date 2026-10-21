@@ -6,7 +6,7 @@
     "tauri": "tauri",
     "dev": "tauri dev",
     "build": "tauri build",
-    "check": "node ../scripts/run-cargo.mjs check --manifest-path src-tauri/Cargo.toml"
+    "check": "node ../scripts/run-cargo.mjs fmt --manifest-path src-tauri/Cargo.toml -- --check && node ../scripts/run-cargo.mjs check --manifest-path src-tauri/Cargo.toml && node ../scripts/run-cargo.mjs clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0"
