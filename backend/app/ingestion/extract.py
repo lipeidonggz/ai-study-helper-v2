@@ -23,7 +23,7 @@ from app.ingestion.models import (
     TitleSource,
 )
 
-EXTRACTOR_VERSION = "1"
+EXTRACTOR_VERSION = "2"
 MIN_CONTENT_CHARACTERS = 40
 JS_SHELL_VISIBLE_CHARACTERS = 80
 LOGIN_PAGE_MAX_VISIBLE_CHARACTERS = 800
@@ -174,9 +174,17 @@ def _list_items(list_element: HtmlElement, level: int = 0) -> list[ListNode]:
         if item.text:
             own_text_parts.append(item.text)
         for child in item:
+            if not isinstance(child.tag, str):
+                if child.tail:
+                    own_text_parts.append(child.tail)
+                continue
             if child.tag in {"ul", "ol"}:
+                if child.tail:
+                    own_text_parts.append(child.tail)
                 continue
             own_text_parts.append(child.text_content())
+            if child.tail:
+                own_text_parts.append(child.tail)
         own_text = normalize_text(" ".join(own_text_parts))
         if own_text:
             items.append(ListNode(text=own_text, level=level))

@@ -84,15 +84,15 @@
 
 | # | 补什么 | 输入 | 金标准（必选 / 边界） | 环境 · 备注 |
 | --- | --- | --- | --- | --- |
-| `cf-001` | 跨源消歧（**刻意模糊**） | "一篇 OpenAI 的、一篇 Anthropic 的，它们在'人在回路'上怎么说？" | **必选**<br>· **R1 消歧**——判定标准：答案**要求用户澄清**具体是哪两篇（环境里多篇 OpenAI／Anthropic 的文章都提到"人在回路"，无法唯一确定），而不是自己选一对就往下答。<br> | 环境：库里有多篇 OpenAI 与 Anthropic 的文章，且都提到"人在回路"——因此无法唯一确定用户指的是哪两篇。 |
+| `cf-001` | 跨源消歧（**刻意模糊**） | "一篇 OpenAI 的、一篇 Anthropic 的，它们对 agent 工程怎么做有什么看法？" | **必选**<br>· **R1 消歧**——判定标准：答案**要求用户澄清**具体是哪两篇（环境里有多篇 OpenAI／Anthropic 文章，无法唯一确定），而不是自己选一对就往下答。<br> | 环境：库里有多篇 OpenAI 与 Anthropic 文章，问题没有给出标题或唯一主题锚点——因此无法唯一确定用户指的是哪两篇。 |
 | `cf-002` | 越界请求 | "帮我按这份文档写一个学习计划。" | **必选**<br>· **R1 指出问题**——判定标准：答案**满足其一**——① 指出"写学习计划"不在本产品能力范围内（本产品只做基于文档的知识问答）；② 指出"这份文档"指代不明、要求用户澄清是哪一份。<br> | 环境：库里有多篇文档——"这份文档"指代不明。<br>本用例触发：边界合规（请求越界）。 |
-| `cf-003` | 静默失败 / 截断 | "把 Anthropic《Building Effective Agents》、OpenAI《A Practical Guide to Building Agents》、OpenAI《Harness engineering》、Anthropic《How we contain Claude》这四篇的要点都讲一遍。" | **必选**<br>· **R1 截断声明**——判定标准：答案**被截断**，且明确声明"内容未完"。<br> | 环境：库里就是这四篇——四篇的要点讲全，必然超出输出预算。<br>备注：**本用例不触发遗漏透明**——它是收尾式要求，而截断场景下答案收不了尾；"没讲全"由 R1 管。若某轮未被截断（R1 未满足），该轮直接判 fail，并留作"为什么没截断"的分析样本。 |
+| `cf-003` | 静默失败 / 截断 | "把 Anthropic《Building Effective Agents》、OpenAI《New tools for building agents》、OpenAI《Harness engineering》、Anthropic《How we contain Claude》这四篇的要点都讲一遍。" | **必选**<br>· **R1 截断声明**——判定标准：答案**被截断**，且明确声明"内容未完"。<br> | 环境：这四篇都在当前冻结 collection 中——四篇的要点讲全，预期超出输出预算。<br>备注：**本用例不触发遗漏透明**——它是收尾式要求，而截断场景下答案收不了尾；"没讲全"由 R1 管。若某轮未被截断（R1 未满足），该轮直接判 fail，并留作"为什么没截断"的分析样本。 |
 
 ## 4. 语料与评测参数（逐项定）
 
 | 项 | 现状 | 备注 |
 | --- | --- | --- |
-| **测试语料** | 已定（首批 10 篇） | **必进 4 篇**（cf-003 题面点名；§2 主用例取材于其中两篇）：Anthropic《How we contain Claude》、OpenAI《Harness engineering》、OpenAI《A Practical Guide to Building Agents》、Anthropic《Building Effective Agents》。<br> **干扰 6 篇**（都踩在同一条主题带上，用来干扰召回与归属判定）：OpenAI《New tools for building agents》、Anthropic《Effective harnesses for long-running agents》、Lilian Weng《Harness Engineering for Self-Improvement》、Anthropic《Effective context engineering for AI agents》、Anthropic《How we built our multi-agent research system》、Hamel《AI Evals: Everything You Need to Know》。<br> 干扰 6 篇里的 OpenAI《New tools for building agents》不是纯干扰：cf-001 要求"多篇 OpenAI 与 Anthropic 的文章都提到人在回路"，而库里 OpenAI 侧只有《A Practical Guide to Building Agents》提到，补上它才凑够两篇（实测该文有 "Human oversight is recommended"）。<br> **冻版**：这 10 篇记下来源链接 ＋ 抓取时间，作为版本锚；金标准里的精确数字与引文都绑在这一版上——换版必须重跑，不能只改文档。 |
+| **测试语料** | 已定（当前 HTML 15 篇） | **冻结快照**：`s_896a7ab08b84f25f`。当前活动库中的 15 篇 HTML 共同组成 suite 共享现场；完整清单和取舍见 [ADR 0006](../decisions/0006-use-current-html-corpus-for-retrieval-baseline.md)。<br> **原文锚点**：主用例中的精确数字、引文和归属继续以 Anthropic《How we contain Claude》与 OpenAI《Harness engineering》为准，两篇都在当前快照中。<br> **当前语料范围**：Anthropic 6 篇、OpenAI 2 篇、Lilian Weng 3 篇、Chip Huyen 1 篇、Eugene Yan 1 篇、Hamel 2 篇。<br> **不进入当前快照**：OpenAI《A Practical Guide to Building Agents》只有 PDF；首版不支持 PDF 入库，也不得通过格式转换伪装成 HTML 原始来源。<br> **冻版**：语料增删、版本替换或重新入库都必须形成新 snapshot；换快照后需重新建立评测基线，不能与当前 run 直接比较。 |
 | **N（跑几次）／K（几次算过）** | 已定（统一值） | N＝10、K＝9——同一配置跑 10 次，其中 ≥9 次满足该用例的金标准（且红线零违反）⇒ 该用例通过。暂不按类区分，先跑一轮看效果再校准。 |
 | **各类目标值** | 已定（统一值） | 不按类另设，与 N／K 同口径（同一配置跑 10 次、≥9 次满足 ⇒ 通过）。当前每类只有 1 条代表用例，类级通过率与用例级判定重合；等某类补到第二条用例时，再回来定该类自己的目标。 |
 | **判定实现** | 已定（待实现） | 把金标准文档变成能跑的判定程序，三样产出：① **分工映射**——按 §1 A1 的规则，把 §2／§3 的每条判定项批量归到执行者（程序／LLM／人），**不逐条写进用例表**；② **判官提示词**——语义类判定项写成一问一判的提示词（一次调用只做一类认知任务，输出三态结论 ＋ 依据原句）；③ **程序侧判定器与聚合器**——确定性检查（引用块存在与归属、是否截断、格式字段、精确数值）＋ 按 §1 A5 的聚合规则出 pass／fail／pending。 |

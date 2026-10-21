@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 
 import httpx
+import pytest
 
 from app.ingestion.source import FetchedResponse
 from app.main import create_app
@@ -116,3 +117,26 @@ def test_preview_requires_launch_token(tmp_path: Path) -> None:
 
     response = asyncio.run(request())
     assert response.status_code == 401
+
+
+def test_unexpected_extractor_failure_has_stable_error_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    html_path = tmp_path / "unexpected.html"
+    html_path.write_bytes(fixture_bytes("article.html"))
+
+    def fail_extraction(*_args, **_kwargs) -> None:
+        raise RuntimeError("simulated extractor defect")
+
+    monkeypatch.setattr(
+        "app.ingestion.service.extract_html_document",
+        fail_extraction,
+    )
+    response = request_preview(
+        tmp_path,
+        {"source_kind": "file", "source_value": str(html_path)},
+    )
+
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "extractor_internal_error"

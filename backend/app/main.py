@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import secrets
 import time
@@ -9,7 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -22,6 +23,8 @@ from app.collections.models import (
     RollbackCollectionRequest,
 )
 from app.collections.service import CollectionSnapshotService
+from app.documents.models import DocumentDetailResponse
+from app.documents.service import DocumentDetailService
 from app.indexing.models import IndexBundle
 from app.ingestion.errors import IngestFailure
 from app.ingestion.models import (
@@ -42,8 +45,14 @@ from app.settings.models import (
 from app.settings.service import ModelSettingsService
 from app.storage.credentials import CredentialStore, WindowsCredentialStore
 from app.storage.database import StorageDatabase
-from app.tasks.models import BackgroundIngestRequest, BackgroundTaskRecord
+from app.tasks.models import (
+    BackgroundIngestRequest,
+    BackgroundTaskRecord,
+    PreviewIngestTaskRequest,
+)
 from app.tasks.service import BackgroundTaskService
+from app.workspace.models import ResetWorkspaceRequest, ResetWorkspaceResponse
+from app.workspace.service import WorkspaceResetService
 
 
 class HealthResponse(BaseModel):
@@ -118,6 +127,18 @@ def create_app(
         if resolved_data_root is not None
         and ingestion_service is not None
         and collection_service is not None
+        else None
+    )
+    workspace_reset_service = (
+        WorkspaceResetService(resolved_data_root, task_service)
+        if resolved_data_root is not None and task_service is not None
+        else None
+    )
+    document_detail_service = (
+        DocumentDetailService(resolved_data_root, collection_service, task_service)
+        if resolved_data_root is not None
+        and collection_service is not None
+        and task_service is not None
         else None
     )
 
@@ -283,6 +304,22 @@ def create_app(
             )
         return collection_service.current()
 
+    @app.get(
+        "/api/collections/current/documents/{doc_id}",
+        response_model=DocumentDetailResponse,
+        dependencies=protected,
+    )
+    async def current_document_detail(doc_id: str) -> DocumentDetailResponse:
+        """读取活动快照中一篇文档的正文、版本和相关操作。"""
+
+        if document_detail_service is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return document_detail_service.get(doc_id)
+
     @app.post(
         "/api/collections/rollback",
         response_model=PublishCollectionResponse,
@@ -368,6 +405,42 @@ def create_app(
         return await model_settings_service.test_embedding()
 
     @app.post(
+        "/api/workspace/reset",
+        response_model=ResetWorkspaceResponse,
+        dependencies=protected,
+    )
+    async def reset_workspace(
+        _request: ResetWorkspaceRequest,
+    ) -> ResetWorkspaceResponse:
+        """清空知识库、入库任务和派生文件，保留模型设置与本地凭证。"""
+
+        if workspace_reset_service is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return await asyncio.to_thread(workspace_reset_service.reset)
+
+    @app.post(
+        "/api/tasks/ingest/preview",
+        response_model=BackgroundTaskRecord,
+        dependencies=protected,
+    )
+    async def create_preview_ingest_task(
+        request: PreviewIngestTaskRequest,
+    ) -> BackgroundTaskRecord:
+        """复用单篇预览产物启动完整 S2-S6 入库并写入操作历史。"""
+
+        if task_service is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return await task_service.create_from_preview(request)
+
+    @app.post(
         "/api/tasks/ingest",
         response_model=BackgroundTaskRecord,
         dependencies=protected,
@@ -384,6 +457,24 @@ def create_app(
                 503,
             )
         return await task_service.create(request)
+
+    @app.get(
+        "/api/tasks",
+        response_model=list[BackgroundTaskRecord],
+        dependencies=protected,
+    )
+    async def list_background_tasks(
+        limit: int = Query(default=20, ge=1, le=100),
+    ) -> list[BackgroundTaskRecord]:
+        """返回最近入库任务，包含逐来源成功或失败结果。"""
+
+        if task_service is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return task_service.list_recent(limit=limit)
 
     @app.get(
         "/api/tasks/{task_id}",

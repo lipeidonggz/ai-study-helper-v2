@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -46,6 +47,7 @@ from app.storage.database import StorageDatabase
 from app.storage.document_registry import DocumentRegistry
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+_LOGGER = logging.getLogger(__name__)
 
 
 class IngestionService:
@@ -88,7 +90,18 @@ class IngestionService:
             source.model_dump_json(indent=2),
         )
 
-        extracted = extract_html_document(source, acquired.decoded_html)
+        try:
+            extracted = extract_html_document(source, acquired.decoded_html)
+        except IngestFailure:
+            raise
+        except Exception as error:
+            # 提取器缺陷必须留下可诊断日志，但对用户暴露稳定错误码，不能把 Python 异常当业务结果。
+            _LOGGER.exception("unexpected HTML extraction failure for job %s", job_id)
+            raise IngestFailure(
+                "extractor_internal_error",
+                "HTML extraction failed because of an unexpected internal error",
+                500,
+            ) from error
         self._store.write_json(
             job_id,
             "extracted.json",
@@ -158,6 +171,20 @@ class IngestionService:
             response.model_dump_json(indent=2),
         )
         return response
+
+    def preview_source(self, job_id: str) -> SourceArtifact:
+        """读取已完成预览的来源，供后台任务在不重新抓取的情况下继续入库。"""
+
+        preview = IngestPreviewResponse.model_validate_json(
+            self._store.read_text(job_id, "preview.json")
+        )
+        if preview.job_id != job_id:
+            raise IngestFailure(
+                "preview_job_invalid",
+                "preview artifact job identity does not match the requested job",
+                409,
+            )
+        return preview.source
 
     def persist(self, request: PersistIngestRequest) -> IngestDocumentResponse:
         """复用预览 artifact 登记文档版本，并在一致性校验后保存正式派生物。"""
