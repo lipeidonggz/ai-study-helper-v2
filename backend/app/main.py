@@ -5,6 +5,7 @@ import os
 import secrets
 import time
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
@@ -33,6 +34,8 @@ from app.ingestion.models import (
 from app.ingestion.service import IngestionService
 from app.ingestion.source import UrlFetcher
 from app.providers.embeddings import EmbeddingProvider
+from app.tasks.models import BackgroundIngestRequest, BackgroundTaskRecord
+from app.tasks.service import BackgroundTaskService
 
 
 class HealthResponse(BaseModel):
@@ -86,6 +89,27 @@ def create_app(
     collection_service = (
         CollectionSnapshotService(resolved_data_root) if resolved_data_root is not None else None
     )
+    task_service = (
+        BackgroundTaskService(
+            resolved_data_root,
+            ingestion_service,
+            collection_service,
+        )
+        if resolved_data_root is not None
+        and ingestion_service is not None
+        and collection_service is not None
+        else None
+    )
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        if task_service is not None:
+            await task_service.start()
+        try:
+            yield
+        finally:
+            if task_service is not None:
+                await task_service.stop()
 
     started_at = time.monotonic()
     app = FastAPI(
@@ -94,6 +118,7 @@ def create_app(
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
+        lifespan=lifespan,
     )
     app.add_middleware(
         CORSMiddleware,
@@ -255,6 +280,88 @@ def create_app(
                 503,
             )
         return collection_service.rollback(request)
+
+    @app.post(
+        "/api/tasks/ingest",
+        response_model=BackgroundTaskRecord,
+        dependencies=protected,
+    )
+    async def create_background_ingest_task(
+        request: BackgroundIngestRequest,
+    ) -> BackgroundTaskRecord:
+        """启动 S0-S6 后台入库任务并立即返回任务 ID。"""
+
+        if task_service is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return await task_service.create(request)
+
+    @app.get(
+        "/api/tasks/{task_id}",
+        response_model=BackgroundTaskRecord,
+        dependencies=protected,
+    )
+    async def get_background_task(task_id: str) -> BackgroundTaskRecord:
+        """查询后台任务状态和进度。"""
+
+        if task_service is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return task_service.get(task_id)
+
+    @app.post(
+        "/api/tasks/{task_id}/pause",
+        response_model=BackgroundTaskRecord,
+        dependencies=protected,
+    )
+    async def pause_background_task(task_id: str) -> BackgroundTaskRecord:
+        """请求后台任务在下一个阶段边界暂停。"""
+
+        if task_service is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return task_service.pause(task_id)
+
+    @app.post(
+        "/api/tasks/{task_id}/resume",
+        response_model=BackgroundTaskRecord,
+        dependencies=protected,
+    )
+    async def resume_background_task(task_id: str) -> BackgroundTaskRecord:
+        """从暂停或中断状态恢复后台任务。"""
+
+        if task_service is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return await task_service.resume(task_id)
+
+    @app.post(
+        "/api/tasks/{task_id}/cancel",
+        response_model=BackgroundTaskRecord,
+        dependencies=protected,
+    )
+    async def cancel_background_task(task_id: str) -> BackgroundTaskRecord:
+        """请求后台任务在下一个阶段边界取消。"""
+
+        if task_service is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return task_service.cancel(task_id)
 
     return app
 

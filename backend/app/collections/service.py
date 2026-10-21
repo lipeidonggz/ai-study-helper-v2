@@ -57,10 +57,15 @@ class CollectionSnapshotService:
         self._registry = CollectionRegistry(self._database)
         self._collections_root = self._data_root / "collections"
 
-    def publish(self, job_ids: list[str]) -> PublishCollectionResponse:
+    def publish(
+        self,
+        job_ids: list[str],
+        *,
+        extra_failures: list[SnapshotFailure] | None = None,
+    ) -> PublishCollectionResponse:
         """构建快照并尝试发布；成功或部分成功才切换活动指针。"""
 
-        manifest = self.build(job_ids)
+        manifest = self.build(job_ids, extra_failures=extra_failures)
         snapshot_path = f"collections/{manifest.snapshot_id}"
         if manifest.status == "failed":
             record = self._registry.record_aborted(
@@ -246,10 +251,15 @@ class CollectionSnapshotService:
                         409,
                     )
 
-    def build(self, job_ids: list[str]) -> CandidateSnapshotManifest:
+    def build(
+        self,
+        job_ids: list[str],
+        *,
+        extra_failures: list[SnapshotFailure] | None = None,
+    ) -> CandidateSnapshotManifest:
         """从已有 S5 候选索引构建不可变 S6 快照。"""
 
-        if not job_ids:
+        if not job_ids and not extra_failures:
             raise IngestFailure(
                 "snapshot_no_documents",
                 "at least one job_id is required to build a collection snapshot",
@@ -258,7 +268,7 @@ class CollectionSnapshotService:
         self._collections_root.mkdir(parents=True, exist_ok=True)
         snapshot_id = f"s_{os.urandom(8).hex()}"
         staging_directory = Path(tempfile.mkdtemp(prefix=".b-", dir=self._collections_root))
-        failures: list[SnapshotFailure] = []
+        failures: list[SnapshotFailure] = list(extra_failures or [])
         candidates: list[_CandidateDocument] = []
         seen_jobs: set[str] = set()
         seen_documents: set[tuple[str, int]] = set()
