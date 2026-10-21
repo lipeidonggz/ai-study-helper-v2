@@ -143,6 +143,23 @@ interface ApiErrorBody {
   };
 }
 
+/** embedding 设置和最近一次连通性测试。 */
+interface ModelSettingsResponse {
+  embedding_configured: boolean;
+  embedding_model_id: string;
+  embedding_dimension: number;
+  embedding_last_test: {
+    status: "success" | "failed";
+    model_id: string;
+    dimension: number;
+    request_id: string | null;
+    input_tokens: number;
+    message: string | null;
+    tested_at: string;
+  } | null;
+  chat_configured: boolean;
+}
+
 const managerStatus = ref<ManagerStatus>("starting");
 const connection = ref<BackendConnection | null>(null);
 const runtime = ref<RuntimeInfo | null>(null);
@@ -157,6 +174,12 @@ const ingestError = ref("");
 const saveError = ref("");
 const ingesting = ref(false);
 const saving = ref(false);
+const modelSettings = ref<ModelSettingsResponse | null>(null);
+const embeddingKey = ref("");
+const settingsBusy = ref(false);
+const settingsLoading = ref(true);
+const settingsError = ref("");
+const settingsMessage = ref("");
 
 let unlisten: UnlistenFn | undefined;
 let healthTimer: number | undefined;
@@ -263,6 +286,165 @@ function ingestErrorMessage(code: string, detail: string): string {
   return label ? `${label}（错误码：${code}）` : `${detail}（错误码：${code}）`;
 }
 
+/** 把设置 API 错误转换成用户可操作的提示。 */
+function settingsErrorMessage(code: string, detail: string): string {
+  const labels: Record<string, string> = {
+    embedding_api_key_missing: "请先保存 embedding API Key，再进行连通性测试。",
+    embedding_authentication_failed: "Key 无效或没有 embedding 权限。",
+    embedding_rate_limited: "请求被限流，请稍后再测试。",
+    embedding_upstream_unavailable: "暂时无法连接 embedding 服务，请检查网络后重试。",
+  };
+  return labels[code]
+    ? `${labels[code]}（错误码：${code}）`
+    : `${detail}（错误码：${code}）`;
+}
+
+/** 读取设置状态；响应不包含 Key 明文。 */
+async function loadModelSettings(maxAttempts = 3): Promise<void> {
+  if (!connection.value) {
+    return;
+  }
+  settingsLoading.value = true;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      const response = await fetch(`${connection.value.baseUrl}/api/settings/models`, {
+        headers: { "x-launch-token": connection.value.token },
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      modelSettings.value = (await response.json()) as ModelSettingsResponse;
+      settingsError.value = "";
+      settingsLoading.value = false;
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxAttempts - 1) {
+        await new Promise((resolve) =>
+          window.setTimeout(resolve, 250 * (attempt + 1)),
+        );
+      }
+    }
+  }
+  settingsLoading.value = false;
+  settingsError.value = `读取模型设置失败：${String(lastError)}`;
+}
+
+/** 安全保存 embedding Key，成功后清空输入框。 */
+async function saveEmbeddingKey(): Promise<void> {
+  if (!connection.value || !embeddingKey.value.trim() || settingsBusy.value) {
+    return;
+  }
+  settingsBusy.value = true;
+  settingsError.value = "";
+  settingsMessage.value = "";
+  try {
+    const response = await fetch(`${connection.value.baseUrl}/api/settings/embedding-key`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-launch-token": connection.value.token,
+      },
+      body: JSON.stringify({ api_key: embeddingKey.value.trim() }),
+    });
+    const body = (await response.json()) as ModelSettingsResponse | ApiErrorBody;
+    if (!response.ok) {
+      const failure = body as ApiErrorBody;
+      throw new Error(
+        settingsErrorMessage(
+          failure.error?.code ?? "request_failed",
+          failure.error?.message ?? failure.detail ?? `HTTP ${response.status}`,
+        ),
+      );
+    }
+    modelSettings.value = body as ModelSettingsResponse;
+    embeddingKey.value = "";
+    settingsMessage.value = "Key 已保存到 Windows Credential Manager。";
+  } catch (error) {
+    settingsError.value = String(error);
+  } finally {
+    settingsBusy.value = false;
+  }
+}
+
+/** 使用已保存 Key 做一次真实的短文本 embedding 检查。 */
+async function testEmbeddingKey(): Promise<void> {
+  if (!connection.value || settingsBusy.value) {
+    return;
+  }
+  settingsBusy.value = true;
+  settingsError.value = "";
+  settingsMessage.value = "";
+  try {
+    const response = await fetch(
+      `${connection.value.baseUrl}/api/settings/embedding-key/test`,
+      {
+        method: "POST",
+        headers: { "x-launch-token": connection.value.token },
+      },
+    );
+    const body = (await response.json()) as
+      | ModelSettingsResponse["embedding_last_test"]
+      | ApiErrorBody;
+    if (!response.ok) {
+      const failure = body as ApiErrorBody;
+      throw new Error(
+        settingsErrorMessage(
+          failure.error?.code ?? "request_failed",
+          failure.error?.message ?? failure.detail ?? `HTTP ${response.status}`,
+        ),
+      );
+    }
+    const result = body as NonNullable<ModelSettingsResponse["embedding_last_test"]>;
+    await loadModelSettings();
+    settingsMessage.value =
+      result.status === "success"
+        ? `连接成功：${result.model_id}，${result.dimension} 维。`
+        : `连接失败：${result.message ?? "未知错误"}`;
+  } catch (error) {
+    settingsError.value = String(error);
+  } finally {
+    settingsBusy.value = false;
+  }
+}
+
+/** 删除已保存 Key，并清除旧连通性结果。 */
+async function deleteEmbeddingKey(): Promise<void> {
+  if (!connection.value || settingsBusy.value) {
+    return;
+  }
+  settingsBusy.value = true;
+  settingsError.value = "";
+  settingsMessage.value = "";
+  try {
+    const response = await fetch(
+      `${connection.value.baseUrl}/api/settings/embedding-key/delete`,
+      {
+        method: "POST",
+        headers: { "x-launch-token": connection.value.token },
+      },
+    );
+    const body = (await response.json()) as ModelSettingsResponse | ApiErrorBody;
+    if (!response.ok) {
+      const failure = body as ApiErrorBody;
+      throw new Error(
+        settingsErrorMessage(
+          failure.error?.code ?? "request_failed",
+          failure.error?.message ?? failure.detail ?? `HTTP ${response.status}`,
+        ),
+      );
+    }
+    modelSettings.value = body as ModelSettingsResponse;
+    settingsMessage.value = "Key 已删除。";
+  } catch (error) {
+    settingsError.value = String(error);
+  } finally {
+    settingsBusy.value = false;
+  }
+}
+
 /** 定时检查已认证 sidecar 是否仍然可用。 */
 async function checkRuntime(): Promise<void> {
   if (!connection.value || disposed) {
@@ -282,6 +464,9 @@ async function checkRuntime(): Promise<void> {
     runtime.value = (await response.json()) as RuntimeInfo;
     if (managerStatus.value === "running") {
       message.value = "Tauri 已连接本地 Python sidecar。";
+      if (!modelSettings.value && !settingsLoading.value) {
+        void loadModelSettings(2);
+      }
     }
   } catch (error) {
     runtime.value = null;
@@ -298,6 +483,7 @@ async function connect(): Promise<void> {
     const status = await invoke<BackendStatus>("backend_status");
     applyStatus(status);
     await checkRuntime();
+    await loadModelSettings();
   } catch (error) {
     managerStatus.value = "failed";
     message.value = `无法读取 Tauri 后端状态：${String(error)}`;
@@ -438,6 +624,76 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </header>
+
+    <section class="settings-card">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">MODEL SETTINGS</p>
+          <h2>连接 embedding 模型</h2>
+        </div>
+        <span
+          class="settings-pill"
+          :class="{
+            configured: modelSettings?.embedding_configured,
+            loading: settingsLoading,
+          }"
+        >
+          {{
+            settingsLoading
+              ? "读取中"
+              : modelSettings?.embedding_configured
+                ? "已配置"
+                : "未配置"
+          }}
+        </span>
+      </div>
+      <p class="settings-description">
+        Key 会保存到 Windows Credential Manager；页面和日志不会保存或显示 Key 明文。
+      </p>
+      <div class="settings-form">
+        <input
+          v-model="embeddingKey"
+          type="password"
+          autocomplete="off"
+          placeholder="输入新的 embedding API Key"
+          @keyup.enter="saveEmbeddingKey"
+        />
+        <button
+          type="button"
+          class="primary-button"
+          :disabled="settingsBusy || !embeddingKey.trim()"
+          @click="saveEmbeddingKey"
+        >
+          保存 Key
+        </button>
+        <button
+          type="button"
+          class="secondary-button settings-test-button"
+          :disabled="settingsBusy || !modelSettings?.embedding_configured"
+          @click="testEmbeddingKey"
+        >
+          {{ settingsBusy ? "检查中…" : "测试连接" }}
+        </button>
+        <button
+          v-if="modelSettings?.embedding_configured"
+          type="button"
+          class="danger-button"
+          :disabled="settingsBusy"
+          @click="deleteEmbeddingKey"
+        >
+          删除 Key
+        </button>
+      </div>
+      <div v-if="modelSettings" class="settings-meta">
+        <span>模型：{{ modelSettings.embedding_model_id }}</span>
+        <span>维度：{{ modelSettings.embedding_dimension }}</span>
+        <span v-if="modelSettings.embedding_last_test">
+          最近测试：{{ modelSettings.embedding_last_test.status === "success" ? "成功" : "失败" }}
+        </span>
+      </div>
+      <p v-if="settingsMessage" class="settings-message">{{ settingsMessage }}</p>
+      <p v-if="settingsError" class="error-box">{{ settingsError }}</p>
+    </section>
 
     <section class="import-card">
       <div class="section-heading">
