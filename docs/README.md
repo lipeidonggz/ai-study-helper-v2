@@ -6,9 +6,9 @@
 
 ## 当前状态
 
-- 阶段：实现阶段，前六个垂直切片已完成。
+- 阶段：实现阶段，前七个垂直切片已完成。
 - 实现状态：桌面运行链、安装链、HTML 导入预览、SQLite 文档身份／版本登记以及 S5 候选双索引已实现。
-- 下一步：实现 007 collection 快照、manifest 与原子发布。
+- 当前工作：007 collection 快照、manifest 与原子发布已完成；下一步进入 008。
 
 ## 设计基线
 
@@ -56,6 +56,7 @@
 - [005 · SQLite 文档身份与版本登记（已完成）](development/slices/005-sqlite-document-registry.md)
 - [005 · 文档保存人工验收清单（已完成）](development/manual-tests/005-document-persistence.md)
 - [006 · Qwen embedding 与 dense／关键词双索引（已完成）](development/slices/006-embedding-dual-index.md)
+- [007 · collection 快照、manifest 与原子发布（已完成）](development/slices/007-collection-snapshot-publish.md)
 
 ## 旧仓库
 

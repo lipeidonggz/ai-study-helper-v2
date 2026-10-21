@@ -97,5 +97,5 @@
 
 ## 后续
 
-- 006 已完成 Qwen embedding、dense／关键词候选索引；下一步进入 007 S6 manifest 与 collection 原子发布。
+- 006 已完成 Qwen embedding、dense／关键词候选索引；007 S6 manifest 与 collection 原子发布也已完成；下一步进入 008 后台任务与设置链。
 - 文档列表与删除、人工改标题、跨来源合并另立切片。

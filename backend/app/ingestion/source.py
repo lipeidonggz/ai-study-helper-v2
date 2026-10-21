@@ -120,26 +120,38 @@ class ArtifactStore:
     ) -> str:
         """只允许读取 data root 内的相对 artifact ref。"""
 
-        relative_path = Path(artifact_ref)
-        if relative_path.is_absolute():
-            raise IngestFailure("invalid_artifact_ref", "artifact ref must be relative", 500)
-        target = (self.data_root / relative_path).resolve()
-        if not target.is_relative_to(self.data_root):
-            raise IngestFailure("invalid_artifact_ref", "artifact ref escapes data root", 500)
+        target = self.ref_path(artifact_ref, missing_code=missing_code)
         try:
             return target.read_text(encoding="utf-8")
-        except FileNotFoundError as error:
-            raise IngestFailure(
-                missing_code,
-                f"required artifact is missing: {artifact_ref}",
-                404,
-            ) from error
         except OSError as error:
             raise IngestFailure(
                 "artifact_unreadable",
                 f"could not read artifact {artifact_ref}: {error}",
                 500,
             ) from error
+
+    def ref_path(
+        self,
+        artifact_ref: str,
+        *,
+        missing_code: str = "artifact_missing",
+        must_be_file: bool = True,
+    ) -> Path:
+        """解析 data root 内的 ref，并拒绝越界和缺失路径。"""
+
+        relative_path = Path(artifact_ref)
+        if relative_path.is_absolute():
+            raise IngestFailure("invalid_artifact_ref", "artifact ref must be relative", 500)
+        target = (self.data_root / relative_path).resolve()
+        if not target.is_relative_to(self.data_root):
+            raise IngestFailure("invalid_artifact_ref", "artifact ref escapes data root", 500)
+        if (must_be_file and not target.is_file()) or (not must_be_file and not target.exists()):
+            raise IngestFailure(
+                missing_code,
+                f"required artifact is missing: {artifact_ref}",
+                404,
+            )
+        return target
 
     @staticmethod
     def _atomic_write(target: Path, data: bytes) -> None:

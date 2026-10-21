@@ -3,7 +3,7 @@
 - 状态：已完成
 - 开始日期：2026-10-21
 - 关联设计：[07 S5 建索引](../../design/07-html-ingestion-design.md)、[09 Qwen 与 LanceDB](../../design/09-technology-selection.md)
-- 后续切片：007 collection 快照、manifest 与原子发布
+- 后续切片：007 collection 快照、manifest 与原子发布（已完成）；之后进入 008
 
 ## 目标
 

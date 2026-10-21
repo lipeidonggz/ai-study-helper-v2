@@ -618,7 +618,7 @@ trace manifest 同时记录 `replay_scope=metadata|evidence|retrieval`：`metada
 | **提示词** | `bundle_source=release\|experiment`；bundle ID／版本／内容 hash／父版本（若有）；每个模板的 ID／版本／hash；工具描述 bundle 的版本与 hash；每次实际渲染提示词的 hash | 模型看到的行为规则和工具说明来自发布基线还是实验版本，具体是哪一版 |
 | **Agent 控制** | 循环版本、Action／Observation 执行契约版本、工具契约版本、工具白名单版本 | 循环语义、协议解析和允许能力是哪一版 |
 | **模型（两套）** | **对话**：provider＝DeepSeek，请求模型＝最新 Flash，供应商返回的模型版本／fingerprint（若有）、温度、top-p、max output tokens、seed、request ID；**embedding**：provider＝阿里云百炼，model ID＝`qwen3.7-text-embedding`，1024 维，dense 输出，记录模型版本、归一化方式和 request ID | 分别说明生成答案和生成向量用的是哪个模型服务；实现时固定实际 model ID，不能只记录市场名称 |
-| **语料与索引** | `collection_snapshot_id`；doc 版本；chunker；固定 sizing estimator；embedding 模型、版本与 tokenizer；索引 schema 与检索常数（如 RRF、Top-K） | 检索基于哪一份语料和哪一种索引实现；运行时结果预算由当前对话模型实测；块大小和 embedding 输入按各自版本解析 |
+| **语料与索引** | `collection_snapshot_id`；doc 版本；chunker；固定 sizing estimator；embedding 模型、版本与 tokenizer；索引 schema | 检索基于哪一份语料和哪一种索引实现；运行时结果预算由当前对话模型实测；块大小和 embedding 输入按各自版本解析 |
 | **运行配置** | 上下文／请求预算、最终回答预留、trace 模式及其他可能影响结果的开关 | 同一运行是否受到不同用户配置影响 |
 
 版本号用于人阅读和比较，**内容 hash 才是精确身份**。同一版本号对应了不同内容，应视为错误；缺少供应商模型快照时，明确记录“无法固定模型后端”，不能把请求模型名冒充精确版本。
@@ -854,7 +854,7 @@ trace manifest 同时记录 `replay_scope=metadata|evidence|retrieval`：`metada
 | **token 口径** | 固定的 `context_token_estimate`；运行时按当前模型对实际工具 payload 计算 `result_tokens`；embedding 构建期 token 预检与实际 usage 另行记录 | 默认块目标、`result_tokens`、上下文／请求预算使用前者；Qwen 批处理与计费使用 API 返回的实际 usage，禁止混算 |
 | **向量索引** | embedding 的 provider、实际 model ID、模型版本、维度、距离度量、归一化方式、query/document 输入格式；向量索引与 collection 快照一一绑定 | `search_blocks` 用同一 embedding 模型生成 query 向量；上游失败返回 `upstream_unavailable`；更换 embedding 模型必须新建快照 |
 | **关键词索引与原文** | 保留未改写原文；可重建的倒排／关键词索引；索引 schema 与构建参数进入快照 manifest | `scan_term` 在原文上做 NFC＋英文大小写折叠后的子串扫描；混合检索的精确路可回查原文 |
-| **排序与检索常数** | RRF 参数、候选深度、Top-K 及其他影响结果的常数纳入 collection manifest；相同快照下输入与参数一致时结果稳定 | 结果按 RRF 降序；平局按 `doc_id → block_index → block_id`；支持检索重放与版本差异定位 |
+| **排序与检索常数** | RRF 参数、候选深度、Top-K 等查询时参数纳入 RetrievalProfile／ExecutionPlan 与 trace；相同快照下输入与参数一致时结果稳定 | 结果按 RRF 降序；平局按 `doc_id → block_index → block_id`；支持检索重放与版本差异定位 |
 | **构建完整性与错误** | 逐文档成功／失败状态、重试记录、切分统计、embedding 统计、索引完成状态；任一阶段失败都不能静默标记成功 | 状态页和工具可如实报告 partial；模型不得把 missing doc 当成正文无此内容；运维能定位失败阶段 |
 | **快照生命周期** | 旧快照只读；保留期限／数量可配置；删除前检查 trace 是否需要检索重放；损坏可检测 | 本机 trace 在快照存在时可检索重放；快照缺失时如实降级为证据复现 |
 | **引用可展示性** | 能由 `doc_id`／`block_id` 稳定解析出文档标题、来源显示名和块预览；历史快照中的映射不能因后续重命名而漂移 | 模型输出机器引用键，前端展示为用户可读、可点击的来源，不直接向非技术用户暴露内部 ID |
