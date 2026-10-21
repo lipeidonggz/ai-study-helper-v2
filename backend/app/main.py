@@ -34,6 +34,14 @@ from app.ingestion.models import (
 from app.ingestion.service import IngestionService
 from app.ingestion.source import UrlFetcher
 from app.providers.embeddings import EmbeddingProvider
+from app.settings.models import (
+    ModelSettingsResponse,
+    ProviderTestResult,
+    SetEmbeddingKeyRequest,
+)
+from app.settings.service import ModelSettingsService
+from app.storage.credentials import CredentialStore, WindowsCredentialStore
+from app.storage.database import StorageDatabase
 from app.tasks.models import BackgroundIngestRequest, BackgroundTaskRecord
 from app.tasks.service import BackgroundTaskService
 
@@ -68,6 +76,8 @@ def create_app(
     data_root: Path | None = None,
     url_fetcher: UrlFetcher | None = None,
     embedding_provider_factory: Callable[[], EmbeddingProvider] | None = None,
+    credential_store: CredentialStore | None = None,
+    embedding_test_provider_factory: Callable[[str], EmbeddingProvider] | None = None,
 ) -> FastAPI:
     """创建只监听本机、使用启动令牌保护写接口的 FastAPI 应用。"""
 
@@ -88,6 +98,16 @@ def create_app(
     )
     collection_service = (
         CollectionSnapshotService(resolved_data_root) if resolved_data_root is not None else None
+    )
+    resolved_credentials = credential_store or WindowsCredentialStore()
+    model_settings_service = (
+        ModelSettingsService(
+            StorageDatabase(resolved_data_root),
+            resolved_credentials,
+            embedding_test_provider_factory=embedding_test_provider_factory,
+        )
+        if resolved_data_root is not None
+        else None
     )
     task_service = (
         BackgroundTaskService(
@@ -280,6 +300,72 @@ def create_app(
                 503,
             )
         return collection_service.rollback(request)
+
+    @app.get(
+        "/api/settings/models",
+        response_model=ModelSettingsResponse,
+        dependencies=protected,
+    )
+    async def get_model_settings() -> ModelSettingsResponse:
+        """返回不含 Key 明文的模型设置状态。"""
+
+        if model_settings_service is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return model_settings_service.status()
+
+    @app.post(
+        "/api/settings/embedding-key",
+        response_model=ModelSettingsResponse,
+        dependencies=protected,
+    )
+    async def set_embedding_key(
+        request: SetEmbeddingKeyRequest,
+    ) -> ModelSettingsResponse:
+        """安全保存 embedding Key；响应不回传 Key。"""
+
+        if model_settings_service is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return model_settings_service.set_embedding_key(request.api_key)
+
+    @app.post(
+        "/api/settings/embedding-key/delete",
+        response_model=ModelSettingsResponse,
+        dependencies=protected,
+    )
+    async def delete_embedding_key() -> ModelSettingsResponse:
+        """删除 embedding Key 和旧连通性结果。"""
+
+        if model_settings_service is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return model_settings_service.delete_embedding_key()
+
+    @app.post(
+        "/api/settings/embedding-key/test",
+        response_model=ProviderTestResult,
+        dependencies=protected,
+    )
+    async def test_embedding_key() -> ProviderTestResult:
+        """使用已保存 Key 做一次最小 embedding 连通性验证。"""
+
+        if model_settings_service is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return await model_settings_service.test_embedding()
 
     @app.post(
         "/api/tasks/ingest",

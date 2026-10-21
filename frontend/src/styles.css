@@ -229,6 +229,7 @@ input {
 }
 
 .import-card,
+.settings-card,
 .preview-head,
 .save-strip,
 .outline-card,
@@ -244,6 +245,94 @@ input {
 
 .import-card {
   padding: 28px;
+}
+
+.settings-card {
+  margin-top: 34px;
+  padding: 24px 28px;
+}
+
+.settings-description {
+  margin: 10px 0 18px;
+  color: #667568;
+  line-height: 1.65;
+}
+
+.settings-pill {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 6px 11px;
+  color: #8a5e11;
+  background: #fff3d5;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.settings-pill.configured {
+  color: #1f6b42;
+  background: #dcefe1;
+}
+
+.settings-pill.loading {
+  color: #526257;
+  background: #e5ece3;
+}
+
+.settings-form {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-form input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 1px solid #bdc9bd;
+  border-radius: 11px;
+  padding: 11px 13px;
+  color: #21382a;
+  background: #fbfcfa;
+}
+
+.settings-form .primary-button,
+.settings-test-button,
+.danger-button {
+  flex: 0 0 auto;
+  margin-top: 0;
+}
+
+.settings-test-button {
+  border: 0;
+}
+
+.danger-button {
+  border: 1px solid #d6b4b4;
+  border-radius: 11px;
+  padding: 10px 14px;
+  color: #8d3030;
+  background: #fff6f5;
+  cursor: pointer;
+}
+
+.danger-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.settings-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-top: 14px;
+  color: #6c7b70;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 0.76rem;
+}
+
+.settings-message {
+  margin: 14px 0 0;
+  color: #1f6b42;
+  line-height: 1.55;
 }
 
 .section-heading,

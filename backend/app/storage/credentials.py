@@ -9,6 +9,7 @@ from app.ingestion.errors import IngestFailure
 
 CREDENTIAL_SERVICE_NAME = "ai-study-helper"
 EMBEDDING_API_KEY_USERNAME = "embedding-api-key"
+CHAT_API_KEY_USERNAME = "chat-api-key"
 
 
 class CredentialStore(Protocol):
