@@ -1,3 +1,7 @@
+//! Tauri 桌面壳：管理 Python sidecar、启动令牌、有限重启和进程树清理。
+
+#![warn(missing_docs)]
+
 use serde::Serialize;
 use std::{
     fs::{self, OpenOptions},
@@ -63,6 +67,7 @@ struct BackendLaunchSpec {
     log_directory: PathBuf,
 }
 
+/// 管理 Python sidecar 的生命周期、重启上限和 Windows 进程树清理。
 struct BackendManager {
     port: u16,
     token: String,
@@ -77,6 +82,7 @@ struct BackendManager {
 }
 
 impl BackendManager {
+    /// 创建只绑定回环地址的后端管理器。
     fn new(port: u16, token: String) -> Result<Self, String> {
         Ok(Self {
             port,
@@ -97,6 +103,7 @@ impl BackendManager {
         })
     }
 
+    /// 返回当前前端可用的回环地址和启动令牌。
     fn connection(&self) -> BackendConnection {
         BackendConnection {
             base_url: format!("http://127.0.0.1:{}", self.port),
@@ -104,6 +111,7 @@ impl BackendManager {
         }
     }
 
+    /// 返回最近一次 sidecar 状态快照。
     fn status(&self) -> BackendStatus {
         self.last_status
             .lock()
@@ -111,6 +119,7 @@ impl BackendManager {
             .clone()
     }
 
+    /// 更新状态并向前端发送事件。
     fn set_status(&self, app: &AppHandle, status: &'static str, message: Option<String>) {
         let next = BackendStatus {
             status,
@@ -125,6 +134,7 @@ impl BackendManager {
         let _ = app.emit("backend-status", next);
     }
 
+    /// 启动 sidecar，并通过环境变量传递启动令牌和数据根。
     fn spawn_child(&self) -> Result<Child, String> {
         let launch_spec = self
             .launch_spec
@@ -189,6 +199,7 @@ impl BackendManager {
         Ok(child)
     }
 
+    /// 启动 sidecar 并进入健康检查与有限重启流程。
     fn start(self: &Arc<Self>, app: AppHandle, data_root: PathBuf) {
         self.set_status(&app, "starting", None);
         *self
@@ -228,6 +239,7 @@ impl BackendManager {
         self.start_monitor(app);
     }
 
+    /// 监控 sidecar 退出，区分配置内停止和意外退出。
     fn start_monitor(self: &Arc<Self>, app: AppHandle) {
         let manager = Arc::clone(self);
         thread::spawn(move || loop {
@@ -277,6 +289,7 @@ impl BackendManager {
         });
     }
 
+    /// 在总重试上限内按退避策略重启 sidecar。
     fn restart_after_exit(&self, app: &AppHandle, reason: String) {
         self.terminate_job();
         let mut attempt = self.restart_count.load(Ordering::SeqCst);
@@ -330,6 +343,7 @@ impl BackendManager {
         }
     }
 
+    /// 优雅停止 sidecar，并在超时后强制终止进程树。
     fn shutdown(&self, app: &AppHandle) {
         if self.shutting_down.swap(true, Ordering::SeqCst) {
             return;
@@ -352,6 +366,7 @@ impl BackendManager {
         );
     }
 
+    /// 终止 Windows Job Object 中的全部 sidecar 子进程。
     fn terminate_job(&self) {
         #[cfg(windows)]
         unsafe {
@@ -361,6 +376,7 @@ impl BackendManager {
 }
 
 #[cfg(windows)]
+    /// 创建随桌面进程关闭而终止子进程的 Job Object。
 fn create_job_object() -> Result<usize, String> {
     let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
     if handle.is_null() {
@@ -392,10 +408,12 @@ fn create_job_object() -> Result<usize, String> {
 }
 
 #[cfg(not(windows))]
+    /// 非 Windows 环境下不使用 Job Object。
 fn create_job_object() -> Result<usize, String> {
     Ok(0)
 }
 
+    /// 创建 LocalAppData 下的产品数据目录和首次启动配置。
 fn prepare_app_data_root(app: &AppHandle) -> Result<PathBuf, String> {
     let root = app
         .path()
@@ -447,6 +465,7 @@ fn python_path(backend_dir: &std::path::Path) -> PathBuf {
 }
 
 #[cfg(debug_assertions)]
+    /// 解析开发模式下从 backend venv 启动 sidecar 的参数。
 fn resolve_launch_spec(_app: &AppHandle) -> Result<BackendLaunchSpec, String> {
     let backend_dir = backend_dir();
     let python = python_path(&backend_dir);
@@ -466,6 +485,7 @@ fn resolve_launch_spec(_app: &AppHandle) -> Result<BackendLaunchSpec, String> {
 }
 
 #[cfg(not(debug_assertions))]
+    /// 解析发布模式下随 Tauri resource 打包的 sidecar。
 fn resolve_launch_spec(app: &AppHandle) -> Result<BackendLaunchSpec, String> {
     let resource_dir = app
         .path()
@@ -492,6 +512,7 @@ fn resolve_launch_spec(app: &AppHandle) -> Result<BackendLaunchSpec, String> {
     })
 }
 
+    /// 申请一个仅绑定回环地址的临时端口。
 fn free_loopback_port() -> Result<u16, String> {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .map_err(|error| format!("failed to reserve loopback port: {error}"))?;
@@ -502,16 +523,19 @@ fn free_loopback_port() -> Result<u16, String> {
 }
 
 #[tauri::command]
+/// Tauri 命令：返回前端连接 sidecar 所需的地址和令牌。
 fn backend_connection(state: State<'_, Arc<BackendManager>>) -> BackendConnection {
     state.connection()
 }
 
 #[tauri::command]
+/// Tauri 命令：返回 sidecar 当前状态。
 fn backend_status(state: State<'_, Arc<BackendManager>>) -> BackendStatus {
     state.status()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// 构建并运行桌面应用，退出时确保 sidecar 进程树被清理。
 pub fn run() {
     let port = free_loopback_port().unwrap_or_else(|error| panic!("{error}"));
     let manager = Arc::new(

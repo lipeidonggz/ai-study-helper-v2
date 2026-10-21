@@ -6,9 +6,9 @@
 
 ## 当前状态
 
-- 阶段：实现阶段，前四个垂直切片已完成。
-- 实现状态：桌面运行链、PyInstaller release sidecar、NSIS 按用户安装以及 HTML 导入与结构预览已完成。
-- 下一步：规划并开始正式文档持久化与 collection 发布切片。
+- 阶段：实现阶段，前五个垂直切片已完成。
+- 实现状态：桌面运行链、安装链、HTML 导入预览以及 SQLite 文档身份／版本登记已实现。
+- 下一步：规划并开始 embedding、双索引与 collection 发布切片。
 
 ## 设计基线
 
@@ -47,11 +47,14 @@
 - [0002 · 使用 PyInstaller one-folder 分发后端](decisions/0002-package-backend-as-pyinstaller-directory.md)
 - [0003 · Windows 按用户安装与本地数据根](decisions/0003-windows-installer-and-data-root.md)
 - [0004 · 使用轻量确定性语言检测](decisions/0004-lightweight-language-detection.md)
+- [0005 · 代码注释与可读性门禁](decisions/0005-code-quality-gates.md)
 - [001 · 桌面 sidecar 最小启动链（已完成）](development/slices/001-desktop-sidecar-bootstrap.md)
 - [002 · PyInstaller one-folder sidecar 与 release 冒烟（已完成）](development/slices/002-packaged-sidecar.md)
 - [003 · Windows 安装、首次启动与数据保留（已完成）](development/slices/003-windows-installer.md)
 - [004 · HTML 导入与结构预览（已完成）](development/slices/004-html-ingestion-preview.md)
 - [004 · HTML 导入人工验收清单（已完成）](development/manual-tests/004-html-ingestion.md)
+- [005 · SQLite 文档身份与版本登记（已完成）](development/slices/005-sqlite-document-registry.md)
+- [005 · 文档保存人工验收清单（已完成）](development/manual-tests/005-document-persistence.md)
 
 ## 旧仓库
 

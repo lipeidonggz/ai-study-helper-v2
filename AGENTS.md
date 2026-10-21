@@ -107,6 +107,15 @@
 
 注释数量不能弥补难读代码。若一段实现需要大量解释才能理解，优先拆分、改名或简化结构，再保留必要注释。
 
+### 注释与可读性门禁
+
+- 本地统一入口是 `corepack pnpm quality:quick`；完整检查使用 `corepack pnpm quality`。
+- `pnpm install` 通过 `prepare` 把 Git hooks 路径设置为 `.githooks`；pre-commit 必须执行 `quality:quick`。
+- GitHub Actions 必须在每次 push 和 pull request 上运行质量工作流，仓库设置必须把它配置为 required check。
+- Python 公共类、方法和函数必须通过 Ruff docstring 规则；前端边界类型和顶层函数必须通过注释检查；Rust 必须通过 `missing_docs` 与 clippy。
+- 机械检查只能证明说明存在和格式合格，不能证明说明仍然准确。每个切片的“注释与可读性审查”必须记录行为变化涉及的旧注释、关键不变量和复核结论。
+- 子 Agent 可以用于语义复核，但不能替代静态检查、Git hook 或 CI。
+
 ### 代码完成标准
 
 - 行为相关注释已写，旧注释已同步更新或删除。
@@ -206,4 +215,4 @@ GitHub Issue、Project 和 PR 用于临时任务、进行中状态和开放式�
 
 ## 当前阶段
 
-设计阶段完成，已进入实现。前三个垂直切片完成桌面运行链、PyInstaller one-folder release 分发以及 NSIS 按用户安装。004 HTML 导入切片已完成本地文件／公开 URL、正文提取、章节树、block 预览和轻量语言提示；DNS rebinding 加固与 artifact 清理已登记为公开发布前的后续事项，不提前实现完整 RAG 或评测台。
+设计阶段完成，已进入实现。前三个垂直切片完成桌面运行链、PyInstaller one-folder release 分发以及 NSIS 按用户安装，004 完成 HTML 导入预览。005 已完成 SQLite 文档身份与版本登记、迁移保护、保存交互、正式 SectionTree／BlockSet 身份和预览一致性屏障；下一步进入 Qwen embedding、双索引与 collection 发布。
