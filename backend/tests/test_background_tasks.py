@@ -141,6 +141,188 @@ def test_background_task_keeps_partial_success_when_one_source_fails(tmp_path: P
     assert len(current["manifest"]["failed_documents"]) == 1
 
 
+def test_successive_background_tasks_keep_both_batches_in_active_collection(
+    tmp_path: Path,
+) -> None:
+    first_paths = [tmp_path / f"first-{index}.html" for index in range(3)]
+    second_paths = [tmp_path / f"second-{index}.html" for index in range(4)]
+    for index, path in enumerate([*first_paths, *second_paths]):
+        path.write_bytes(_html(f"Document {index + 1}"))
+
+    async def run() -> list[dict]:
+        app = create_app(
+            TOKEN,
+            data_root=tmp_path,
+            embedding_provider_factory=FakeEmbeddingProvider,
+        )
+        transport = httpx.ASGITransport(app=app)
+        headers = {"x-launch-token": TOKEN}
+        result: list[dict] = []
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            for paths in (first_paths, second_paths):
+                created = await client.post(
+                    "/api/tasks/ingest",
+                    headers=headers,
+                    json={
+                        "sources": [
+                            {"source_kind": "file", "source_value": str(path)} for path in paths
+                        ]
+                    },
+                )
+                created.raise_for_status()
+                result.append(await _wait_for_terminal(client, headers, created.json()["task_id"]))
+            current = await client.get("/api/collections/current", headers=headers)
+            current.raise_for_status()
+            result.append(current.json())
+            history = await client.get("/api/tasks?limit=20", headers=headers)
+            history.raise_for_status()
+            result.append({"history": history.json()})
+            return result
+
+    first_task, second_task, current, history = asyncio.run(run())
+
+    assert first_task["status"] == "succeeded"
+    assert second_task["status"] == "succeeded"
+    assert current["pointer"]["previous_snapshot_id"] == first_task["snapshot_id"]
+    assert current["manifest"]["totals"]["documents"] == 7
+    assert len(current["manifest"]["documents"]) == 7
+    assert [task["task_id"] for task in history["history"]] == [
+        second_task["task_id"],
+        first_task["task_id"],
+    ]
+
+    async def read_history_after_restart() -> list[dict]:
+        app = create_app(
+            TOKEN,
+            data_root=tmp_path,
+            embedding_provider_factory=FakeEmbeddingProvider,
+        )
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get(
+                "/api/tasks?limit=20",
+                headers={"x-launch-token": TOKEN},
+            )
+            response.raise_for_status()
+            return response.json()
+
+    restarted_history = asyncio.run(read_history_after_restart())
+    assert [task["task_id"] for task in restarted_history] == [
+        second_task["task_id"],
+        first_task["task_id"],
+    ]
+
+
+def test_preview_job_can_be_published_through_task_history(tmp_path: Path) -> None:
+    html_path = tmp_path / "preview-single.html"
+    html_path.write_bytes(_html("Single preview publication"))
+
+    async def run() -> tuple[dict, dict, list[dict]]:
+        app = create_app(
+            TOKEN,
+            data_root=tmp_path,
+            embedding_provider_factory=FakeEmbeddingProvider,
+        )
+        transport = httpx.ASGITransport(app=app)
+        headers = {"x-launch-token": TOKEN}
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            preview = await client.post(
+                "/api/ingest/preview",
+                headers=headers,
+                json={"source_kind": "file", "source_value": str(html_path)},
+            )
+            preview.raise_for_status()
+            before = await client.get("/api/collections/current", headers=headers)
+            before.raise_for_status()
+            assert before.json() is None
+
+            created = await client.post(
+                "/api/tasks/ingest/preview",
+                headers=headers,
+                json={"job_id": preview.json()["job_id"]},
+            )
+            created.raise_for_status()
+            task = await _wait_for_terminal(client, headers, created.json()["task_id"])
+            current = await client.get("/api/collections/current", headers=headers)
+            current.raise_for_status()
+            history = await client.get("/api/tasks?limit=20", headers=headers)
+            history.raise_for_status()
+            return task, current.json(), history.json()
+
+    task, current, history = asyncio.run(run())
+
+    assert task["status"] == "succeeded"
+    assert task["snapshot_id"] == current["pointer"]["snapshot_id"]
+    assert current["manifest"]["totals"]["documents"] == 1
+    assert current["manifest"]["documents"][0]["title"] == "Single preview publication"
+    assert [item["task_id"] for item in history] == [task["task_id"]]
+
+
+def test_second_partial_task_keeps_previous_active_documents(tmp_path: Path) -> None:
+    first_path = tmp_path / "first-kept.html"
+    valid_path = tmp_path / "valid-added.html"
+    first_path.write_bytes(_html("First kept"))
+    valid_path.write_bytes(_html("Valid added"))
+
+    async def run() -> tuple[dict, dict]:
+        app = create_app(
+            TOKEN,
+            data_root=tmp_path,
+            embedding_provider_factory=FakeEmbeddingProvider,
+        )
+        transport = httpx.ASGITransport(app=app)
+        headers = {"x-launch-token": TOKEN}
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            first = await client.post(
+                "/api/tasks/ingest",
+                headers=headers,
+                json={"sources": [{"source_kind": "file", "source_value": str(first_path)}]},
+            )
+            first.raise_for_status()
+            first_task = await _wait_for_terminal(
+                client,
+                headers,
+                first.json()["task_id"],
+            )
+            second = await client.post(
+                "/api/tasks/ingest",
+                headers=headers,
+                json={
+                    "sources": [
+                        {"source_kind": "file", "source_value": str(valid_path)},
+                        {
+                            "source_kind": "file",
+                            "source_value": str(tmp_path / "missing.html"),
+                        },
+                    ]
+                },
+            )
+            second.raise_for_status()
+            await _wait_for_terminal(client, headers, second.json()["task_id"])
+            current = await client.get("/api/collections/current", headers=headers)
+            current.raise_for_status()
+            return first_task, current.json()
+
+    first_task, current = asyncio.run(run())
+
+    assert current["manifest"]["status"] == "ready_partial"
+    assert current["manifest"]["totals"]["documents"] == 2
+    assert len(current["manifest"]["failed_documents"]) == 1
+    assert current["pointer"]["previous_snapshot_id"] == first_task["snapshot_id"]
+
+
 def test_background_task_can_pause_and_resume(tmp_path: Path) -> None:
     html_path = tmp_path / "pause.html"
     html_path.write_bytes(_html("暂停恢复"))

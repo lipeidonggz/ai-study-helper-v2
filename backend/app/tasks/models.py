@@ -28,6 +28,12 @@ class BackgroundIngestRequest(BaseModel):
     sources: list[IngestTaskSource] = Field(min_length=1, max_length=1000)
 
 
+class PreviewIngestTaskRequest(BaseModel):
+    """把已完成 S0-S4 的单篇预览 job 提交为完整入库任务。"""
+
+    job_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+
+
 class BackgroundSourceFailure(BaseModel):
     """后台任务中一个来源的失败摘要。"""
 

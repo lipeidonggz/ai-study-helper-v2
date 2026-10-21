@@ -6,9 +6,9 @@
 
 ## 当前状态
 
-- 阶段：实现阶段，前九个垂直切片已完成。
+- 阶段：实现阶段，前十个垂直切片已实现，011 文档详情页正在验收。
 - 实现状态：桌面运行链、安装链、HTML 导入预览、SQLite 文档身份／版本登记以及 S5 候选双索引已实现。
-- 当前工作：009 用户模型设置与 embedding Key 连通性已完成；下一步进入检索工具或对话接入。
+- 当前工作：010 入库工作台等待二次确认；011 文档详情页已实现，等待人工验收。
 
 ## 设计基线
 
@@ -23,6 +23,7 @@
 | [07](design/07-html-ingestion-design.md) | HTML 入库与 collection 快照 | 已审核 · 实现基线 |
 | [08](design/08-evaluation-console-design.md) | 评测台、诊断与回归 | 已审核 · 实现基线 |
 | [09](design/09-technology-selection.md) | 技术选型与总体架构 | v0.4 · 实现基线 |
+| [10](design/10-document-detail-design.md) | 文档详情页信息架构与数据边界 | 已审核 · 首版实现基线 |
 
 01–09 已于 2026-10-20 审核，并作为当前实现基线；09 已依据 ADR 0004 更新为 v0.4。后续修改必须保留变更原因，同时更新本索引。
 
@@ -48,6 +49,7 @@
 - [0003 · Windows 按用户安装与本地数据根](decisions/0003-windows-installer-and-data-root.md)
 - [0004 · 使用轻量确定性语言检测](decisions/0004-lightweight-language-detection.md)
 - [0005 · 代码注释与可读性门禁](decisions/0005-code-quality-gates.md)
+- [0006 · 使用当前 HTML 入库快照作为检索基线](decisions/0006-use-current-html-corpus-for-retrieval-baseline.md)
 - [001 · 桌面 sidecar 最小启动链（已完成）](development/slices/001-desktop-sidecar-bootstrap.md)
 - [002 · PyInstaller one-folder sidecar 与 release 冒烟（已完成）](development/slices/002-packaged-sidecar.md)
 - [003 · Windows 安装、首次启动与数据保留（已完成）](development/slices/003-windows-installer.md)
@@ -59,6 +61,10 @@
 - [007 · collection 快照、manifest 与原子发布（已完成）](development/slices/007-collection-snapshot-publish.md)
 - [008 · 后台入库任务编排（已完成）](development/slices/008-background-ingestion-orchestration.md)
 - [009 · 用户模型设置与 embedding Key 连通性（已完成）](development/slices/009-model-settings-onboarding.md)
+- [010 · 入库工作台（已完成）](development/slices/010-ingestion-workbench.md)
+- [010 · 入库工作台人工验收清单（待补充）](development/manual-tests/010-ingestion-workbench.md)
+- [011 · 文档详情页（已完成）](development/slices/011-document-detail.md)
+- [011 · 文档详情页人工验收清单（待验收）](development/manual-tests/011-document-detail.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库

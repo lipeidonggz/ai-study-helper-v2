@@ -10,6 +10,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from pydantic import BaseModel
+
 from app.collections.models import (
     CandidateSnapshotManifest,
     CurrentCollectionResponse,
@@ -45,6 +47,25 @@ class _CandidateDocument:
     index_path: Path
     rows: list[dict[str, Any]]
     artifacts: list[SnapshotArtifact]
+
+
+@dataclass(slots=True)
+class _RetainedDocument:
+    """当前活动快照中继续保留、无需重新解析或嵌入的文档版本。"""
+
+    document: SnapshotDocument
+    persisted: IngestDocumentResponse
+    bundle: IndexBundle
+    rows: list[dict[str, Any]]
+
+
+@dataclass(slots=True)
+class _ActiveSnapshotState:
+    """增量发布时从旧活动快照取得的可复用文档、索引行和版本配置。"""
+
+    manifest: CandidateSnapshotManifest
+    documents: list[_RetainedDocument]
+    rows: list[dict[str, Any]]
 
 
 class CollectionSnapshotService:
@@ -116,6 +137,44 @@ class CollectionSnapshotService:
                 503,
             )
         return CurrentCollectionResponse(pointer=pointer, manifest=manifest)
+
+    def active_document(
+        self,
+        doc_id: str,
+    ) -> tuple[CurrentCollectionResponse, IngestDocumentResponse]:
+        """读取活动快照中指定文档的持久化正文与版本信息。"""
+
+        current = self.current()
+        document = (
+            next(
+                (item for item in current.manifest.documents if item.doc_id == doc_id),
+                None,
+            )
+            if current is not None
+            else None
+        )
+        if current is None or document is None:
+            raise IngestFailure(
+                "collection_document_not_found",
+                f"document is not present in the active collection: {doc_id}",
+                404,
+            )
+        persisted = _read_snapshot_model(
+            self._collections_root / current.pointer.snapshot_id,
+            document,
+            kind="document",
+            model_type=IngestDocumentResponse,
+        )
+        if (
+            persisted.document.doc_id != doc_id
+            or persisted.version.doc_version != document.doc_version
+        ):
+            raise IngestFailure(
+                "collection_unavailable",
+                "active document metadata does not match its snapshot manifest",
+                503,
+            )
+        return current, persisted
 
     def rollback(
         self,
@@ -257,12 +316,16 @@ class CollectionSnapshotService:
         *,
         extra_failures: list[SnapshotFailure] | None = None,
     ) -> CandidateSnapshotManifest:
-        """从已有 S5 候选索引构建不可变 S6 快照。"""
+        """把本批成功文档合并到当前活动快照，并构建不可变 S6 候选快照。
+
+        本批出现的 ``doc_id`` 用新版本替换旧版本；未出现的旧文档继续保留。
+        因此一次常规入库更新的是唯一知识库，而不是重新定义整个知识库。
+        """
 
         if not job_ids and not extra_failures:
             raise IngestFailure(
                 "snapshot_no_documents",
-                "at least one job_id is required to build a collection snapshot",
+                "at least one job_id or failure is required to build a collection snapshot",
                 422,
             )
         self._collections_root.mkdir(parents=True, exist_ok=True)
@@ -271,7 +334,6 @@ class CollectionSnapshotService:
         failures: list[SnapshotFailure] = list(extra_failures or [])
         candidates: list[_CandidateDocument] = []
         seen_jobs: set[str] = set()
-        seen_documents: set[tuple[str, int]] = set()
 
         for job_id in job_ids:
             if job_id in seen_jobs:
@@ -279,26 +341,34 @@ class CollectionSnapshotService:
             seen_jobs.add(job_id)
             try:
                 candidate = self._load_candidate(job_id)
-                document_key = (
-                    candidate.persisted.document.doc_id,
-                    candidate.persisted.version.doc_version,
-                )
-                if document_key in seen_documents:
-                    raise IngestFailure(
-                        "snapshot_duplicate_document",
-                        "the same document version was supplied more than once",
-                        409,
-                    )
-                seen_documents.add(document_key)
                 candidates.append(candidate)
             except Exception as error:
                 failures.append(self._failure(job_id, error))
 
+        # 同一批只保留每个 doc_id 的最高版本；重复选择或重试不能在新库中生成两份文档。
+        candidates_by_document: dict[str, _CandidateDocument] = {}
+        for candidate in candidates:
+            doc_id = candidate.persisted.document.doc_id
+            existing = candidates_by_document.get(doc_id)
+            if (
+                existing is None
+                or candidate.persisted.version.doc_version > existing.persisted.version.doc_version
+            ):
+                candidates_by_document[doc_id] = candidate
+        candidates = list(candidates_by_document.values())
+
+        # 本批出现的 doc_id 由新版本替换；其余旧文档继续进入下一个不可变快照。
+        replaced_doc_ids = set(candidates_by_document)
+        active_state = self._load_active_state(excluded_doc_ids=replaced_doc_ids)
+        retained_documents = active_state.documents if active_state is not None else []
+        retained_rows = active_state.rows if active_state is not None else []
+        active_snapshot_id = active_state.manifest.snapshot_id if active_state is not None else None
+
         successful: list[_CandidateDocument] = []
-        versions: SnapshotVersions | None = None
+        versions = active_state.manifest.versions if active_state is not None else None
         for candidate in candidates:
             try:
-                candidate_versions = _versions_for(candidate)
+                candidate_versions = _versions_for(candidate.persisted, candidate.bundle)
                 if versions is None:
                     versions = candidate_versions
                 elif versions != candidate_versions:
@@ -321,10 +391,25 @@ class CollectionSnapshotService:
                 failures.append(self._failure(candidate.job_id, error))
 
         try:
+            retained_snapshot_id = active_snapshot_id or ""
+            if retained_documents and not retained_snapshot_id:
+                raise IngestFailure(
+                    "collection_unavailable",
+                    "active snapshot identity is unavailable for retained documents",
+                    503,
+                )
+            for retained in retained_documents:
+                self._copy_retained_document(
+                    staging_directory,
+                    snapshot_id=retained_snapshot_id,
+                    document=retained.document,
+                )
             manifest = self._finalize_staging(
                 staging_directory=staging_directory,
                 snapshot_id=snapshot_id,
                 successful=successful,
+                retained_documents=retained_documents,
+                retained_rows=retained_rows,
                 failures=failures,
                 versions=versions,
             )
@@ -347,33 +432,49 @@ class CollectionSnapshotService:
         staging_directory: Path,
         snapshot_id: str,
         successful: list[_CandidateDocument],
+        retained_documents: list[_RetainedDocument],
+        retained_rows: list[dict[str, Any]],
         failures: list[SnapshotFailure],
         versions: SnapshotVersions | None,
     ) -> CandidateSnapshotManifest:
         """在 staging 中写索引、汇总 stats 和 manifest；失败由调用方清理。"""
 
-        all_rows = [row for candidate in successful for row in candidate.rows]
-        if successful:
+        all_rows = [
+            *retained_rows,
+            *(row for candidate in successful for row in candidate.rows),
+        ]
+        if all_rows:
+            if versions is None:
+                raise IngestFailure(
+                    "snapshot_version_mismatch",
+                    "collection index rows have no matching version profile",
+                    409,
+                )
             self._write_collection_index(
                 staging_directory / "index" / "lance",
                 all_rows,
-                dimension=successful[0].bundle.embedding_profile.dimension,
+                dimension=versions.embedding_profile.dimension,
             )
 
-        status = "failed" if not successful else "ready_partial" if failures else "ready"
+        documents = [
+            *(retained.document for retained in retained_documents),
+            *(_snapshot_document(candidate) for candidate in successful),
+        ]
+        status = "failed" if not documents else "ready_partial" if failures else "ready"
         completeness = "partial" if failures else "complete"
-        documents = [_snapshot_document(candidate) for candidate in successful]
         totals = SnapshotTotals(
             documents=len(documents),
             sections=sum(document.section_count for document in documents),
             blocks=sum(document.block_count for document in documents),
             table_blocks=sum(document.table_block_count for document in documents),
             embedding_requests=sum(
-                candidate.bundle.usage.request_count for candidate in successful
-            ),
+                retained.bundle.usage.request_count for retained in retained_documents
+            )
+            + sum(candidate.bundle.usage.request_count for candidate in successful),
             embedding_input_tokens=sum(
-                candidate.bundle.usage.input_tokens for candidate in successful
-            ),
+                retained.bundle.usage.input_tokens for retained in retained_documents
+            )
+            + sum(candidate.bundle.usage.input_tokens for candidate in successful),
         )
         current = self._registry.current()
         manifest = CandidateSnapshotManifest(
@@ -386,9 +487,9 @@ class CollectionSnapshotService:
             documents=documents,
             failed_documents=failures,
             totals=totals,
-            index_ref=f"collections/{snapshot_id}/index/lance" if successful else None,
+            index_ref=f"collections/{snapshot_id}/index/lance" if documents else None,
             keyword_index_ref=(
-                f"collections/{snapshot_id}/index/lance#blocks.search_terms" if successful else None
+                f"collections/{snapshot_id}/index/lance#blocks.search_terms" if documents else None
             ),
         )
         manifest = _with_manifest_hash(manifest)
@@ -397,6 +498,127 @@ class CollectionSnapshotService:
             encoding="utf-8",
         )
         return manifest
+
+    def _load_active_state(
+        self,
+        *,
+        excluded_doc_ids: set[str],
+    ) -> _ActiveSnapshotState | None:
+        """读取旧活动快照中未被本批替换的文档和索引行。
+
+        旧快照是唯一事实源。这样即使用户先回滚再导入，新批次也会合并到回滚后的状态，
+        不会从文档登记库中偷偷带回更新版本。
+        """
+
+        current = self.current()
+        if current is None:
+            return None
+        manifest = current.manifest
+        if manifest.versions is None or manifest.index_ref is None:
+            raise IngestFailure(
+                "collection_unavailable",
+                "active collection is missing its version profile or index",
+                503,
+            )
+
+        snapshot_root = self._collections_root / manifest.snapshot_id
+        expected_blocks = {
+            block_id: content_hash
+            for document in manifest.documents
+            for block_id, content_hash in _expected_blocks_for_document(
+                snapshot_root,
+                document,
+            ).items()
+        }
+        all_rows = read_candidate_lancedb_rows(
+            self._store.ref_path(manifest.index_ref, must_be_file=False),
+            expected_block_ids=set(expected_blocks),
+            dimension=manifest.versions.embedding_profile.dimension,
+        )
+        rows_by_doc_id: dict[str, list[dict[str, Any]]] = {}
+        for row in all_rows:
+            rows_by_doc_id.setdefault(str(row.get("doc_id", "")), []).append(row)
+
+        retained: list[_RetainedDocument] = []
+        retained_rows: list[dict[str, Any]] = []
+        for document in manifest.documents:
+            document_rows = rows_by_doc_id.get(document.doc_id, [])
+            if len(document_rows) != document.block_count:
+                raise IngestFailure(
+                    "collection_unavailable",
+                    f"active collection rows do not match document {document.doc_id}",
+                    503,
+                )
+            if document.doc_id in excluded_doc_ids:
+                continue
+            persisted = _read_snapshot_model(
+                snapshot_root,
+                document,
+                kind="document",
+                model_type=IngestDocumentResponse,
+            )
+            bundle = _read_snapshot_model(
+                snapshot_root,
+                document,
+                kind="index_bundle",
+                model_type=IndexBundle,
+            )
+            if (
+                persisted.document.doc_id != document.doc_id
+                or persisted.version.doc_version != document.doc_version
+                or bundle.doc_id != document.doc_id
+                or bundle.doc_version != document.doc_version
+                or bundle.block_set_hash != persisted.block_set.block_set_hash
+            ):
+                raise IngestFailure(
+                    "collection_unavailable",
+                    f"active collection document metadata is inconsistent: {document.doc_id}",
+                    503,
+                )
+            retained.append(
+                _RetainedDocument(
+                    document=document,
+                    persisted=persisted,
+                    bundle=bundle,
+                    rows=document_rows,
+                )
+            )
+            retained_rows.extend(document_rows)
+        return _ActiveSnapshotState(
+            manifest=manifest,
+            documents=retained,
+            rows=retained_rows,
+        )
+
+    def _copy_retained_document(
+        self,
+        staging_directory: Path,
+        *,
+        snapshot_id: str,
+        document: SnapshotDocument,
+    ) -> None:
+        """把旧快照中的文档产物原样复制到新候选快照，保留其校验信息。"""
+
+        source_root = self._collections_root / snapshot_id
+        staging_root = staging_directory.resolve()
+        for artifact in document.artifact_refs:
+            relative = Path(artifact.snapshot_ref)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise IngestFailure(
+                    "snapshot_artifact_invalid",
+                    f"snapshot artifact path is unsafe: {artifact.snapshot_ref}",
+                    409,
+                )
+            source = source_root / relative
+            target = staging_directory / relative
+            if not target.resolve().is_relative_to(staging_root):
+                raise IngestFailure(
+                    "snapshot_artifact_invalid",
+                    f"snapshot artifact target escapes staging: {artifact.snapshot_ref}",
+                    409,
+                )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
 
     def _load_candidate(self, job_id: str) -> _CandidateDocument:
         persisted = IngestDocumentResponse.model_validate_json(
@@ -592,8 +814,10 @@ class CollectionSnapshotService:
         )
 
 
-def _versions_for(candidate: _CandidateDocument) -> SnapshotVersions:
-    persisted = candidate.persisted
+def _versions_for(
+    persisted: IngestDocumentResponse,
+    bundle: IndexBundle,
+) -> SnapshotVersions:
     sizing = persisted.block_set.chunk_sizing.get("estimator_version")
     if not isinstance(sizing, str):
         raise IngestFailure(
@@ -606,9 +830,9 @@ def _versions_for(candidate: _CandidateDocument) -> SnapshotVersions:
         section_builder=persisted.section_tree.builder,
         chunker=persisted.block_set.chunker,
         sizing_estimator=sizing,
-        embedding_profile=candidate.bundle.embedding_profile,
-        embedding_input_policy=candidate.bundle.embedding_input_policy,
-        keyword_profile=candidate.bundle.keyword_profile,
+        embedding_profile=bundle.embedding_profile,
+        embedding_input_policy=bundle.embedding_input_policy,
+        keyword_profile=bundle.keyword_profile,
         index_schema=INDEX_SCHEMA,
     )
 
@@ -629,6 +853,36 @@ def _snapshot_document(candidate: _CandidateDocument) -> SnapshotDocument:
         keyword_indexed_block_count=len(candidate.rows),
         artifact_refs=candidate.artifacts,
     )
+
+
+def _read_snapshot_model[ModelT: BaseModel](
+    snapshot_root: Path,
+    document: SnapshotDocument,
+    *,
+    kind: Literal["document", "index_bundle"],
+    model_type: type[ModelT],
+) -> ModelT:
+    """从活动快照中读取指定文档产物，并把格式错误统一转成 collection 不可用。"""
+
+    artifact = next(
+        (artifact for artifact in document.artifact_refs if artifact.kind == kind),
+        None,
+    )
+    if artifact is None:
+        raise IngestFailure(
+            "collection_unavailable",
+            f"active document {document.doc_id} has no {kind} artifact",
+            503,
+        )
+    path = snapshot_root / artifact.snapshot_ref
+    try:
+        return model_type.model_validate_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise IngestFailure(
+            "collection_unavailable",
+            f"active document {document.doc_id} {kind} artifact is unreadable: {error}",
+            503,
+        ) from error
 
 
 def _copy_artifact(

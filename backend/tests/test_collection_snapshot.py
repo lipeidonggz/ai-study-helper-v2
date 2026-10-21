@@ -210,6 +210,66 @@ def test_second_publish_increments_generation_and_keeps_previous(tmp_path: Path)
     assert second_docs[0]["document"]["doc_id"] != first_docs[0]["document"]["doc_id"]
 
 
+def test_second_publish_merges_new_documents_into_active_collection(tmp_path: Path) -> None:
+    first_path = tmp_path / "first.html"
+    second_path = tmp_path / "second.html"
+    third_path = tmp_path / "third.html"
+    first_path.write_bytes(_html("First document", "First active collection document."))
+    second_path.write_bytes(_html("Second document", "Second incremental document."))
+    third_path.write_bytes(_html("Third document", "Third incremental document."))
+
+    first_docs, _, (_, first_response) = _run_client_flow(tmp_path, [first_path])
+    second_docs, _, (_, second_response) = _run_client_flow(
+        tmp_path,
+        [second_path, third_path],
+    )
+
+    first_pointer = first_response["pointer"]
+    second_pointer = second_response["pointer"]
+    expected_doc_ids = {
+        *(document["document"]["doc_id"] for document in first_docs),
+        *(document["document"]["doc_id"] for document in second_docs),
+    }
+    assert second_pointer["generation"] == first_pointer["generation"] + 1
+    assert second_pointer["previous_snapshot_id"] == first_pointer["snapshot_id"]
+    assert second_pointer["snapshot_id"] != first_pointer["snapshot_id"]
+    assert second_response["manifest"]["totals"]["documents"] == len(expected_doc_ids)
+    assert {
+        document["doc_id"] for document in second_response["manifest"]["documents"]
+    } == expected_doc_ids
+    snapshot_root = tmp_path / "collections" / second_pointer["snapshot_id"]
+    table = lancedb.connect(str(snapshot_root / "index" / "lance")).open_table("blocks")
+    assert {row["doc_id"] for row in table.search().limit(100).to_list()} == expected_doc_ids
+
+
+def test_reimport_replaces_previous_version_without_duplicating_document(
+    tmp_path: Path,
+) -> None:
+    html_path = tmp_path / "versioned.html"
+    html_path.write_bytes(
+        _html("Version one", "First content for incremental version replacement.")
+    )
+    first_docs, _, (_, first_response) = _run_client_flow(tmp_path, [html_path])
+
+    html_path.write_bytes(
+        _html("Version two", "Changed content for incremental version replacement.")
+    )
+    second_docs, _, (_, second_response) = _run_client_flow(tmp_path, [html_path])
+
+    first_doc = first_docs[0]["document"]
+    second_doc = second_docs[0]["document"]
+    assert second_doc["doc_id"] == first_doc["doc_id"]
+    assert second_doc["current_doc_version"] == 2
+    manifest = second_response["manifest"]
+    assert manifest["totals"]["documents"] == 1
+    assert manifest["documents"][0]["doc_id"] == first_doc["doc_id"]
+    assert manifest["documents"][0]["doc_version"] == 2
+    assert (
+        second_response["pointer"]["previous_snapshot_id"]
+        == first_response["pointer"]["snapshot_id"]
+    )
+
+
 def test_rollback_switches_pointer_to_previous_snapshot(tmp_path: Path) -> None:
     first_path = tmp_path / "first.html"
     second_path = tmp_path / "second.html"

@@ -68,3 +68,25 @@ def test_empty_content_is_classified() -> None:
             raw.decode("utf-8"),
         )
     assert failure.value.code == "no_extractable_content"
+
+
+def test_html_comments_inside_list_items_are_ignored() -> None:
+    raw = (
+        b"<!doctype html><html lang='en'><head><title>Comments in list</title></head>"
+        b"<body><article><h1>Comments in list</h1><h2>Steps</h2>"
+        b"<ul><li>First phrase<!-- editor note --> continues after comment"
+        b"<strong> with emphasis</strong> and closing text."
+        b"<!-- nested note --></li></ul>"
+        b"<p>The surrounding article has enough readable text to pass extraction.</p>"
+        b"</article></body></html>"
+    )
+
+    extracted = extract_html_document(
+        source_artifact_for_bytes("comments-in-list.html", raw),
+        raw.decode("utf-8"),
+    )
+
+    list_node = next(node for node in extracted.nodes if node.kind == "list")
+    assert "editor note" not in list_node.text
+    assert "nested note" not in list_node.text
+    assert "First phrase continues after comment with emphasis and closing text." in list_node.text
