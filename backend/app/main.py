@@ -14,6 +14,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app import __version__
+from app.collections.models import (
+    CurrentCollectionResponse,
+    PublishCollectionRequest,
+    PublishCollectionResponse,
+    RollbackCollectionRequest,
+)
+from app.collections.service import CollectionSnapshotService
 from app.indexing.models import IndexBundle
 from app.ingestion.errors import IngestFailure
 from app.ingestion.models import (
@@ -75,6 +82,9 @@ def create_app(
         )
         if resolved_data_root is not None
         else None
+    )
+    collection_service = (
+        CollectionSnapshotService(resolved_data_root) if resolved_data_root is not None else None
     )
 
     started_at = time.monotonic()
@@ -193,6 +203,58 @@ def create_app(
                 503,
             )
         return await ingestion_service.build_index(request)
+
+    @app.post(
+        "/api/collections/publish",
+        response_model=PublishCollectionResponse,
+        dependencies=protected,
+    )
+    async def publish_collection(
+        request: PublishCollectionRequest,
+    ) -> PublishCollectionResponse:
+        """把已有 S5 候选索引构建为快照并原子发布到活动指针。"""
+
+        if collection_service is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return collection_service.publish(request.job_ids)
+
+    @app.get(
+        "/api/collections/current",
+        response_model=CurrentCollectionResponse | None,
+        dependencies=protected,
+    )
+    async def current_collection() -> CurrentCollectionResponse | None:
+        """返回当前唯一的活动 collection；尚未发布时返回 None。"""
+
+        if collection_service is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return collection_service.current()
+
+    @app.post(
+        "/api/collections/rollback",
+        response_model=PublishCollectionResponse,
+        dependencies=protected,
+    )
+    async def rollback_collection(
+        request: RollbackCollectionRequest,
+    ) -> PublishCollectionResponse:
+        """切回当前 pointer 记录的上一个完整 snapshot。"""
+
+        if collection_service is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return collection_service.rollback(request)
 
     return app
 

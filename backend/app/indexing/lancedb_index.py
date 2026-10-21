@@ -120,3 +120,27 @@ def validate_candidate_lancedb(
                 "a block has no keyword terms",
                 500,
             )
+
+
+def read_candidate_lancedb_rows(
+    directory: Path,
+    *,
+    expected_block_ids: set[str],
+    dimension: int,
+) -> list[dict[str, Any]]:
+    """校验候选表并返回用于 collection 重建的完整行。"""
+
+    validate_candidate_lancedb(
+        directory,
+        expected_block_ids=expected_block_ids,
+        dimension=dimension,
+    )
+    try:
+        table = lancedb.connect(str(directory)).open_table(BLOCKS_TABLE_NAME)
+        return table.search().limit(len(expected_block_ids) + 1).to_list()
+    except Exception as error:
+        raise IngestFailure(
+            "candidate_index_invalid",
+            f"could not read candidate LanceDB rows: {error}",
+            500,
+        ) from error

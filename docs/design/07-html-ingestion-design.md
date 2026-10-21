@@ -95,7 +95,7 @@ URL 失败必须分类：网络错误、非 HTML、登录／反爬拦截、无�
 | **文档记录** | `doc_id`、标题、来源显示名、别名、语言、文档版本、原始内容 hash、章节数、块数 | `list_documents`、消歧、引用展示、版本与快照管理 |
 | **章节树** | 唯一 `section_path`、parent path、ordinal、depth、原文顺序、first line、直属与子树块数／token | `get_outline`、章节范围选择、`list_blocks` 的完整范围语义 |
 | **块记录** | `block_id`、`doc_id`、`section_path`、`block_index`、规范原文 `text`、字符偏移、内容 hash、语言、上下文 token、embedding token | 全文返回、精确扫描、原文顺序枚举、引用回查和预算计算 |
-| **向量与关键词索引** | 块向量、embedding provider／model／版本／维度；基于原文的关键词索引；索引 schema 与检索常数 | `search_blocks` 的语义召回与字面路候选，以及检索重放 |
+| **向量与关键词索引** | 块向量、embedding provider／model／版本／维度；基于原文的关键词索引；索引 schema；查询时 Top-K／RRF 等参数另由 RetrievalProfile 管理 | `search_blocks` 的语义召回与字面路候选，以及索引与查询参数的分层重放 |
 | **快照 manifest** | `collection_snapshot_id`、状态、完整性、文档清单、失败文档、解析／切块／tokenizer／索引版本、各阶段统计和 checksum | 请求固定快照、partial 缺口披露、复现、迁移、清理和运维 |
 | **入库任务记录** | `job_id`、输入来源、阶段、进度、成功／失败文档、错误码、重试次数和最终快照 ID | 后台任务状态、暂停续跑、失败定位和用户反馈 |
 
@@ -682,6 +682,9 @@ IndexBundle
 >  **Retry-After 边界（2026-10-21 实现确认）**<br>
 > DashScope 响应包含 HTTP headers。适配器支持标准秒数和 HTTP 日期；等待时间在 60 秒内时遵守服务端要求，超过 60 秒时立即终止当前同步构建并返回可重试的限流错误，不能在一次 API 请求中休眠一小时。后续后台任务负责在合适的调度时刻重试。
 
+>  **快照与检索参数的边界（2026-10-21 实现确认）**<br>
+> Snapshot manifest 固定的是影响索引语义的参数，例如 embedding profile、输入模板、keyword analyzer、BM25 引擎和 index schema。Top-K、RRF 常数和候选深度只影响查询时排序，记录在 RetrievalProfile／ExecutionPlan 与 trace；调整这些参数不需要重建 collection 快照。
+
 ### 9.3 关键词索引：从 block 文本到 BM25 倒排索引
 
 关键词索引服务于 `search_blocks` 的混合召回，不替代 `scan_term`。前者允许分词、排序和候选裁剪；后者必须对原文做确定性的字面扫描。两者共用 block，但语义和实现路径不同。
@@ -693,7 +696,7 @@ IndexBundle
 | **英文与代码标识符** | 按空白和标点切分，保留技术标识符；同时生成去掉下划线／连字符／驼峰边界后的子词，提升混合检索召回。不做词干化或同义词扩展 |
 | **中文** | 使用 CJK 单字与相邻双字 token，避免依赖单一词典分词；单字与双字都进入倒排，既支持中英混排，也避免专有名词被词典误切。具体分析器在技术选型时替换，但版本必须固定 |
 | **倒排结构** | `term → [(block_id, term_frequency)]`，另存 block 长度、文档数、平均长度和 analyzer／BM25 参数；支持按 `doc_ids` 范围和 block 删除过滤 |
-| **排序** | 关键词路径先按 BM25 排序；`search_blocks` 再把关键词排名与 dense 排名做 RRF。BM25 参数、候选深度和 RRF 常数都进入索引／快照 manifest |
+| **排序** | 关键词路径先按 BM25 排序；`search_blocks` 再把关键词排名与 dense 排名做 RRF。BM25 参数和 index schema 进入索引／快照 manifest；候选深度、RRF 常数和 Top-K 属于查询时 RetrievalProfile／ExecutionPlan，不进入快照版本身份 |
 | **精确证否** | `scan_term` 不使用 BM25，也不使用 analyzer；只对 `block.text`（含固定原文规范化）做字面匹配，返回范围内全部命中。关键词索引的零结果不能代替 `scan_term` 的证否 |
 
 建索引时逐个 block 生成 `search_text`，分析出 term、term frequency 和 block length，写入倒排表；同一批 block 的 dense 向量和关键词索引必须共享同一 `block_id`。大表格拆出的行组把 `table_context` 纳入搜索文本，因此按表头词也能召回该行组；但返回给模型的证据仍只有 `block.text`，`table_context` 只作为阅读上下文。
@@ -750,7 +753,7 @@ CandidateSnapshotManifest
 │  ├─ embedding_profile（qwen3.7-text-embedding／1024／dense）
 │  ├─ embedding_input_policy
 │  ├─ keyword_profile（analyzer／BM25）
-│  └─ index_schema／RRF／top_k
+│  └─ index_schema
 ├─ documents[]
 │  ├─ doc_id／doc_version
 │  ├─ status

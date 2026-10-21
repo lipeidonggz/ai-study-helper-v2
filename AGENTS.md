@@ -215,4 +215,4 @@ GitHub Issue、Project 和 PR 用于临时任务、进行中状态和开放式�
 
 ## 当前阶段
 
-设计阶段完成，已进入实现。前三个垂直切片完成桌面运行链、PyInstaller one-folder release 分发以及 NSIS 按用户安装，004 完成 HTML 导入预览。005 已完成 SQLite 文档身份与版本登记、迁移保护、保存交互、正式 SectionTree／BlockSet 身份和预览一致性屏障。006 已完成 Qwen embedding provider、版本化输入模板、固定关键词 analyzer、最多 3 批并发和 LanceDB dense／关键词候选双索引；下一步进入 007 collection 快照、manifest 与原子发布。
+设计阶段完成，已进入实现。前三个垂直切片完成桌面运行链、PyInstaller one-folder release 分发以及 NSIS 按用户安装，004 完成 HTML 导入预览。005 已完成 SQLite 文档身份与版本登记、迁移保护、保存交互、正式 SectionTree／BlockSet 身份和预览一致性屏障。006 已完成 Qwen embedding provider、版本化输入模板、固定关键词 analyzer、最多 3 批并发和 LanceDB dense／关键词候选双索引。007 已完成 collection 快照、manifest、SQLite CAS 活动指针、发布审计与回滚；下一步进入 008 后台任务与设置链。
