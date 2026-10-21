@@ -58,7 +58,7 @@
 | 6 | 什么关系 | ·沙箱、出口控制、虚拟机在 containment 里各挡什么、彼此怎么配合？<br>·"仓库知识作为记录系统"和"agent 可读性"在OpenAI《Harness engineering》里是什么关系？<br>·审批疲劳、auto mode、OS 级沙箱这三个概念之间是什么关系？ | 一篇内的多个对象，也可能跨篇 |
 | **C. 求全貌** |   |   |   |
 | 7 | 有哪些（要全） | ·Anthropic《How we contain Claude》里一共承认了哪几起"我们漏掉的风险"？<br>·OpenAI《Harness engineering》里提到 agent 能自主产出哪些东西（列全）？<br>·这两篇加起来，一共给了哪些"约束／防护手段"？各自针对什么？ | **范围由提问限定**（一篇或整批文档） |
-| 8 | 整体是什么 | ·OpenAI《Harness engineering》和 Anthropic《How we contain Claude》合起来，给"agent 时代的工程"画了什么整体图景？<br>·Anthropic《Building Effective Agents》和 OpenAI《A Practical Guide to Building Agents》都在讲"怎么搭 agent"，合起来看它们的完整方法论是什么？<br>·我这批文档（教程＋业界文章）整体覆盖了 agent 学习的哪些方面，哪些方面是空的？ | 多篇 |
+| 8 | 整体是什么 | ·OpenAI《Harness engineering》和 Anthropic《How we contain Claude》合起来，给"agent 时代的工程"画了什么整体图景？<br>·Anthropic《Building Effective Agents》和 OpenAI《New tools for building agents》分别从方法和工具路线讲了什么，合起来能看出什么？<br>·我这批文档（教程＋业界文章）整体覆盖了 agent 学习的哪些方面，哪些方面是空的？ | 多篇 |
 | 9 | 有没有冲突 | ·OpenAI《Harness engineering》说人类不一定要评审 PR，而 Anthropic《How we contain Claude》说人类审批会退化、不可靠——这两篇对「人在回路」是不是在唱反调？<br>·OpenAI《Harness engineering》主张把上下文推入仓库，Anthropic《How we contain Claude》把持久记忆列为可被投毒的新风险——关于「记忆该放在哪里」，这两篇的说法一致吗？<br>·Anthropic《Building Effective Agents》主张"从最简单的方案开始"，而 OpenAI《Harness engineering》在讲高度自主的脚手架——这两者矛盾吗？ | 多篇之间 |
 | **D. 求判断** |   |   |   |
 | 10 | 对吗 | ·"AGENTS.md 写得越详细越好"——按 OpenAI《Harness engineering》的说法，这个说法对吗？<br>·"只要沙箱做好了，模型层防御就不重要了"——按 Anthropic《How we contain Claude》的观点，这个判断成立吗？<br>·"多智能体一定比单智能体好"——这批文档支持这个说法吗？ | 某篇的观点（判断依据来自该篇） |

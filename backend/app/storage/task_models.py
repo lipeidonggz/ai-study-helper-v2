@@ -23,6 +23,7 @@ class IngestionTaskRow(Base):
     failed_sources: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     successful_job_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     failures_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    preview_job_id: Mapped[str | None] = mapped_column(String(32))
     snapshot_id: Mapped[str | None] = mapped_column(String(64))
     error_code: Mapped[str | None] = mapped_column(String(64))
     error_message: Mapped[str | None] = mapped_column(Text)

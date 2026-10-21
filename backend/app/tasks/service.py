@@ -26,6 +26,7 @@ from app.tasks.models import (
     BackgroundSourceFailure,
     BackgroundTaskRecord,
     IngestTaskSource,
+    PreviewIngestTaskRequest,
     TaskStatus,
 )
 
@@ -90,6 +91,11 @@ class BackgroundTaskService:
         if workers:
             await asyncio.gather(*workers, return_exceptions=True)
 
+    def has_live_workers(self) -> bool:
+        """返回当前进程是否仍有未结束的后台任务 worker。"""
+
+        return any(not worker.done() for worker in self._workers.values())
+
     async def create(self, request: BackgroundIngestRequest) -> BackgroundTaskRecord:
         """持久化任务并立即启动后台 worker。"""
 
@@ -121,6 +127,52 @@ class BackgroundTaskService:
         self._spawn(task_id)
         return record
 
+    async def create_from_preview(
+        self,
+        request: PreviewIngestTaskRequest,
+    ) -> BackgroundTaskRecord:
+        """复用已完成 S0-S4 的预览产物启动单篇完整入库任务。"""
+
+        await self.start()
+        source = await asyncio.to_thread(
+            self._ingestion.preview_source,
+            request.job_id,
+        )
+        task_id = f"task_{uuid4().hex[:26]}"
+        now = utc_now()
+        row = IngestionTaskRow(
+            task_id=task_id,
+            status="queued",
+            stage="S4",
+            sources_json=_encode_model_list(
+                [
+                    IngestTaskSource(
+                        source_kind=source.source_kind,
+                        source_value=source.source_uri,
+                    )
+                ]
+            ),
+            total_sources=1,
+            next_source_index=0,
+            completed_sources=0,
+            failed_sources=0,
+            successful_job_ids_json="[]",
+            failures_json="[]",
+            preview_job_id=request.job_id,
+            snapshot_id=None,
+            error_code=None,
+            error_message=None,
+            retryable=False,
+            created_at=now,
+            started_at=None,
+            finished_at=None,
+        )
+        with self._database.session() as session, session.begin():
+            session.add(row)
+        record = self._record(row)
+        self._spawn(task_id)
+        return record
+
     def get(self, task_id: str) -> BackgroundTaskRecord:
         """读取任务状态。"""
 
@@ -129,6 +181,47 @@ class BackgroundTaskService:
             if row is None:
                 raise TaskNotFoundError(task_id)
             return self._record(row)
+
+    def list_recent(self, *, limit: int = 20) -> list[BackgroundTaskRecord]:
+        """按创建时间倒序返回最近入库任务，供操作历史界面展示。"""
+
+        with self._database.session() as session:
+            rows = session.scalars(
+                select(IngestionTaskRow)
+                .order_by(
+                    IngestionTaskRow.created_at.desc(),
+                    IngestionTaskRow.task_id.desc(),
+                )
+                .limit(limit)
+            ).all()
+            return [self._record(row) for row in rows]
+
+    def list_related(
+        self,
+        *,
+        job_ids: set[str],
+        source_values: set[str],
+        limit: int = 20,
+    ) -> list[BackgroundTaskRecord]:
+        """返回与指定 job 或来源相关的最近入库任务。"""
+
+        related: list[BackgroundTaskRecord] = []
+        with self._database.session() as session:
+            rows = session.scalars(
+                select(IngestionTaskRow).order_by(
+                    IngestionTaskRow.created_at.desc(),
+                    IngestionTaskRow.task_id.desc(),
+                )
+            ).all()
+            for row in rows:
+                task_job_ids = set(_decode_strings(row.successful_job_ids_json))
+                task_sources = {source.source_value for source in _decode_sources(row.sources_json)}
+                if task_job_ids.isdisjoint(job_ids) and task_sources.isdisjoint(source_values):
+                    continue
+                related.append(self._record(row))
+                if len(related) >= limit:
+                    break
+        return related
 
     def pause(self, task_id: str) -> BackgroundTaskRecord:
         """请求任务在下一个 checkpoint 暂停。"""
@@ -203,6 +296,9 @@ class BackgroundTaskService:
                 row = self._read_row(task_id)
                 if row.status in {"paused", "canceled"}:
                     return
+                if row.preview_job_id is not None:
+                    await self._run_preview_job(task_id, row.preview_job_id)
+                    return
                 if row.next_source_index >= row.total_sources:
                     await self._publish(task_id)
                     return
@@ -241,6 +337,34 @@ class BackgroundTaskService:
             self._mark_failed(task_id, error)
         finally:
             self._workers.pop(task_id, None)
+
+    async def _run_preview_job(self, task_id: str, job_id: str) -> None:
+        """从固定预览 job 继续 S2-S6，避免重新抓取用户已经确认的内容。"""
+
+        await self._checkpoint(task_id)
+        self._mark_running(task_id, stage="S4")
+        row = self._read_row(task_id)
+        source = _decode_sources(row.sources_json)[0]
+        try:
+            await asyncio.to_thread(
+                self._ingestion.persist,
+                PersistIngestRequest(job_id=job_id),
+            )
+            await self._checkpoint(task_id)
+            self._set_stage(task_id, "S5")
+            await self._ingestion.build_index(BuildIndexRequest(job_id=job_id))
+            await self._checkpoint(task_id)
+            self._record_success(task_id, job_id)
+            await self._publish(task_id)
+        except TaskCanceled:
+            return
+        except Exception as error:
+            self._record_failure(task_id, source, 0, job_id, error)
+            self._mark_failed(
+                task_id,
+                error,
+                stage=self._read_row(task_id).stage,
+            )
 
     async def _publish(self, task_id: str) -> None:
         row = self._read_row(task_id)
@@ -322,10 +446,12 @@ class BackgroundTaskService:
             row = session.get(IngestionTaskRow, task_id)
             if row is None:
                 raise TaskNotFoundError(task_id)
-            job_ids = [*_decode_strings(row.successful_job_ids_json), job_id]
-            row.successful_job_ids_json = json.dumps(job_ids)
-            row.next_source_index += 1
-            row.completed_sources += 1
+            job_ids = _decode_strings(row.successful_job_ids_json)
+            if job_id not in job_ids:
+                job_ids.append(job_id)
+                row.successful_job_ids_json = json.dumps(job_ids)
+                row.next_source_index += 1
+                row.completed_sources += 1
             row.stage = "S5"
 
     def _record_failure(
@@ -375,13 +501,14 @@ class BackgroundTaskService:
         error: Exception,
         *,
         snapshot_id: str | None = None,
+        stage: str | None = None,
     ) -> None:
         with self._database.session() as session, session.begin():
             row = session.get(IngestionTaskRow, task_id)
             if row is None:
                 return
             row.status = "failed"
-            row.stage = "S6"
+            row.stage = stage or "S6"
             row.snapshot_id = snapshot_id
             row.error_code = getattr(error, "code", "background_task_failed")
             row.error_message = getattr(error, "message", str(error))
