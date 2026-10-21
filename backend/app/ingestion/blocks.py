@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 import unicodedata
@@ -342,11 +343,13 @@ def _canonical_text(
 
 def build_block_set(
     *,
-    preview_doc_id: str,
+    doc_id: str,
+    doc_version: int,
     extracted: ExtractedDocument,
     section_tree: SectionTree,
+    use_preview_block_ids: bool = False,
 ) -> BlockSet:
-    """Build complete, non-overlapping evidence blocks for a preview document."""
+    """构建无缝隙、无重叠的 block 集合，并生成可对账的语义 hash。"""
 
     canonical, spans, body_ordinals = _canonical_text(extracted)
     nodes = {node.ordinal: node for node in extracted.nodes}
@@ -443,7 +446,11 @@ def build_block_set(
     blocks: list[BlockRecord] = []
     nonempty_units = [unit for unit in merged_units if unit.text.strip()]
     for block_index, unit in enumerate(nonempty_units, start=1):
-        block_id = f"{preview_doc_id}#b{block_index:05d}"
+        block_id = (
+            f"{doc_id}#b{block_index:05d}"
+            if use_preview_block_ids
+            else f"{doc_id}#v{doc_version:04d}#c{CHUNKER_VERSION}#b{block_index:05d}"
+        )
         block_text = unit.text.strip()
         blocks.append(
             BlockRecord(
@@ -487,17 +494,31 @@ def build_block_set(
         )
 
     section_stats = _section_stats(section_tree, blocks)
+    chunker = ComponentVersion(name="semantic-block-chunker", version=CHUNKER_VERSION)
+    chunk_sizing: dict[str, int | float | str] = {
+        "target_context_tokens": TARGET_CONTEXT_TOKENS,
+        "table_atomic_max": TABLE_ATOMIC_MAX,
+        "node_separator": NODE_SEPARATOR,
+        "estimator_version": ESTIMATOR_VERSION,
+    }
+    unique_warnings = list(dict.fromkeys(warnings))
     return BlockSet(
-        chunker=ComponentVersion(name="semantic-block-chunker", version=CHUNKER_VERSION),
-        chunk_sizing={
-            "target_context_tokens": TARGET_CONTEXT_TOKENS,
-            "table_atomic_max": TABLE_ATOMIC_MAX,
-            "node_separator": NODE_SEPARATOR,
-            "estimator_version": ESTIMATOR_VERSION,
-        },
+        doc_id=doc_id,
+        doc_version=doc_version,
+        block_set_hash=_block_set_hash(
+            chunker=chunker,
+            chunk_sizing=chunk_sizing,
+            extraction_hash=extracted.extraction_hash,
+            canonical_body_text=canonical,
+            blocks=blocks,
+            warnings=unique_warnings,
+            section_stats=section_stats,
+        ),
+        chunker=chunker,
+        chunk_sizing=chunk_sizing,
         canonical_body_text=canonical,
         blocks=blocks,
-        warnings=list(dict.fromkeys(warnings)),
+        warnings=unique_warnings,
         section_stats=section_stats,
     )
 
@@ -526,3 +547,54 @@ def _section_stats(section_tree: SectionTree, blocks: list[BlockRecord]) -> list
             )
         )
     return stats
+
+
+def _block_set_hash(
+    *,
+    chunker: ComponentVersion,
+    chunk_sizing: dict[str, int | float | str],
+    extraction_hash: str,
+    canonical_body_text: str,
+    blocks: list[BlockRecord],
+    warnings: list[str],
+    section_stats: list[SectionStats],
+) -> str:
+    """Hash semantic block content while excluding preview/document identities."""
+
+    payload = {
+        "chunker": chunker.model_dump(mode="json"),
+        "chunk_sizing": chunk_sizing,
+        "extraction_hash": extraction_hash,
+        "canonical_body_text": canonical_body_text,
+        "blocks": [
+            {
+                "section_path": block.section_path,
+                "block_index": block.block_index,
+                "language": block.language,
+                "text": block.text,
+                "char_start": block.char_start,
+                "char_end": block.char_end,
+                "content_hash": block.content_hash,
+                "source_node_ordinals": block.source_node_ordinals,
+                "table_context": (
+                    block.table_context.model_dump(mode="json")
+                    if block.table_context is not None
+                    else None
+                ),
+                "embedding_hints": block.embedding_hints,
+                "context_token_estimate": block.context_token_estimate,
+                "estimator_version": block.estimator_version,
+            }
+            for block in blocks
+        ],
+        "warnings": warnings,
+        "section_stats": [stats.model_dump(mode="json") for stats in section_stats],
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()

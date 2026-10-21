@@ -4,14 +4,17 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 
+/** Python sidecar 的 UI 生命周期状态。 */
 type ManagerStatus =
   | "starting"
   | "running"
   | "restarting"
   | "failed"
   | "stopped";
+/** 当前版本支持的文档来源类型。 */
 type SourceKind = "file" | "url";
 
+/** Tauri 返回的后端进程状态。 */
 interface BackendStatus {
   status: ManagerStatus;
   port: number;
@@ -19,11 +22,13 @@ interface BackendStatus {
   message: string | null;
 }
 
+/** 本地 sidecar 的随机回环地址和本次启动令牌。 */
 interface BackendConnection {
   baseUrl: string;
   token: string;
 }
 
+/** 通过认证的运行状态响应。 */
 interface RuntimeInfo {
   status: string;
   version: string;
@@ -31,6 +36,7 @@ interface RuntimeInfo {
   uptime_seconds: number;
 }
 
+/** S0 留痕后的来源摘要。 */
 interface SourceArtifact {
   source_kind: SourceKind;
   source_key: string;
@@ -41,6 +47,7 @@ interface SourceArtifact {
   charset: string;
 }
 
+/** 预览中使用的简化语义节点。 */
 interface SemanticNode {
   ordinal: number;
   kind: string;
@@ -48,10 +55,11 @@ interface SemanticNode {
   heading_level: number | null;
 }
 
+/** S1 提取结果及其统计。 */
 interface ExtractedDocument {
   extraction_hash: string;
   title_candidate: string;
-  language: "zh" | "en" | "unknown";
+  language: "zh" | "en" | "mixed" | "unknown";
   nodes: SemanticNode[];
   stats: {
     node_count: number;
@@ -60,6 +68,7 @@ interface ExtractedDocument {
   };
 }
 
+/** 预览章节树中的一条章节记录。 */
 interface SectionRecord {
   path: string[];
   title: string;
@@ -69,6 +78,7 @@ interface SectionRecord {
   first_line: string;
 }
 
+/** 可引用证据块的预览字段。 */
 interface BlockRecord {
   block_id: string;
   section_path: string[];
@@ -78,6 +88,7 @@ interface BlockRecord {
   source_node_ordinals: number[];
 }
 
+/** HTML 预览接口的完整响应。 */
 interface PreviewResponse {
   job_id: string;
   source: SourceArtifact;
@@ -85,7 +96,7 @@ interface PreviewResponse {
     preview_doc_id: string;
     title: string;
     source_label: string;
-    language: "zh" | "en" | "unknown";
+    language: "zh" | "en" | "mixed" | "unknown";
     aliases: string[];
   };
   extracted: ExtractedDocument;
@@ -101,6 +112,28 @@ interface PreviewResponse {
   warnings: string[];
 }
 
+/** 正式保存接口的文档、版本与语义 hash 响应。 */
+interface PersistResponse {
+  job_id: string;
+  document: {
+    doc_id: string;
+    current_doc_version: number;
+    title: string;
+    language: "zh" | "en" | "mixed" | "unknown";
+  };
+  version: {
+    doc_id: string;
+    doc_version: number;
+    extraction_hash: string;
+  };
+  section_tree: PreviewResponse["section_tree"];
+  block_set: PreviewResponse["block_set"];
+  warnings: string[];
+  is_new_document: boolean;
+  is_new_version: boolean;
+}
+
+/** 本地 API 的稳定错误结构。 */
 interface ApiErrorBody {
   detail?: string;
   error?: {
@@ -119,13 +152,17 @@ const sourceKind = ref<SourceKind>("file");
 const selectedFilePath = ref("");
 const urlValue = ref("");
 const preview = ref<PreviewResponse | null>(null);
+const persisted = ref<PersistResponse | null>(null);
 const ingestError = ref("");
+const saveError = ref("");
 const ingesting = ref(false);
+const saving = ref(false);
 
 let unlisten: UnlistenFn | undefined;
 let healthTimer: number | undefined;
 let disposed = false;
 
+/** 把后端状态转换成用户可读标签。 */
 const stateLabel = computed(() => {
   switch (managerStatus.value) {
     case "starting":
@@ -141,6 +178,7 @@ const stateLabel = computed(() => {
   }
 });
 
+/** 选择状态指示点的视觉样式。 */
 const stateClass = computed(() => {
   const visualStatus =
     managerStatus.value === "running" && !runtime.value
@@ -149,6 +187,7 @@ const stateClass = computed(() => {
   return `status-${visualStatus}`;
 });
 
+/** 只有后端健康且没有进行中的提取时才允许预览。 */
 const canIngest = computed(
   () =>
     managerStatus.value === "running" &&
@@ -156,21 +195,36 @@ const canIngest = computed(
     !ingesting.value,
 );
 
+/** 保存要求预览成功、尚未保存且当前没有保存请求。 */
+const canSave = computed(
+  () =>
+    managerStatus.value === "running" &&
+    runtime.value !== null &&
+    preview.value !== null &&
+    persisted.value === null &&
+    !saving.value,
+);
+
+/** 提取当前来源类型对应的路径或 URL。 */
 const sourceValue = computed(() =>
   sourceKind.value === "file" ? selectedFilePath.value : urlValue.value.trim(),
 );
 
+/** 把语言检测结果转换成界面标签。 */
 const languageLabel = computed(() => {
   switch (preview.value?.document.language) {
     case "zh":
       return "中文";
     case "en":
       return "English";
+    case "mixed":
+      return "中英混排";
     default:
       return "语言未知";
   }
 });
 
+/** 把稳定 warning code 转换成可理解文本。 */
 function warningLabel(code: string): string {
   const labels: Record<string, string> = {
     source_container_preserved_structures:
@@ -178,10 +232,12 @@ function warningLabel(code: string): string {
     preamble_attached: "首个章节前的内容已归入该章节",
     duplicate_section_title: "存在同名章节，路径已自动编号",
     dns_rebinding_not_pinned: "网页来源未固定 DNS 解析地址",
+    derived_artifacts_repaired: "已有文档版本，但本次补齐了缺失的章节或块产物",
   };
   return labels[code] ?? "存在一条提取告警";
 }
 
+/** 把后端错误码和详情组合成用户可操作的提示。 */
 function ingestErrorMessage(code: string, detail: string): string {
   const labels: Record<string, string> = {
     javascript_rendering_unsupported:
@@ -196,11 +252,18 @@ function ingestErrorMessage(code: string, detail: string): string {
     source_too_large: "文件或网页内容超过 20 MiB 限制。",
     empty_source: "来源内容为空。",
     network_error: "无法连接该网页，请检查网络或稍后重试。",
+    database_initialization_failed: "本地知识库数据库初始化失败。",
+    document_persistence_failed: "文档已提取，但保存到本地知识库失败。",
+    job_artifact_missing: "预览产物已失效，请重新解析后再保存。",
+    preview_consistency_failed: "预览结果与保存结果不一致，请重新解析文档。",
+    document_version_artifact_invalid:
+      "已有文档版本引用的章节或块产物缺失、损坏或不一致，已停止保存。",
   };
   const label = labels[code];
   return label ? `${label}（错误码：${code}）` : `${detail}（错误码：${code}）`;
 }
 
+/** 定时检查已认证 sidecar 是否仍然可用。 */
 async function checkRuntime(): Promise<void> {
   if (!connection.value || disposed) {
     return;
@@ -228,6 +291,7 @@ async function checkRuntime(): Promise<void> {
   }
 }
 
+/** 读取 Tauri 管理的后端连接信息并完成首次健康检查。 */
 async function connect(): Promise<void> {
   try {
     connection.value = await invoke<BackendConnection>("backend_connection");
@@ -240,6 +304,7 @@ async function connect(): Promise<void> {
   }
 }
 
+/** 把 Tauri 推送的进程状态同步到界面。 */
 function applyStatus(status: BackendStatus): void {
   managerStatus.value = status.status;
   restartCount.value = status.restartCount;
@@ -252,6 +317,7 @@ function applyStatus(status: BackendStatus): void {
         : "正在连接本地后端…");
 }
 
+/** 通过 Tauri 原生对话框选择单个本地 HTML 文件。 */
 async function chooseFile(): Promise<void> {
   const selected = await open({
     multiple: false,
@@ -264,6 +330,7 @@ async function chooseFile(): Promise<void> {
   }
 }
 
+/** 调用后端执行 S0-S4 并展示结构预览。 */
 async function ingest(): Promise<void> {
   if (!connection.value || !sourceValue.value || !canIngest.value) {
     return;
@@ -272,6 +339,8 @@ async function ingest(): Promise<void> {
   ingesting.value = true;
   ingestError.value = "";
   preview.value = null;
+  persisted.value = null;
+  saveError.value = "";
   try {
     const response = await fetch(`${connection.value.baseUrl}/api/ingest/preview`, {
       method: "POST",
@@ -296,6 +365,38 @@ async function ingest(): Promise<void> {
     ingestError.value = String(error);
   } finally {
     ingesting.value = false;
+  }
+}
+
+/** 把当前预览 job 保存为正式文档版本。 */
+async function saveDocument(): Promise<void> {
+  if (!connection.value || !preview.value || !canSave.value) {
+    return;
+  }
+
+  saving.value = true;
+  saveError.value = "";
+  try {
+    const response = await fetch(`${connection.value.baseUrl}/api/ingest/persist`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-launch-token": connection.value.token,
+      },
+      body: JSON.stringify({ job_id: preview.value.job_id }),
+    });
+    const body = (await response.json()) as PersistResponse | ApiErrorBody;
+    if (!response.ok) {
+      const failure = body as ApiErrorBody;
+      const code = failure.error?.code ?? "request_failed";
+      const detail = failure.error?.message ?? failure.detail ?? `HTTP ${response.status}`;
+      throw new Error(ingestErrorMessage(code, detail));
+    }
+    persisted.value = body as PersistResponse;
+  } catch (error) {
+    saveError.value = String(error);
+  } finally {
+    saving.value = false;
   }
 }
 
@@ -408,6 +509,29 @@ onBeforeUnmount(() => {
           <div><dt>字符</dt><dd>{{ preview.extracted.stats.character_count }}</dd></div>
         </dl>
       </section>
+
+      <section class="save-strip">
+        <div>
+          <strong>保存到知识库</strong>
+          <p v-if="!persisted">
+            保存后会分配稳定的文档身份，并记录当前内容版本；相同正文重复保存不会新增版本。
+          </p>
+          <p v-else class="save-result">
+            已保存为 {{ persisted.document.doc_id }} · 版本
+            {{ persisted.version.doc_version }}
+            · {{ persisted.is_new_document ? "新文档" : persisted.is_new_version ? "新版本" : "已有版本" }}
+          </p>
+        </div>
+        <button
+          type="button"
+          class="primary-button"
+          :disabled="!canSave"
+          @click="saveDocument"
+        >
+          {{ saving ? "正在保存…" : persisted ? "已保存" : "保存到知识库" }}
+        </button>
+      </section>
+      <p v-if="saveError" class="error-box">{{ saveError }}</p>
 
       <section v-if="preview.warnings.length" class="warning-list">
         <strong>提取警告</strong>

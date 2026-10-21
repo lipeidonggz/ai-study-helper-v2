@@ -20,7 +20,7 @@ a = Analysis(
     [str(backend_dir / "app" / "main.py")],
     pathex=[str(backend_dir)],
     binaries=[],
-    datas=[],
+    datas=[(str(backend_dir / "migrations"), "migrations")],
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},

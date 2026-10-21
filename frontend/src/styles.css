@@ -230,6 +230,7 @@ input {
 
 .import-card,
 .preview-head,
+.save-strip,
 .outline-card,
 .blocks-panel,
 .warning-list {
@@ -387,6 +388,32 @@ input {
   font-weight: 700;
 }
 
+.save-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 20px 24px;
+}
+
+.save-strip p {
+  margin: 6px 0 0;
+  color: #667568;
+  line-height: 1.55;
+}
+
+.save-strip .primary-button {
+  flex: 0 0 auto;
+  margin-top: 0;
+}
+
+.save-result {
+  color: #255f3c !important;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 0.84rem;
+  word-break: break-all;
+}
+
 .warning-list {
   display: flex;
   flex-wrap: wrap;
@@ -508,7 +535,8 @@ input {
 @media (max-width: 860px) {
   .hero,
   .section-heading,
-  .preview-head {
+  .preview-head,
+  .save-strip {
     align-items: stretch;
     flex-direction: column;
   }

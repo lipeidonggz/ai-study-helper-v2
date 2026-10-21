@@ -389,6 +389,8 @@ DocumentVersionRecord
 - 同一 job 的重试优先复用已登记且 hash 相同的 `doc_version`；任务记录保留输入 hash、阶段结果和错误码，使中断后可以从 S2 继续。
 - 版本号、标题、来源显示名和别名在写入快照时冻结。后续人工修正标题不能改写旧快照中的引用展示；需要新行为时创建新的版本或新的快照。
 - 如果后续某一步失败，当前文档版本可以留在候选工作区供诊断和续跑，但不会被活动快照选中，也不会让检索请求看到“已建档但未完成”的文档。
+- 从交互式预览进入正式保存时必须执行一致性屏障：复用同一 job artifact，比较 extractor／section builder／chunker／sizing estimator 版本、`extraction_hash`、`tree_hash` 和 `block_set_hash`；任一不一致都返回 `preview_consistency_failed`，不能保存一份与用户刚才看到的内容不同的文档。
+- 同一 `extraction_hash` 的候选版本可以补齐空的派生 artifact ref，但已有 ref 必须可解析且身份、版本和语义 hash 一致；损坏时显式返回 `document_version_artifact_invalid`，不能静默覆盖历史。
 
 >  **本节结论**：S2 用 `source_key` 识别同一来源，用 `extraction_hash` 判断内容是否变化，用稳定的 `doc_id` 保留历史连续性，再生成用户可读的标题、来源显示名和别名。章节树和块仍然留给后续阶段。
 
@@ -417,7 +419,7 @@ SectionTree
 ├─ doc_id
 ├─ doc_version
 ├─ builder                   {name, version}
-├─ tree_hash                 章节结构与节点归属的 hash
+├─ tree_hash                 完整章节语义与节点归属的规范 hash
 ├─ sections[]                按原文先序排列的扁平章节记录
 │  ├─ path[]                 唯一、可回传的 section_path
 │  ├─ parent_path[]
@@ -443,6 +445,8 @@ SectionTree
 | `order_index` | 全文先序顺序，用于保持 `get_outline` 和范围枚举的原文顺序；不能按标题字母排序 |
 | `own_node_ordinals[]` | 直接属于该节、尚不属于任何子节的正文节点；它是 S4 切块的输入，不把子节正文混入父节 |
 | `first_line` | 优先取该节第一个直属正文节点的首行；没有直属正文时取第一个后代节点的首行；这里只是预览 seed，S4 用最终 block 生成 `SectionStats.first_line` |
+
+`tree_hash` 对 builder 名称／版本、章节顺序、路径、标题、标题级别、depth、ordinal、节点归属、first line 和 warnings 做规范序列化后计算，不包含 `doc_id`／`doc_version`。因此同一输入和同一 builder 版本下，预览树和正式树可以得到相同 hash；builder 语义变化必须提升版本。
 
 ### 7.2 建树规则
 
@@ -496,6 +500,7 @@ SectionTree
 BlockSet
 ├─ doc_id
 ├─ doc_version
+├─ block_set_hash            排除文档身份与 block ID 的完整语义 hash
 ├─ chunker                   {name, version, config_hash}
 ├─ chunk_sizing               estimator 名称／版本／450 默认目标／TableAtomicMax／拼接规则
 ├─ canonical_body_text_ref   所有 block 可覆盖的规范正文文本
@@ -525,6 +530,7 @@ SectionStats
 
 | 字段 | 确定规则 |
 | --- | --- |
+| `block_set_hash` | 对 chunker／estimator 配置、extraction hash、规范正文、全部 block 语义、warnings 和 SectionStats 做规范序列化后计算；排除 `doc_id`、`doc_version` 和 `block_id`，用于预览与正式结果对账 |
 | `block_id` | 由 `doc_id`、`doc_version`、chunker 版本和块位置确定性生成；不能只用正文 hash，因为相同正文可能在不同位置重复出现 |
 | `section_path[]` | 必须来自 S3 已存在的路径；block 不跨章节，子章节的块只携带子章节自己的 path，由范围查询通过路径前缀包含后代 |
 | `block_index` | 整篇文档从 1 开始连续递增，不是每节重新编号；`list_blocks` 和全文重放都按它返回 |

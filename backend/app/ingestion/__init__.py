@@ -1,6 +1,5 @@
-"""HTML ingestion pipeline for preview jobs.
+"""HTML 入库的 S0-S4 管线。
 
-This package implements the S0-S4 subset needed by the ingestion preview:
-source acquisition, HTML extraction, section reconstruction, and block
-generation. It deliberately does not publish collections or build indexes.
+负责来源获取、HTML 提取、章节重建和证据块生成；预览与正式保存复用同一套
+确定性实现。S5 索引、S6 collection 发布不在本包内。
 """

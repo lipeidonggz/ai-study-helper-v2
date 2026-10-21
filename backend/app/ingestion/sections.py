@@ -12,7 +12,7 @@ from app.ingestion.models import (
     SectionTree,
 )
 
-SECTION_BUILDER_VERSION = "1"
+SECTION_BUILDER_VERSION = "2"
 
 
 @dataclass(slots=True)
@@ -39,8 +39,13 @@ def _first_line(text: str, limit: int = 120) -> str:
     return first[:limit]
 
 
-def build_section_tree(extracted: ExtractedDocument) -> SectionTree:
-    """Reconstruct deterministic sections from the extracted semantic nodes."""
+def build_section_tree(
+    extracted: ExtractedDocument,
+    *,
+    doc_id: str,
+    doc_version: int,
+) -> SectionTree:
+    """从提取后的语义节点确定性地重建章节树，不调用模型猜章节。"""
 
     warnings = list(extracted.warnings)
     nodes = {node.ordinal: node for node in extracted.nodes}
@@ -197,17 +202,38 @@ def build_section_tree(extracted: ExtractedDocument) -> SectionTree:
         {
             "path": record.path,
             "parent_path": record.parent_path,
+            "title": record.title,
+            "heading_level": record.heading_level,
+            "depth": record.depth,
+            "ordinal": record.ordinal,
+            "order_index": record.order_index,
             "heading_node_ordinal": record.heading_node_ordinal,
             "own_node_ordinals": record.own_node_ordinals,
+            "first_line": record.first_line,
         }
         for record in records
     ]
+    unique_warnings = list(dict.fromkeys(warnings))
     tree_hash = hashlib.sha256(
-        json.dumps(tree_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        json.dumps(
+            {
+                "builder": {
+                    "name": "semantic-section-builder",
+                    "version": SECTION_BUILDER_VERSION,
+                },
+                "sections": tree_payload,
+                "warnings": unique_warnings,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
     ).hexdigest()
     return SectionTree(
+        doc_id=doc_id,
+        doc_version=doc_version,
         builder=ComponentVersion(name="semantic-section-builder", version=SECTION_BUILDER_VERSION),
         tree_hash=tree_hash,
         sections=records,
-        warnings=list(dict.fromkeys(warnings)),
+        warnings=unique_warnings,
     )

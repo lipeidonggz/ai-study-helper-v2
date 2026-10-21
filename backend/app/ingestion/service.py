@@ -2,14 +2,25 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from typing import TypeVar
 from urllib.parse import urlsplit
 
+from pydantic import BaseModel
+
 from app.ingestion.blocks import build_block_set
+from app.ingestion.errors import IngestFailure
 from app.ingestion.extract import extract_html_document
 from app.ingestion.models import (
+    BlockSet,
+    DocumentVersionRecord,
+    ExtractedDocument,
+    IngestDocumentResponse,
     IngestPreviewRequest,
     IngestPreviewResponse,
+    PersistIngestRequest,
     PreviewDocument,
+    SectionTree,
+    SourceArtifact,
 )
 from app.ingestion.sections import build_section_tree
 from app.ingestion.source import (
@@ -19,10 +30,14 @@ from app.ingestion.source import (
     acquire_local_source,
     acquire_url_source,
 )
+from app.storage.database import StorageDatabase
+from app.storage.document_registry import DocumentRegistry
+
+ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
-class IngestionPreviewService:
-    """Runs the preview-only S0-S4 pipeline inside one isolated job workspace."""
+class IngestionService:
+    """执行 S0-S4 预览，并把预览结果登记为正式文档版本。"""
 
     def __init__(
         self,
@@ -32,8 +47,12 @@ class IngestionPreviewService:
     ) -> None:
         self._store = ArtifactStore(data_root)
         self._url_fetcher = url_fetcher or HttpUrlFetcher()
+        self._database = StorageDatabase(data_root)
+        self._registry = DocumentRegistry(self._database)
 
     async def preview(self, request: IngestPreviewRequest) -> IngestPreviewResponse:
+        """获取并解析一个来源，在独立 job 中生成预览使用的不变 artifact。"""
+
         if request.source_kind == "file":
             job_id, acquired = await acquire_local_source(
                 request.source_value,
@@ -60,20 +79,26 @@ class IngestionPreviewService:
             extracted.model_dump_json(indent=2),
         )
 
-        section_tree = build_section_tree(extracted)
+        preview_doc_id = (
+            "preview_" + hashlib.sha256(source.source_key.encode("utf-8")).hexdigest()[:16]
+        )
+        section_tree = build_section_tree(
+            extracted,
+            doc_id=preview_doc_id,
+            doc_version=0,
+        )
         self._store.write_json(
             job_id,
             "section-tree.json",
             section_tree.model_dump_json(indent=2),
         )
 
-        preview_doc_id = (
-            "preview_" + hashlib.sha256(source.source_key.encode("utf-8")).hexdigest()[:16]
-        )
         block_set = build_block_set(
-            preview_doc_id=preview_doc_id,
+            doc_id=preview_doc_id,
+            doc_version=0,
             extracted=extracted,
             section_tree=section_tree,
+            use_preview_block_ids=True,
         )
         self._store.write_json(
             job_id,
@@ -118,12 +143,240 @@ class IngestionPreviewService:
         )
         return response
 
+    def persist(self, request: PersistIngestRequest) -> IngestDocumentResponse:
+        """复用预览 artifact 登记文档版本，并在一致性校验后保存正式派生物。"""
+
+        source = SourceArtifact.model_validate_json(
+            self._store.read_text(request.job_id, "source.json")
+        )
+        extracted = ExtractedDocument.model_validate_json(
+            self._store.read_text(request.job_id, "extracted.json")
+        )
+        title = extracted.title_candidate or "Untitled"
+        source_label = _source_label(
+            source.source_kind,
+            source.final_url,
+            extracted.site_name_candidate,
+        )
+        aliases = _build_aliases(source.source_key, title, source_label)
+        self._registry.start_job(request.job_id, source.source_kind, source.source_uri)
+
+        try:
+            preview_section_tree = SectionTree.model_validate_json(
+                self._store.read_text(request.job_id, "section-tree.json")
+            )
+            preview_block_set = BlockSet.model_validate_json(
+                self._store.read_text(request.job_id, "blocks.json")
+            )
+            registration = self._registry.register(
+                source=source,
+                extracted=extracted,
+                extracted_document_ref=self._artifact_ref(
+                    request.job_id,
+                    "extracted.json",
+                ),
+                title=title,
+                source_label=source_label,
+                aliases=aliases,
+            )
+            self._registry.advance_job(request.job_id, "S4")
+            section_tree = build_section_tree(
+                extracted,
+                doc_id=registration.document.doc_id,
+                doc_version=registration.version.doc_version,
+            )
+            block_set = build_block_set(
+                doc_id=registration.document.doc_id,
+                doc_version=registration.version.doc_version,
+                extracted=extracted,
+                section_tree=section_tree,
+            )
+            _assert_preview_consistency(
+                preview_section_tree=preview_section_tree,
+                preview_block_set=preview_block_set,
+                section_tree=section_tree,
+                block_set=block_set,
+            )
+            self._validate_existing_artifacts(
+                version=registration.version,
+                expected_section_tree=section_tree,
+                expected_block_set=block_set,
+            )
+            section_tree_ref = self._store.write_json(
+                request.job_id,
+                "document-section-tree.json",
+                section_tree.model_dump_json(indent=2),
+            )
+            block_set_ref = self._store.write_json(
+                request.job_id,
+                "document-blocks.json",
+                block_set.model_dump_json(indent=2),
+            )
+            version, derived_artifacts_repaired = self._registry.attach_derived_artifacts(
+                doc_id=registration.document.doc_id,
+                doc_version=registration.version.doc_version,
+                section_tree_ref=section_tree_ref,
+                block_set_ref=block_set_ref,
+            )
+            show_repair_warning = derived_artifacts_repaired and not registration.is_new_version
+            repair_warnings: list[str] = (
+                ["derived_artifacts_repaired"] if show_repair_warning else []
+            )
+            warnings = list(
+                dict.fromkeys(
+                    [
+                        *source.warnings,
+                        *extracted.warnings,
+                        *section_tree.warnings,
+                        *block_set.warnings,
+                        *repair_warnings,
+                    ]
+                )
+            )
+            response = IngestDocumentResponse(
+                job_id=request.job_id,
+                source=source,
+                document=registration.document,
+                version=version,
+                extracted=extracted,
+                section_tree=section_tree,
+                block_set=block_set,
+                warnings=warnings,
+                is_new_document=registration.is_new_document,
+                is_new_version=registration.is_new_version,
+            )
+            self._store.write_json(
+                request.job_id,
+                "persisted-document.json",
+                response.model_dump_json(indent=2),
+            )
+            self._registry.complete_job(
+                request.job_id,
+                registration.document.doc_id,
+                registration.version.doc_version,
+            )
+            return response
+        except IngestFailure as error:
+            self._registry.fail_job(request.job_id, error.code)
+            raise
+        except Exception as error:
+            self._registry.fail_job(request.job_id, "document_persistence_failed")
+            raise IngestFailure(
+                "document_persistence_failed",
+                f"could not persist the document: {error}",
+                500,
+            ) from error
+
+    def _artifact_ref(self, job_id: str, relative_name: str) -> str:
+        return f"jobs/{job_id}/{relative_name}"
+
+    def _validate_existing_artifacts(
+        self,
+        *,
+        version: DocumentVersionRecord,
+        expected_section_tree: SectionTree,
+        expected_block_set: BlockSet,
+    ) -> None:
+        """验证已有版本引用；只允许补齐空引用，不允许覆盖历史派生物。"""
+
+        if version.section_tree_ref is not None:
+            existing_tree = self._read_artifact_model(
+                version.section_tree_ref,
+                SectionTree,
+            )
+            if (
+                existing_tree.doc_id != version.doc_id
+                or existing_tree.doc_version != version.doc_version
+                or existing_tree.builder != expected_section_tree.builder
+                or existing_tree.tree_hash != expected_section_tree.tree_hash
+            ):
+                self._raise_invalid_version_artifact()
+
+        if version.block_set_ref is not None:
+            existing_blocks = self._read_artifact_model(
+                version.block_set_ref,
+                BlockSet,
+            )
+            if (
+                existing_blocks.doc_id != version.doc_id
+                or existing_blocks.doc_version != version.doc_version
+                or existing_blocks.chunker != expected_block_set.chunker
+                or existing_blocks.chunk_sizing != expected_block_set.chunk_sizing
+                or existing_blocks.block_set_hash != expected_block_set.block_set_hash
+            ):
+                self._raise_invalid_version_artifact()
+
+    def _read_artifact_model(
+        self,
+        artifact_ref: str,
+        model_type: type[ModelT],
+    ) -> ModelT:
+        """读取并校验 data root 内的 artifact ref，损坏统一映射为稳定错误码。"""
+
+        try:
+            return model_type.model_validate_json(
+                self._store.read_ref_text(
+                    artifact_ref,
+                    missing_code="document_version_artifact_invalid",
+                )
+            )
+        except IngestFailure as error:
+            if error.code in {
+                "document_version_artifact_invalid",
+                "artifact_unreadable",
+                "invalid_artifact_ref",
+            }:
+                self._raise_invalid_version_artifact()
+            raise
+        except ValueError as error:
+            raise IngestFailure(
+                "document_version_artifact_invalid",
+                f"persisted document artifact is invalid: {error}",
+                409,
+            ) from error
+
+    @staticmethod
+    def _raise_invalid_version_artifact() -> None:
+        """抛出已有文档版本 artifact 无效的统一失败。"""
+
+        raise IngestFailure(
+            "document_version_artifact_invalid",
+            "persisted document version references a missing or inconsistent artifact",
+            409,
+        )
+
+
+def _assert_preview_consistency(
+    *,
+    preview_section_tree: SectionTree,
+    preview_block_set: BlockSet,
+    section_tree: SectionTree,
+    block_set: BlockSet,
+) -> None:
+    """确认正式重建结果与用户刚才看到的预览具有相同语义。"""
+
+    checks = [
+        preview_section_tree.builder == section_tree.builder,
+        preview_section_tree.tree_hash == section_tree.tree_hash,
+        preview_block_set.chunker == block_set.chunker,
+        preview_block_set.chunk_sizing == block_set.chunk_sizing,
+        preview_block_set.block_set_hash == block_set.block_set_hash,
+    ]
+    if not all(checks):
+        raise IngestFailure(
+            "preview_consistency_failed",
+            "the persisted structure no longer matches the preview; parse the document again",
+            409,
+        )
+
 
 def _source_label(
     source_kind: str,
     final_url: str | None,
     site_name: str | None,
 ) -> str:
+    """把来源类型转换为稳定、用户可读的显示名。"""
+
     if source_kind == "file":
         return "本地文件"
     if site_name:
@@ -134,6 +387,8 @@ def _source_label(
 
 
 def _build_aliases(source_key: str, title: str, source_label: str) -> list[str]:
+    """只根据来源和标题生成可解释别名，不调用模型扩展同义词。"""
+
     candidates: list[str] = []
     if source_key.startswith(("http://", "https://")):
         hostname = urlsplit(source_key).hostname

@@ -9,11 +9,13 @@ from tests.helpers import fixture_bytes, source_artifact_for_bytes
 def _build_blocks(raw: bytes, filename: str):
     source = source_artifact_for_bytes(filename, raw)
     extracted = extract_html_document(source, raw.decode("utf-8"))
-    sections = build_section_tree(extracted)
+    sections = build_section_tree(extracted, doc_id="preview_test", doc_version=0)
     return build_block_set(
-        preview_doc_id="preview_test",
+        doc_id="preview_test",
+        doc_version=0,
         extracted=extracted,
         section_tree=sections,
+        use_preview_block_ids=True,
     )
 
 
@@ -23,7 +25,7 @@ def test_section_paths_handle_duplicates_and_preamble() -> None:
         source_artifact_for_bytes("article.html", raw),
         raw.decode("utf-8"),
     )
-    sections = build_section_tree(extracted)
+    sections = build_section_tree(extracted, doc_id="preview_sections", doc_version=0)
 
     assert sections.sections[0].path == ["环境边界"]
     duplicate = next(
@@ -42,7 +44,7 @@ def test_no_heading_document_uses_root_section() -> None:
         source_artifact_for_bytes("no-headings.html", raw),
         raw.decode("utf-8"),
     )
-    sections = build_section_tree(extracted)
+    sections = build_section_tree(extracted, doc_id="preview_no_headings", doc_version=0)
 
     assert len(sections.sections) == 1
     assert sections.sections[0].path == []
@@ -55,11 +57,13 @@ def test_blocks_cover_every_body_node_without_gaps() -> None:
         source_artifact_for_bytes("article.html", raw),
         raw.decode("utf-8"),
     )
-    sections = build_section_tree(extracted)
+    sections = build_section_tree(extracted, doc_id="preview_coverage", doc_version=0)
     blocks = build_block_set(
-        preview_doc_id="preview_test",
+        doc_id="preview_coverage",
+        doc_version=0,
         extracted=extracted,
         section_tree=sections,
+        use_preview_block_ids=True,
     )
 
     body_ordinals = {node.ordinal for node in extracted.nodes if node.kind != "heading"}
@@ -82,11 +86,13 @@ def test_long_paragraph_is_split_without_content_loss() -> None:
     ).encode()
     source = source_artifact_for_bytes("long.html", raw)
     extracted = extract_html_document(source, raw.decode("utf-8"))
-    sections = build_section_tree(extracted)
+    sections = build_section_tree(extracted, doc_id="preview_long", doc_version=0)
     blocks = build_block_set(
-        preview_doc_id="preview_long",
+        doc_id="preview_long",
+        doc_version=0,
         extracted=extracted,
         section_tree=sections,
+        use_preview_block_ids=True,
     )
 
     joined = "".join(block.text for block in blocks.blocks)
@@ -175,11 +181,13 @@ def test_large_table_is_split_into_contiguous_row_groups() -> None:
     ).encode()
     source = source_artifact_for_bytes("table.html", raw)
     extracted = extract_html_document(source, raw.decode("utf-8"))
-    sections = build_section_tree(extracted)
+    sections = build_section_tree(extracted, doc_id="preview_table", doc_version=0)
     blocks = build_block_set(
-        preview_doc_id="preview_table",
+        doc_id="preview_table",
+        doc_version=0,
         extracted=extracted,
         section_tree=sections,
+        use_preview_block_ids=True,
     )
 
     table_blocks = [block for block in blocks.blocks if block.table_context is not None]
@@ -241,11 +249,13 @@ def test_complex_article_preserves_structures_and_excludes_page_chrome() -> None
         source_artifact_for_bytes("complex-article.html", raw),
         raw.decode("utf-8"),
     )
-    sections = build_section_tree(extracted)
+    sections = build_section_tree(extracted, doc_id="preview_complex", doc_version=0)
     blocks = build_block_set(
-        preview_doc_id="preview_complex",
+        doc_id="preview_complex",
+        doc_version=0,
         extracted=extracted,
         section_tree=sections,
+        use_preview_block_ids=True,
     )
 
     all_text = "\n".join(block.text for block in blocks.blocks)

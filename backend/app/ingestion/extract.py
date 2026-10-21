@@ -408,7 +408,11 @@ def _select_content_root(
 
 
 def extract_html_document(source: SourceArtifact, decoded_html: str) -> ExtractedDocument:
-    """Extract a format-neutral semantic document from one HTML artifact."""
+    """从一份 HTML artifact 提取格式中立的语义文档。
+
+    正文不足、登录页、JavaScript 空壳和 HTML 解析失败分别返回稳定的
+    ``IngestFailure`` 错误码；成功结果保留完整节点顺序和提取 hash。
+    """
 
     try:
         root = html.document_fromstring(decoded_html)
