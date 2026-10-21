@@ -228,7 +228,7 @@ Windows x64 官方 wheel 可离线打包；单进程稳定读写；产品与评�
 | 语言识别 | 自有 `script-ratio-v1` 确定性检测 | 优先使用可靠 `lang`／语言元数据；缺失时比较汉字与拉丁字母信号，输出 zh／en／mixed／unknown。只生成文档／block 语言提示，不确定时不能阻断入库。 |
 | S3 建树 | 确定性 Python 映射 | 不调用模型猜章节；按 heading 层级和稳定消歧规则生成 section_path。 |
 | S4 切块 | 自有 splitter＋版本化 ChunkSizingEstimator | 以段落和结构为主要边界；表格优先整体；只对超限单元做确定性二次拆分。 |
-| S5 embedding | Qwen API adapter，固定 1024 维 | 批大小、并发、重试和 usage 都显式记录；输入 hash 与索引同版本。 |
+| S5 embedding | Qwen API adapter，固定 1024 维 | 单批最多 20 条、默认最多 3 个批次在途；重试和 usage 显式记录；输入 hash 与索引同版本。 |
 | S5 关键词 | LanceDB FTS／BM25，固定 analyzer | Unicode 归一、英文词、中文相邻二元组；同一 analyzer 处理索引和查询。 |
 | 精确扫描 | SQLite block 表上的 NFC＋大小写折叠 | `scan_term` 不经过分词，不能拿 BM25 零命中替代字面证否。 |
 

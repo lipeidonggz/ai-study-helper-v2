@@ -15,6 +15,14 @@ hidden_imports = [
     )
     if "uvloop" not in module
 ]
+hidden_imports.extend(
+    [
+        "dashscope.embeddings.text_embedding",
+        "keyring.backends.Windows",
+        "lance_namespace",
+        "lance_namespace_urllib3_client",
+    ]
+)
 
 a = Analysis(
     [str(backend_dir / "app" / "main.py")],
@@ -25,7 +33,16 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        "_pytest",
+        "iniconfig",
+        "lancedb.conftest",
+        "pluggy",
+        "pyarrow.conftest",
+        "pyarrow.tests",
+        "pydantic.mypy",
+        "pytest",
+    ],
     noarchive=False,
     optimize=0,
 )

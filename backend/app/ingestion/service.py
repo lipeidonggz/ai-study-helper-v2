@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypeVar
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel
 
+from app.indexing.models import IndexBundle, IndexFailureEvidence
+from app.indexing.runner import EmbeddingRunFailure
+from app.indexing.service import IndexBuildService
 from app.ingestion.blocks import build_block_set
 from app.ingestion.errors import IngestFailure
 from app.ingestion.extract import extract_html_document
 from app.ingestion.models import (
     BlockSet,
+    BuildIndexRequest,
     DocumentVersionRecord,
     ExtractedDocument,
     IngestDocumentResponse,
@@ -30,6 +36,12 @@ from app.ingestion.source import (
     acquire_local_source,
     acquire_url_source,
 )
+from app.providers.embeddings import (
+    DashScopeEmbeddingProvider,
+    EmbeddingProvider,
+    EmbeddingProviderError,
+)
+from app.storage.credentials import EMBEDDING_API_KEY_USERNAME, WindowsCredentialStore
 from app.storage.database import StorageDatabase
 from app.storage.document_registry import DocumentRegistry
 
@@ -44,11 +56,15 @@ class IngestionService:
         data_root: Path,
         *,
         url_fetcher: UrlFetcher | None = None,
+        embedding_provider_factory: Callable[[], EmbeddingProvider] | None = None,
     ) -> None:
+        self._data_root = data_root.resolve()
         self._store = ArtifactStore(data_root)
         self._url_fetcher = url_fetcher or HttpUrlFetcher()
         self._database = StorageDatabase(data_root)
         self._registry = DocumentRegistry(self._database)
+        self._index_build_service = IndexBuildService(self._data_root)
+        self._embedding_provider_factory = embedding_provider_factory or _default_embedding_provider
 
     async def preview(self, request: IngestPreviewRequest) -> IngestPreviewResponse:
         """获取并解析一个来源，在独立 job 中生成预览使用的不变 artifact。"""
@@ -267,8 +283,79 @@ class IngestionService:
                 500,
             ) from error
 
+    async def build_index(self, request: BuildIndexRequest) -> IndexBundle:
+        """为已保存 job 构建 S5 候选索引，并记录独立的 job 阶段状态。"""
+
+        self._registry.start_index_job(request.job_id)
+        try:
+            persisted = IngestDocumentResponse.model_validate_json(
+                self._store.read_text(request.job_id, "persisted-document.json")
+            )
+            provider = self._embedding_provider_factory()
+            bundle = await self._index_build_service.build_candidate(
+                job_id=request.job_id,
+                document_title=persisted.document.title,
+                section_tree=persisted.section_tree,
+                block_set=persisted.block_set,
+                provider=provider,
+            )
+            self._registry.complete_index_job(request.job_id)
+            return bundle
+        except EmbeddingRunFailure as error:
+            doc_id, doc_version = self._persisted_identity(request.job_id)
+            self._store.write_json(
+                request.job_id,
+                "index-failure.json",
+                IndexFailureEvidence(
+                    status="failed",
+                    job_id=request.job_id,
+                    doc_id=doc_id,
+                    doc_version=doc_version,
+                    stage="S5",
+                    code=error.code,
+                    message=error.message,
+                    retryable=error.retryable,
+                    usage_preview=error.usage_preview,
+                    usage=error.usage,
+                    created_at=datetime.now(UTC).isoformat(),
+                ).model_dump_json(indent=2),
+            )
+            self._registry.fail_job(request.job_id, error.code)
+            raise IngestFailure(
+                error.code,
+                error.message,
+                error.http_status,
+                retryable=error.retryable,
+            ) from error
+        except EmbeddingProviderError as error:
+            self._registry.fail_job(request.job_id, error.code)
+            raise IngestFailure(
+                error.code,
+                error.message,
+                502 if error.retryable else 409,
+                retryable=error.retryable,
+            ) from error
+        except IngestFailure as error:
+            self._registry.fail_job(request.job_id, error.code)
+            raise
+        except Exception as error:
+            self._registry.fail_job(request.job_id, "candidate_index_failed")
+            raise IngestFailure(
+                "candidate_index_failed",
+                f"could not build the candidate index: {error}",
+                500,
+            ) from error
+
     def _artifact_ref(self, job_id: str, relative_name: str) -> str:
         return f"jobs/{job_id}/{relative_name}"
+
+    def _persisted_identity(self, job_id: str) -> tuple[str, int]:
+        """从已保存 artifact 读取失败证据需要的文档身份与版本。"""
+
+        persisted = IngestDocumentResponse.model_validate_json(
+            self._store.read_text(job_id, "persisted-document.json")
+        )
+        return persisted.document.doc_id, persisted.version.doc_version
 
     def _validate_existing_artifacts(
         self,
@@ -401,3 +488,10 @@ def _build_aliases(source_key: str, title: str, source_label: str) -> list[str]:
     if source_label and title:
         candidates.append(f"{source_label} {title}")
     return list(dict.fromkeys(candidate for candidate in candidates if candidate != title))
+
+
+def _default_embedding_provider() -> EmbeddingProvider:
+    """读取 embedding Key 配置，但允许已有候选在无 Key 时直接复用。"""
+
+    api_key = WindowsCredentialStore().get(EMBEDDING_API_KEY_USERNAME)
+    return DashScopeEmbeddingProvider(api_key)
