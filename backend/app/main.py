@@ -4,6 +4,7 @@ import argparse
 import os
 import secrets
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import uvicorn
@@ -13,8 +14,10 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app import __version__
+from app.indexing.models import IndexBundle
 from app.ingestion.errors import IngestFailure
 from app.ingestion.models import (
+    BuildIndexRequest,
     IngestDocumentResponse,
     IngestPreviewRequest,
     IngestPreviewResponse,
@@ -22,6 +25,7 @@ from app.ingestion.models import (
 )
 from app.ingestion.service import IngestionService
 from app.ingestion.source import UrlFetcher
+from app.providers.embeddings import EmbeddingProvider
 
 
 class HealthResponse(BaseModel):
@@ -53,6 +57,7 @@ def create_app(
     launch_token: str | None = None,
     data_root: Path | None = None,
     url_fetcher: UrlFetcher | None = None,
+    embedding_provider_factory: Callable[[], EmbeddingProvider] | None = None,
 ) -> FastAPI:
     """创建只监听本机、使用启动令牌保护写接口的 FastAPI 应用。"""
 
@@ -63,7 +68,11 @@ def create_app(
         Path(os.environ["ASH_DATA_ROOT"]) if os.environ.get("ASH_DATA_ROOT") else None
     )
     ingestion_service = (
-        IngestionService(resolved_data_root, url_fetcher=url_fetcher)
+        IngestionService(
+            resolved_data_root,
+            url_fetcher=url_fetcher,
+            embedding_provider_factory=embedding_provider_factory,
+        )
         if resolved_data_root is not None
         else None
     )
@@ -168,6 +177,22 @@ def create_app(
                 503,
             )
         return ingestion_service.persist(request)
+
+    @app.post(
+        "/api/ingest/index",
+        response_model=IndexBundle,
+        dependencies=protected,
+    )
+    async def build_candidate_index(request: BuildIndexRequest) -> IndexBundle:
+        """为已保存 job 构建 S5 候选双索引，不发布 collection。"""
+
+        if ingestion_service is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return await ingestion_service.build_index(request)
 
     return app
 

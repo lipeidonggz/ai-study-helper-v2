@@ -154,7 +154,7 @@ URL 失败必须分类：网络错误、非 HTML、登录／反爬拦截、无�
 | --- | --- | --- | --- |
 | 本地文件读取 | 不设短墙钟超时，允许用户取消 | 1 次瞬时 I/O／锁冲突 | 文件不存在、无权限、编码无法判断、内容为空 |
 | HTTP/HTTPS 获取 | 连接 10s，总请求 60s，最多 5 次重定向 | 网络中断、408、429、5xx：最多 2 次；优先遵守 `Retry-After`，否则约 1s／4s 退避并加抖动 | 其余 4xx、非 HTML、登录／反爬页面、目标地址违反 SSRF 规则 |
-| Qwen embedding 单批 | 单次请求 60s | 网络错误、429、5xx：最多 2 次；优先遵守 `Retry-After`，否则约 1s／4s 退避并加抖动 | 400、401、403、422、请求内容非法或输入为空 |
+| Qwen embedding 单批 | 单次请求 60s | 网络错误、429、5xx：最多 2 次；`Retry-After` 在 60s 内时优先遵守，超过 60s 立即失败并交给后台任务稍后重试；缺失时约 1s／4s 退避并加抖动 | 400、401、403、422、请求内容非法或输入为空 |
 | 本地索引与 manifest 写入 | 不设固定短超时，允许用户取消 | 瞬时锁冲突／I/O：最多 1 次 | schema 错误、checksum 不一致、确定性校验失败 |
 
 **计费歧义**：网络在请求发出后超时，供应商可能已经处理并计费；重试无法保证不产生第二次费用。系统应保留每次 request ID 和 usage，并在成本诊断中标记“响应丢失后重试”；向量写入按 `block_id` upsert，避免重复记录，但不能承诺供应商侧零重复计费。
@@ -633,7 +633,8 @@ IndexBundle
 │  ├─ embedding_input_hash
 │  └─ dense_vector
 ├─ keyword_index_ref
-├─ keyword_profile             {analyzer, analyzer_version, bm25_k1, bm25_b}
+├─ keyword_profile             {engine, engine_version, analyzer, analyzer_version}
+│                              {bm25_k1|null, bm25_b|null, bm25_parameters_source}
 ├─ usage_preview              {block_count, batch_count}
 ├─ usage                      {request_count, input_tokens, ambiguous_retry_count}
 └─ errors[]
@@ -645,7 +646,7 @@ IndexBundle
 | `embedding_input_hash` | 对实际送入 Qwen 的输入文本计算 hash，用于缓存和复现；输入文本本身可作为构建 artifact 保留，但不需要逐块 token 计数 |
 | `dense_vector` | Qwen 返回的向量；必须与 block_id、embedding_input_hash 和模型 profile 绑定 |
 | `keyword_index_ref` | 关键词索引必须由同一批 block 构建，不能使用另一版文本或另一组过滤规则 |
-| `keyword_profile` | 记录搜索文本组装规则、分析器版本和 BM25 参数；任一变化都必须让关键词索引版本变化 |
+| `keyword_profile` | 记录搜索文本组装规则、分析器版本、FTS 引擎及版本；引擎可覆写 BM25 时记录 `k1`／`b` 数值，否则两者为 null 并记录 `bm25_parameters_source`；任一变化都必须让关键词索引版本变化 |
 | `usage_preview` | 调用前展示待向量化 block 数和预计 batch 数，不假装能给出精确金额；用户在开始前能看到本次大致调用规模 |
 | `usage` | 记录 API 实际返回的请求数和 input token usage；这是计费与构建诊断的权威值，优先于本地估算 |
 
@@ -675,6 +676,12 @@ IndexBundle
 | block.text 被任何阶段改写 | 视为契约破坏；S5 必须失败，不能继续生成 embedding 向量 |
 | 关键词索引入库 | 与 dense 向量使用同一批 block 构建；数量不对账或索引写入失败则文档失败 |
 
+>  **批次并发边界（2026-10-21 实现确认）**<br>
+> 单个 embedding 批次仍最多包含 20 个输入；批次之间默认最多 3 个 HTTP 请求在途。某个批次进入终态失败后不再启动排队中的新批次，已经发出的请求允许完成，以便汇总真实 request／token usage 并避免不可见计费。并发度有固定上限，不交给普通用户配置，也不允许无上限并发。
+
+>  **Retry-After 边界（2026-10-21 实现确认）**<br>
+> DashScope 响应包含 HTTP headers。适配器支持标准秒数和 HTTP 日期；等待时间在 60 秒内时遵守服务端要求，超过 60 秒时立即终止当前同步构建并返回可重试的限流错误，不能在一次 API 请求中休眠一小时。后续后台任务负责在合适的调度时刻重试。
+
 ### 9.3 关键词索引：从 block 文本到 BM25 倒排索引
 
 关键词索引服务于 `search_blocks` 的混合召回，不替代 `scan_term`。前者允许分词、排序和候选裁剪；后者必须对原文做确定性的字面扫描。两者共用 block，但语义和实现路径不同。
@@ -690,6 +697,9 @@ IndexBundle
 | **精确证否** | `scan_term` 不使用 BM25，也不使用 analyzer；只对 `block.text`（含固定原文规范化）做字面匹配，返回范围内全部命中。关键词索引的零结果不能代替 `scan_term` 的证否 |
 
 建索引时逐个 block 生成 `search_text`，分析出 term、term frequency 和 block length，写入倒排表；同一批 block 的 dense 向量和关键词索引必须共享同一 `block_id`。大表格拆出的行组把 `table_context` 纳入搜索文本，因此按表头词也能召回该行组；但返回给模型的证据仍只有 `block.text`，`table_context` 只作为阅读上下文。
+
+>  **BM25 参数的事实边界（2026-10-21 实现核对）**<br>
+> LanceDB 0.40 的原生 FTS 建索引配置和查询接口都不接受 `k1`／`b` 覆写。实现必须记录实际 `engine_version`，把 `bm25_k1`／`bm25_b` 标为 null，并以 `bm25_parameters_source=lancedb-engine-managed` 说明由引擎内部管理；不得写入未经确认的“默认值”，也不向用户提供无实际作用的参数开关。未来引擎开放覆写时，才记录真实数值并提升 keyword profile 版本。
 
 **为什么不直接用 Qwen sparse 代替本地关键词索引？**Qwen 的 sparse 向量适合语义加词项混合召回，但它的输出不是可审计的原文倒排表，不能承担“某个字符串是否出现”的确定性证否；`scan_term` 仍需要原文扫描，BM25 也需要可控的 term 统计。首版固定用 Qwen dense＋本地关键词索引，sparse 作为以后实测候选。
 
@@ -863,7 +873,7 @@ PublishRecord
 | **Q7 边界合规** | 不理解或越界的请求要被正确识别和处理 | 业务边界与拒答由 Agent 层负责；入库侧只把网页视为不可信输入并守住获取和内容展示的安全边界 | **不在本层**：入库不重复定义问答边界 |
 | **可靠性／降级** | 网络、解析、Qwen 或索引失败时，系统不能假装成功，也不能毁掉当前活动库 | 阶段可暂停／续跑；网络和解析错误分层；候选快照在 job workspace 构建；S6 校验通过前不切换活动指针；旧快照继续服务 | **默认策略已补**：HTTP 与 Qwen 的具体超时、2 次重试、退避和不可重试错误见 §3.3.1；数值仍可按实测校准，但不再缺设计 |
 | **成本** | 用户自己承担 Qwen API 费用，不能因重复入库悄悄放大成本 | embedding 按单批 20 条调用；相同 `embedding_input_hash` 可复用；调用前展示 block／batch 数，完成后记录 requests、input tokens 和响应丢失后的重试次数 | **成本提示已补**：不设自动硬停，用户自己持有 API Key，可暂停／取消；预计规模和实际 usage 进入任务状态与 trace，避免隐性成本 |
-| **Q8 响应速度** | 大文档和批量导入不能阻塞问答，用户要能看见进度 | 入库作为后台任务；按批处理 Qwen 请求；各阶段可显示状态；问答继续读取旧活动快照 | **方向已定**：并发度、批大小和界面刷新频率待实测；单用户产品不设多用户吞吐目标 |
+| **Q8 响应速度** | 大文档和批量导入不能阻塞问答，用户要能看见进度 | 入库作为后台任务；每批最多 20 个 block、最多 3 个批次在途；各阶段可显示状态；问答继续读取旧活动快照 | **方向已定**：批大小和并发上限已固定，界面刷新频率与真实限流阈值待实测；单用户产品不设多用户吞吐目标 |
 | **安全** | 网页和 HTML 是不可信输入，不能借入库执行代码、读取本机文件或访问内网 | URL 禁止 localhost／私网／链路本地地址并防 SSRF；不携带 Cookie、不登录、不提交表单、不执行页面 JavaScript；展示层按文本转义，不执行原文脚本 | **设计闭合**：首版没有浏览器渲染通道，因此不承担浏览器沙箱和页面脚本执行面；未来加入时重新评估 |
 | **隐私／数据主权** | 用户需要知道文档正文会发送给谁，不能把外发做成隐式行为 | 产品定位不是隐私优先；首启和入库前明确告知正文／块会发送给 Qwen embedding API；API Key、原始正文和 trace 中的敏感内容不进普通日志 | **边界已明确**：这是接受的产品权衡，不是“保证本地处理” |
 | **可观测性** | 失败时能定位是获取、解析、切块、embedding、索引还是发布出了问题 | 每篇文档和每个阶段记录状态、耗时、输入／输出 hash、数量、错误码、重试和 API usage；manifest 提供快照级汇总；完整正文放 artifact | **核心可见性已设计，高级能力后置**：job／document／stage 状态、错误码和 usage 必须可见；完整 trace 查看器、保留期和导出后续再做，不阻塞核心流程 |

@@ -20,6 +20,12 @@ class PersistIngestRequest(BaseModel):
     job_id: str = Field(pattern=r"^[0-9a-f]{32}$")
 
 
+class BuildIndexRequest(BaseModel):
+    """S5 请求：为已保存 job 构建不可发布的候选双索引。"""
+
+    job_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+
+
 class SourceArtifact(BaseModel):
     """S0 留痕后的不可变来源描述。"""
 

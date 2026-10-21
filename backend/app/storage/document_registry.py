@@ -272,6 +272,36 @@ class DocumentRegistry:
             row.doc_version = doc_version
             row.error_code = None
 
+    def start_index_job(self, job_id: str) -> None:
+        """把已保存 job 推进到 S5 运行状态，同时保留文档版本关联。"""
+
+        with self._database.session() as session, session.begin():
+            row = session.get(IngestionJobRow, job_id)
+            if row is None:
+                raise IngestFailure(
+                    "job_missing",
+                    "ingestion job disappeared before index construction",
+                    500,
+                )
+            row.status = "running"
+            row.stage = "S5"
+            row.error_code = None
+
+    def complete_index_job(self, job_id: str) -> None:
+        """把 S5 候选索引构建标记为成功，不执行 collection 发布。"""
+
+        with self._database.session() as session, session.begin():
+            row = session.get(IngestionJobRow, job_id)
+            if row is None:
+                raise IngestFailure(
+                    "job_missing",
+                    "ingestion job disappeared before index completion",
+                    500,
+                )
+            row.status = "succeeded"
+            row.stage = "S5"
+            row.error_code = None
+
     def fail_job(self, job_id: str, error_code: str) -> None:
         """把 job 标记为失败，同时保留最后已进入的阶段。"""
 
