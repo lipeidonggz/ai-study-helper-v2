@@ -168,6 +168,14 @@ impl BackendManager {
             .arg(self.port.to_string())
             .env("ASH_LAUNCH_TOKEN", &self.token)
             .env("ASH_DATA_ROOT", data_root)
+            .env(
+                "ASH_TRACE_MODE",
+                if cfg!(debug_assertions) {
+                    "full"
+                } else {
+                    "metadata"
+                },
+            )
             .env("PYTHONUNBUFFERED", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::from(log))

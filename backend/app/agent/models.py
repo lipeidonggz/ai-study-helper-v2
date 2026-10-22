@@ -31,6 +31,7 @@ class AgentRunResponse(BaseModel):
     """Agent 单轮运行的最终结果与审计事件。"""
 
     status: Literal["succeeded", "partial", "failed", "canceled"]
+    trace_id: str
     answer: str | None
     answer_completeness: Literal["complete", "partial"]
     limitations: list[AgentLimitation]

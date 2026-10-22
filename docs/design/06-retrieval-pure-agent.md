@@ -508,7 +508,7 @@ Action: Finish[最终答案]
 
 | 对象 | 必需内容 | 用途 |
 | --- | --- | --- |
-| **Trace 根记录** | `trace_id`／`schema_version`／`app_version`／开始与结束时间；请求固定的 `collection_snapshot_id`、`snapshot_status` 与 `completeness`；最终状态和 `termination_reason`；`agent_turns`／`tool_calls`／`model_calls`、重试次数、对话／embedding token 和预算状态；`trace_status=complete\|partial\|dropped` 与丢弃事件数；用户问题 artifact 引用（`metadata` 模式只记 hash） | 从一次请求回看整体结果，区分正常完成、预算终止、协议失败和内部错误 |
+| **Trace 根记录** | `trace_id`／`schema_version`／`app_version`／开始与结束时间；请求固定的 `collection_snapshot_id`、`snapshot_status` 与 `completeness`；最终状态和 `termination_reason`；`agent_turns`／`tool_calls`／`model_calls`、重试次数、对话／embedding token 和预算状态；`trace_status=complete\|partial\|dropped` 与丢弃事件数；用户问题 artifact 引用及最多 80 个字符的展示预览（`metadata` 模式只记 artifact hash，不保存完整问题） | 从一次请求回看整体结果，区分正常完成、预算终止、协议失败和内部错误 |
 | **Span 公共字段** | `trace_id`／`span_id`／`parent_span_id`／名称／类型／开始与结束时间／`ok\|error`／错误码；产品扩展字段统一用 `app.*` | 构成可查询、可导出的调用树，而不是一堆互不关联的日志行 |
 | **`agent.turn`** | `turn_index`；Thought／Action 的 artifact 引用（`metadata` 模式只记类型和 hash）；本轮的模型调用 span、工具 span 和预算检查结果 | 回答“Agent 为什么在这一轮选了这个工具／为什么在这里结束” |
 | **`llm.call`** | 实际尝试序号；provider／model／模型快照或版本；温度等采样参数；输入、输出、缓存 token；`finish_reason`；耗时；完整渲染提示词和模型原始输出的 artifact 引用（`metadata` 模式只记 hash） | 区分是提示词、模型、截断、协议解析还是预算导致的失败；支撑成本与复现 |

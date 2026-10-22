@@ -6,14 +6,14 @@ import os
 import secrets
 import time
 from collections.abc import Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from app import __version__
@@ -76,6 +76,9 @@ from app.tasks.models import (
     PreviewIngestTaskRequest,
 )
 from app.tasks.service import BackgroundTaskService
+from app.tracing.catalog import TraceCatalog, TraceInvalidError, TraceNotFoundError
+from app.tracing.models import TraceDetailRecord, TraceListItem
+from app.tracing.store import TraceStore
 from app.workspace.models import ResetWorkspaceRequest, ResetWorkspaceResponse
 from app.workspace.service import WorkspaceResetService
 
@@ -167,6 +170,20 @@ def create_app(
         else None
     )
     agent_stream_service = AgentRunStreamService()
+    trace_store = TraceStore(resolved_data_root) if resolved_data_root is not None else None
+    trace_catalog = (
+        TraceCatalog(resolved_data_root / "traces") if resolved_data_root is not None else None
+    )
+
+    async def trace_cleanup_loop() -> None:
+        """启动时及每日一次清理过期 trace，不影响主服务启动。"""
+
+        while True:
+            if trace_catalog is not None:
+                with suppress(Exception):
+                    await asyncio.to_thread(trace_catalog.cleanup)
+            await asyncio.sleep(24 * 60 * 60)
+
     document_detail_service = (
         DocumentDetailService(resolved_data_root, collection_service, task_service)
         if resolved_data_root is not None
@@ -179,10 +196,15 @@ def create_app(
     async def lifespan(_app: FastAPI):
         if task_service is not None:
             await task_service.start()
+        trace_cleanup_task = asyncio.create_task(trace_cleanup_loop())
         try:
             yield
         finally:
+            trace_cleanup_task.cancel()
+            await asyncio.gather(trace_cleanup_task, return_exceptions=True)
             await agent_stream_service.shutdown()
+            if trace_store is not None:
+                trace_store.close()
             if task_service is not None:
                 await task_service.stop()
 
@@ -285,6 +307,8 @@ def create_app(
                 DEFAULT_HYBRID_RETRIEVAL_PROFILE,
                 top_k=runtime_settings.top_k,
             ),
+            trace_store=trace_store,
+            trace_mode=runtime_settings.trace_mode,
         )
 
     @app.get("/health", response_model=HealthResponse)
@@ -655,6 +679,103 @@ def create_app(
                 404,
             ) from error
 
+    @app.get(
+        "/api/traces",
+        response_model=list[TraceListItem],
+        dependencies=protected,
+    )
+    async def list_traces(limit: int = Query(default=50, ge=1, le=200)) -> list[TraceListItem]:
+        """返回最近本地 Agent trace 摘要。"""
+
+        if trace_catalog is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return trace_catalog.list_recent(limit)
+
+    @app.get(
+        "/api/traces/{trace_id}",
+        response_model=TraceDetailRecord,
+        dependencies=protected,
+    )
+    async def get_trace(trace_id: str) -> TraceDetailRecord:
+        """从本地事实文件读取一次完整 trace。"""
+
+        if trace_catalog is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        try:
+            return trace_catalog.load(trace_id)
+        except TraceNotFoundError as error:
+            raise IngestFailure(
+                "trace_not_found",
+                "trace does not exist or has been cleaned up",
+                404,
+            ) from error
+        except TraceInvalidError as error:
+            raise IngestFailure(
+                "trace_invalid",
+                str(error),
+                500,
+            ) from error
+
+    @app.get(
+        "/api/traces/{trace_id}/artifacts/{artifact_id}",
+        dependencies=protected,
+    )
+    async def get_trace_artifact(trace_id: str, artifact_id: str) -> FileResponse:
+        """读取 full trace 中通过 checksum 校验的 artifact。"""
+
+        if trace_catalog is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        try:
+            detail = trace_catalog.load(trace_id)
+            artifact = next(
+                (item for item in detail.manifest.artifacts if item.artifact_id == artifact_id),
+                None,
+            )
+            path = trace_catalog.artifact_path(trace_id, artifact_id)
+        except TraceNotFoundError as error:
+            raise IngestFailure(
+                "trace_artifact_not_found",
+                "trace artifact does not exist or is omitted",
+                404,
+            ) from error
+        except TraceInvalidError as error:
+            raise IngestFailure(
+                "trace_artifact_invalid",
+                str(error),
+                500,
+            ) from error
+        return FileResponse(
+            path,
+            media_type=artifact.mime_type if artifact is not None else "application/octet-stream",
+        )
+
+    @app.post(
+        "/api/traces/index/rebuild",
+        dependencies=protected,
+    )
+    async def rebuild_trace_index() -> dict[str, int]:
+        """从 trace manifest 重建派生索引。"""
+
+        if trace_catalog is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return {"indexed": trace_catalog.rebuild()}
+
     @app.post(
         "/api/agent/run",
         response_model=AgentRunResponse,
@@ -666,6 +787,7 @@ def create_app(
         result = await build_agent_runtime().run(request.question)
         return AgentRunResponse(
             status=result.status,
+            trace_id=result.trace_id,
             answer=result.answer,
             answer_completeness=result.answer_completeness,
             limitations=list(result.limitations),

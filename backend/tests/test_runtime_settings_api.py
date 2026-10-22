@@ -10,13 +10,14 @@ from app.main import create_app
 TOKEN = "runtime-settings-test-token"
 
 
-def _payload(**overrides: int) -> dict[str, int]:
+def _payload(**overrides: object) -> dict[str, object]:
     value = {
         "top_k": 5,
         "max_output_tokens": 8192,
         "max_context_tokens": 100_000,
         "max_request_tokens": 400_000,
         "max_tool_calls": 8,
+        "trace_mode": "full",
     }
     value.update(overrides)
     return value
@@ -56,9 +57,11 @@ def test_runtime_settings_defaults_save_and_survive_restart(tmp_path: Path) -> N
 
     assert defaults["top_k"] == 5
     assert defaults["max_output_tokens"] == 8192
+    assert defaults["trace_mode"] in {"off", "metadata", "full"}
     assert defaults["updated_at"] is None
     assert saved["top_k"] == 7
     assert saved["max_output_tokens"] == 12_288
+    assert saved["trace_mode"] == "full"
     assert saved["updated_at"] is not None
     assert loaded == saved
     assert after_reset == saved

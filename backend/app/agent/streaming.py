@@ -14,6 +14,7 @@ from app.agent.runtime import (
     AgentRuntime,
     RunCancellationToken,
 )
+from app.tracing.store import TraceSession
 
 STREAM_SCHEMA_VERSION = "agent-stream-v1"
 STREAM_RETENTION_SECONDS = 10 * 60
@@ -106,7 +107,7 @@ class AgentRunStreamService:
 
         self._prune_expired()
         run_id = uuid4().hex
-        trace_id = f"trace_{run_id}"
+        trace_id, trace_session = runtime.begin_trace(question)
         record = _RunRecord(
             run_id=run_id,
             trace_id=trace_id,
@@ -119,7 +120,7 @@ class AgentRunStreamService:
                 payload={"run_id": run_id, "snapshot_id": None},
             )
         )
-        task = asyncio.create_task(self._execute(record, runtime, question))
+        task = asyncio.create_task(self._execute(record, runtime, question, trace_session))
         self._track_task(task)
         await asyncio.sleep(0)
         return record.events[0]
@@ -193,6 +194,7 @@ class AgentRunStreamService:
         record: _RunRecord,
         runtime: AgentRuntime,
         question: str,
+        trace_session: TraceSession | None,
     ) -> None:
         def emit(event: AgentEvent) -> None:
             if event.event_type == "run_started":
@@ -205,6 +207,8 @@ class AgentRunStreamService:
                 question,
                 emit=emit,
                 cancellation=record.cancellation,
+                trace_session=trace_session,
+                trace_id=record.trace_id,
             )
             record.result = result
             if not any(

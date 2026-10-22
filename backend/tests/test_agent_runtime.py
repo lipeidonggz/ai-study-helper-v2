@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 
 import httpx
@@ -18,8 +19,11 @@ from app.providers.chat import (
 )
 from app.providers.embeddings import FakeEmbeddingProvider
 from app.retrieval.service import RetrievalReadService
+from app.tracing.catalog import TraceCatalog
+from app.tracing.store import TraceStore
 
 TOKEN = "agent-runtime-test-token"
+TRACE_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
 
 def _html() -> bytes:
@@ -224,6 +228,132 @@ def test_agent_runtime_cancel_interrupts_model_stream_without_later_calls(
     canceled_event = next(event for event in result.events if event.event_type == "run_canceled")
     assert canceled_event.payload["input_tokens"] == result.input_tokens
     assert canceled_event.payload["output_tokens"] == result.output_tokens
+
+
+def test_agent_runtime_persists_parented_trace_with_tool_and_budget_data(
+    tmp_path: Path,
+) -> None:
+    embedding_provider = _prepare_snapshot(tmp_path)
+    chat_provider = FakeChatProvider(
+        [
+            'Thought: 需要查找 MCP。\nAction: search_blocks[{"query":"MCP"}]',
+            "Thought: 已取得证据。\nAction: Finish[MCP 位于沙箱边界章节。]",
+        ],
+        stream_chunk_size=5,
+    )
+    store = TraceStore(tmp_path)
+    runtime = AgentRuntime(
+        tmp_path,
+        chat_provider=chat_provider,
+        embedding_provider=embedding_provider,
+        trace_store=store,
+        trace_mode="full",
+    )
+
+    result = asyncio.run(runtime.run("MCP 在哪个章节？"))
+
+    assert result.trace_id and TRACE_ID_PATTERN.fullmatch(result.trace_id)
+    assert store.wait_for_idle(3)
+    detail = TraceCatalog(tmp_path / "traces").load(result.trace_id)
+    store.close()
+
+    names = [span.name for span in detail.spans]
+    assert names.count("agent.run") == 1
+    assert names.count("agent.turn") == 2
+    assert names.count("llm.call") == 2
+    assert names.count("tool.call") == 1
+    root = next(span for span in detail.spans if span.name == "agent.run")
+    turns = [span for span in detail.spans if span.name == "agent.turn"]
+    assert all(turn.parent_span_id == root.span_id for turn in turns)
+    tool_span = next(span for span in detail.spans if span.name == "tool.call")
+    assert tool_span.parent_span_id in {turn.span_id for turn in turns}
+    assert tool_span.attributes["app.result_tokens"] > 0
+    assert tool_span.attributes["app.diagnostics"]
+    assert any(event.name == "budget.check" for turn in turns for event in turn.events)
+    assert detail.manifest.trace_status == "complete"
+    assert detail.manifest.replay_scope == "retrieval"
+    assert {artifact.kind for artifact in detail.manifest.artifacts} >= {
+        "question",
+        "llm.prompt",
+        "llm.output",
+        "tool.arguments",
+        "tool.payload",
+        "answer",
+    }
+
+
+def test_trace_queue_failure_does_not_break_agent_answer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    embedding_provider = _prepare_snapshot(tmp_path)
+    chat_provider = FakeChatProvider(["Thought: 完成。\nAction: Finish[回答仍应成功]"])
+    store = TraceStore(tmp_path, queue_capacity=1)
+    monkeypatch.setattr(store, "_ensure_worker", lambda: None)
+    runtime = AgentRuntime(
+        tmp_path,
+        chat_provider=chat_provider,
+        embedding_provider=embedding_provider,
+        trace_store=store,
+        trace_mode="full",
+    )
+
+    result = asyncio.run(runtime.run("trace 队列满"))
+
+    assert result.status == "succeeded"
+    assert result.answer == "回答仍应成功"
+    assert store.health(result.trace_id).status == "partial"
+
+
+def test_metadata_trace_omits_prompt_tool_body_and_answer_content(
+    tmp_path: Path,
+) -> None:
+    embedding_provider = _prepare_snapshot(tmp_path)
+    chat_provider = FakeChatProvider(
+        [
+            'Thought: 检索。\nAction: search_blocks[{"query":"MCP"}]',
+            "Thought: 完成。\nAction: Finish[只在 artifact 中出现]",
+        ]
+    )
+    store = TraceStore(tmp_path)
+    runtime = AgentRuntime(
+        tmp_path,
+        chat_provider=chat_provider,
+        embedding_provider=embedding_provider,
+        trace_store=store,
+        trace_mode="metadata",
+    )
+
+    result = asyncio.run(runtime.run("metadata trace"))
+
+    assert store.wait_for_idle(3)
+    detail = TraceCatalog(tmp_path / "traces").load(result.trace_id)
+    store.close()
+
+    assert detail.manifest.question_preview == "metadata trace"
+    assert all(artifact.state == "omitted" for artifact in detail.manifest.artifacts)
+    tool_span = next(span for span in detail.spans if span.name == "tool.call")
+    assert "app.tool_arguments" not in tool_span.attributes
+    assert "app.diagnostics" not in tool_span.attributes
+    assert "只在 artifact 中出现" not in detail.model_dump_json()
+
+
+def test_trace_mode_off_creates_no_trace_files(tmp_path: Path) -> None:
+    embedding_provider = _prepare_snapshot(tmp_path)
+    store = TraceStore(tmp_path)
+    runtime = AgentRuntime(
+        tmp_path,
+        chat_provider=FakeChatProvider(["Thought: 完成。\nAction: Finish[不记录 trace]"]),
+        embedding_provider=embedding_provider,
+        trace_store=store,
+        trace_mode="off",
+    )
+
+    result = asyncio.run(runtime.run("关闭 trace"))
+
+    assert result.status == "succeeded"
+    assert result.trace_id and TRACE_ID_PATTERN.fullmatch(result.trace_id)
+    assert not (tmp_path / "traces").exists()
 
 
 def test_protocol_error_becomes_observation_and_recovers(tmp_path: Path) -> None:
@@ -705,6 +835,78 @@ def test_runtime_settings_do_not_change_an_inflight_request(tmp_path: Path) -> N
     assert first["answer"] == "旧配置"
     assert second["answer"] == "新配置"
     assert chat_provider.max_output_requests == [4096, 6144]
+
+
+def test_agent_api_exposes_persisted_trace_detail_and_artifact(tmp_path: Path) -> None:
+    embedding_provider = _prepare_snapshot(tmp_path)
+    chat_provider = FakeChatProvider(
+        ["Thought: 完成。\nAction: Finish[可诊断回答]"],
+        stream_chunk_size=3,
+    )
+    app = create_app(
+        TOKEN,
+        data_root=tmp_path,
+        credential_store=_MemoryCredentials(),
+        embedding_provider_factory=lambda: embedding_provider,
+        chat_provider_factory=lambda _key: chat_provider,
+    )
+
+    async def run() -> tuple[dict, dict, bytes]:
+        transport = httpx.ASGITransport(app=app)
+        headers = {"x-launch-token": TOKEN}
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            saved = await client.put(
+                "/api/settings/runtime",
+                headers=headers,
+                json={
+                    "top_k": 5,
+                    "max_output_tokens": 4096,
+                    "max_context_tokens": 100_000,
+                    "max_request_tokens": 400_000,
+                    "max_tool_calls": 8,
+                    "trace_mode": "full",
+                },
+            )
+            saved.raise_for_status()
+            response = await client.post(
+                "/api/agent/run",
+                headers=headers,
+                json={"question": "生成可诊断 trace"},
+            )
+            response.raise_for_status()
+            trace_id = response.json()["trace_id"]
+            for _ in range(100):
+                listed = await client.get("/api/traces", headers=headers)
+                listed.raise_for_status()
+                if any(item["trace_id"] == trace_id for item in listed.json()):
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                raise AssertionError("trace did not appear in index")
+            detail = await client.get(f"/api/traces/{trace_id}", headers=headers)
+            detail.raise_for_status()
+            answer_artifact = next(
+                artifact
+                for artifact in detail.json()["manifest"]["artifacts"]
+                if artifact["kind"] == "answer"
+            )
+            artifact = await client.get(
+                f"/api/traces/{trace_id}/artifacts/{answer_artifact['artifact_id']}",
+                headers=headers,
+            )
+            artifact.raise_for_status()
+            return response.json(), detail.json(), artifact.content
+
+    response, detail, artifact_content = asyncio.run(run())
+
+    assert response["trace_id"]
+    assert detail["manifest"]["trace_id"] == response["trace_id"]
+    assert detail["manifest"]["mode"] == "full"
+    assert detail["spans"]
+    assert artifact_content.decode("utf-8") == "可诊断回答"
 
 
 def test_agent_api_runtime_failure_returns_structured_http_200(tmp_path: Path) -> None:
