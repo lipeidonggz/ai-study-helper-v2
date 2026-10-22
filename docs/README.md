@@ -8,7 +8,7 @@
 
 - 阶段：实现阶段，015 后台交付和 016 确定性检索读取层已完成。
 - 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付和快照绑定检索读取能力已实现。
-- 当前工作：017 `search_blocks` 混合检索已完成，下一步进入 Agent 运行时与对话入口。
+- 当前工作：018 Agent Runtime 核心已完成，下一步进入聊天 UI、SSE 与 trace。
 
 ## 设计基线
 
@@ -79,6 +79,7 @@
 - [015 · GitHub 后台交付与失败可见性（已完成）](development/slices/015-background-delivery.md)
 - [016 · 检索确定性读取层（已完成）](development/slices/016-retrieval-read-layer.md)
 - [017 · 混合检索 search_blocks（已完成）](development/slices/017-hybrid-search.md)
+- [018 · Agent Runtime 主循环（已完成）](development/slices/018-agent-runtime-core.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库

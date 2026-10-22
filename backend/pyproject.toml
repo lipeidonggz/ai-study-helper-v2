@@ -15,7 +15,9 @@ dependencies = [
   "httpx>=0.28,<1",
   "keyring>=25.7,<26",
   "lancedb>=0.40,<1",
+  "langgraph>=1.2,<2",
   "lxml>=6,<7",
+  "openai>=2.54,<3",
   "pyarrow>=26,<27",
   "pydantic>=2.11,<3",
   "readability-lxml>=0.8,<1",
@@ -47,6 +49,7 @@ select = ["E", "F", "I", "B", "UP", "SIM", "D101", "D102", "D103"]
 [tool.ruff.lint.per-file-ignores]
 "migrations/**" = ["D101", "D102", "D103"]
 "tests/**" = ["D101", "D102", "D103"]
+"app/agent/prompt.py" = ["E501"]
 
 [tool.pyright]
 include = ["app"]

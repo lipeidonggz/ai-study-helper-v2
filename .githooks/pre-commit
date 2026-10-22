@@ -2,3 +2,4 @@
 set -eu
 
 corepack pnpm quality:quick
+corepack pnpm review:check

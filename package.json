@@ -9,6 +9,7 @@
     "build": "corepack pnpm --dir desktop tauri build",
     "check": "corepack pnpm --dir frontend check && corepack pnpm --dir desktop check",
     "comments:check": "node scripts/check-comments.mjs",
+    "review:check": "node scripts/check-reverse-explanation.mjs",
     "quality:quick": "corepack pnpm comments:check && corepack pnpm backend:check && corepack pnpm check",
     "quality": "corepack pnpm quality:quick && corepack pnpm backend:test",
     "backend:check": "powershell -NoProfile -Command \"& (Resolve-Path 'backend\\.venv\\Scripts\\python.exe').Path -m ruff format --check backend; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & (Resolve-Path 'backend\\.venv\\Scripts\\python.exe').Path -m ruff check backend; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & (Resolve-Path 'backend\\.venv\\Scripts\\python.exe').Path -m ruff format --check --config backend\\pyproject.toml scripts; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & (Resolve-Path 'backend\\.venv\\Scripts\\python.exe').Path -m ruff check --config backend\\pyproject.toml scripts; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & (Resolve-Path 'backend\\.venv\\Scripts\\python.exe').Path -m pyright --project backend\"",

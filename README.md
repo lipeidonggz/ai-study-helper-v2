@@ -69,6 +69,14 @@ backend\.venv\Scripts\python.exe scripts\watch_github_delivery.py `
 结果原子写入 `backend/.runtime/delivery-status.json`。退出码：
 `0=已合并`、`1=失败`、`2=超时`。watcher 不保存 GitHub token。
 
+需要临时验证 DeepSeek 对话连通性、但设置界面尚未完成时，可使用安全提示录入 Key：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\set-chat-key.ps1
+```
+
+Key 通过隐藏输入写入 Windows Credential Manager，不出现在命令行、仓库文件或日志中。
+
 sidecar 开发日志写入 `backend/.runtime/sidecar.log`，Vite 日志写入 `frontend/.runtime/`；两个运行目录都不进入版本控制。
 
 构建 PyInstaller sidecar 与 release 桌面二进制：
