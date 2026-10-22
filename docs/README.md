@@ -37,6 +37,7 @@
 | [`decisions/`](decisions/) | 技术取舍与 ADR | `NNNN-短描述.md` |
 | `development/slices/` | 垂直切片的实现记录 | `NNN-短描述.md` |
 | `development/experiments/` | 性能、质量和兼容性实验 | `YYYY-MM-DD-短描述.md` |
+| `publishing/` | 面向外部读者的文章草稿 | `NN-短描述.md` |
 | `operations/` | 安装、排障、备份与升级说明 | 按使用场景命名 |
 
 临时任务、进行中状态和开放式讨论优先放在 GitHub Issue、Project 或 PR；只有形成长期结论后才整理进 `docs/`。
@@ -44,12 +45,15 @@
 当前已记录：
 
 - [实现待办](development/backlog.md)
+- [对外文章草稿](publishing/README.md)
 - [0001 · 文档与实现记录结构](decisions/0001-documentation-and-record-structure.md)
 - [0002 · 使用 PyInstaller one-folder 分发后端](decisions/0002-package-backend-as-pyinstaller-directory.md)
 - [0003 · Windows 按用户安装与本地数据根](decisions/0003-windows-installer-and-data-root.md)
 - [0004 · 使用轻量确定性语言检测](decisions/0004-lightweight-language-detection.md)
 - [0005 · 代码注释与可读性门禁](decisions/0005-code-quality-gates.md)
 - [0006 · 使用当前 HTML 入库快照作为检索基线](decisions/0006-use-current-html-corpus-for-retrieval-baseline.md)
+- [0007 · 人-AI 协同控制模型（试行中）](decisions/0007-human-ai-collaboration-control-model.md)
+- [切片控制契约与证据包模板](development/slices/TEMPLATE.md)
 - [001 · 桌面 sidecar 最小启动链（已完成）](development/slices/001-desktop-sidecar-bootstrap.md)
 - [002 · PyInstaller one-folder sidecar 与 release 冒烟（已完成）](development/slices/002-packaged-sidecar.md)
 - [003 · Windows 安装、首次启动与数据保留（已完成）](development/slices/003-windows-installer.md)
