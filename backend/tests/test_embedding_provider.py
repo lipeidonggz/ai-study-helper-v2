@@ -48,6 +48,31 @@ def test_dashscope_provider_sends_document_contract_and_orders_vectors(
     assert result.input_tokens == 42
 
 
+def test_dashscope_query_embedding_uses_query_text_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_call(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            status_code=200,
+            request_id="query-request",
+            usage={"input_tokens": 7},
+            output={"embeddings": [{"text_index": 0, "embedding": [0.25, 0.75]}]},
+        )
+
+    monkeypatch.setattr(TextEmbedding, "call", fake_call)
+    result = asyncio.run(DashScopeEmbeddingProvider("test-key").embed_query("隔离边界"))
+
+    assert captured["text_type"] == "query"
+    assert captured["input"] == ["隔离边界"]
+    assert captured["dimension"] == QWEN_EMBEDDING_DIMENSION
+    assert result.vector == [0.25, 0.75]
+    assert result.request_id == "query-request"
+    assert result.input_tokens == 7
+
+
 @pytest.mark.parametrize(
     ("status_code", "expected_code", "retryable"),
     [

@@ -39,6 +39,15 @@ class EmbeddingBatchResult:
 
 
 @dataclass(slots=True)
+class EmbeddingQueryResult:
+    """一次 query embedding 的向量、request ID 和供应商 token usage。"""
+
+    vector: list[float]
+    request_id: str
+    input_tokens: int
+
+
+@dataclass(slots=True)
 class EmbeddingProviderError(Exception):
     """可分类的 embedding 上游失败，供构建器决定是否重试。"""
 
@@ -71,6 +80,10 @@ class EmbeddingProvider(Protocol):
         """为一个非空批次生成与输入顺序一致的 dense 向量。"""
         ...
 
+    async def embed_query(self, query: str) -> EmbeddingQueryResult:
+        """按供应商 query 输入类型生成一个 dense 查询向量。"""
+        ...
+
 
 class FakeEmbeddingProvider:
     """用于自动测试的确定性 1024 维 embedding provider。"""
@@ -85,6 +98,7 @@ class FakeEmbeddingProvider:
             text_type="document",
         )
         self.calls: list[tuple[str, ...]] = []
+        self.query_calls: list[str] = []
 
     @property
     def profile(self) -> EmbeddingProfile:
@@ -114,6 +128,24 @@ class FakeEmbeddingProvider:
             vectors=vectors,
             request_id=f"fake-{len(self.calls):06d}",
             input_tokens=sum(max(1, len(text) // 4) for text in texts),
+        )
+
+    async def embed_query(self, query: str) -> EmbeddingQueryResult:
+        """由查询文本确定性地生成一个 query 向量。"""
+
+        normalized = query.strip()
+        if not normalized:
+            raise EmbeddingProviderError(
+                code="embedding_query_invalid",
+                message="embedding query must not be empty",
+                retryable=False,
+                is_ambiguous=False,
+            )
+        self.query_calls.append(normalized)
+        return EmbeddingQueryResult(
+            vector=self._vector_for(normalized),
+            request_id=f"fake-query-{len(self.query_calls):06d}",
+            input_tokens=max(1, len(normalized) // 4),
         )
 
     def _vector_for(self, text: str) -> list[float]:
@@ -159,6 +191,31 @@ class DashScopeEmbeddingProvider:
     async def embed_documents(self, texts: list[str]) -> EmbeddingBatchResult:
         """调用一次 Qwen 同步 SDK，并把协议失败映射为稳定领域错误。"""
 
+        return await self._embed(texts, text_type=self.profile.text_type)
+
+    async def embed_query(self, query: str) -> EmbeddingQueryResult:
+        """以 Qwen query 输入类型生成一个检索查询向量。"""
+
+        normalized = query.strip()
+        if not normalized:
+            raise EmbeddingProviderError(
+                code="embedding_query_invalid",
+                message="embedding query must not be empty",
+                retryable=False,
+                is_ambiguous=False,
+            )
+        result = await self._embed([normalized], text_type="query")
+        if len(result.vectors) != 1:
+            raise _invalid_provider_response("query embedding must return exactly one vector")
+        return EmbeddingQueryResult(
+            vector=result.vectors[0],
+            request_id=result.request_id,
+            input_tokens=result.input_tokens,
+        )
+
+    async def _embed(self, texts: list[str], *, text_type: str) -> EmbeddingBatchResult:
+        """以指定 query／document 输入类型调用一次 Qwen SDK。"""
+
         if not self._api_key.strip():
             raise EmbeddingProviderError(
                 code="embedding_api_key_missing",
@@ -179,7 +236,7 @@ class DashScopeEmbeddingProvider:
                 model=self.profile.model_id,
                 input=texts,
                 api_key=self._api_key,
-                text_type=self.profile.text_type,
+                text_type=text_type,
                 dimension=self.profile.dimension,
                 output_type=self.profile.output_type,
                 request_timeout=QWEN_REQUEST_TIMEOUT_SECONDS,
