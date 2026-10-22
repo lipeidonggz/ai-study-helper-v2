@@ -13,12 +13,22 @@ from pathlib import Path
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from app import __version__
-from app.agent.models import AgentRunEvent, AgentRunRequest, AgentRunResponse
+from app.agent.models import (
+    AgentRunEvent,
+    AgentRunRequest,
+    AgentRunResponse,
+    AgentRunStartResponse,
+)
 from app.agent.runtime import AgentRunConfig, AgentRuntime
+from app.agent.streaming import (
+    AgentRunEventGapError,
+    AgentRunNotFoundError,
+    AgentRunStreamService,
+)
 from app.collections.models import (
     CurrentCollectionResponse,
     PublishCollectionRequest,
@@ -156,6 +166,7 @@ def create_app(
         if resolved_data_root is not None
         else None
     )
+    agent_stream_service = AgentRunStreamService()
     document_detail_service = (
         DocumentDetailService(resolved_data_root, collection_service, task_service)
         if resolved_data_root is not None
@@ -171,6 +182,7 @@ def create_app(
         try:
             yield
         finally:
+            await agent_stream_service.shutdown()
             if task_service is not None:
                 await task_service.stop()
 
@@ -188,7 +200,7 @@ def create_app(
         allow_origins=ALLOWED_ORIGINS,
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT"],
-        allow_headers=["content-type", "x-launch-token"],
+        allow_headers=["content-type", "x-launch-token", "last-event-id"],
     )
 
     @app.exception_handler(IngestFailure)
@@ -220,6 +232,60 @@ def create_app(
             )
 
     protected = [Depends(require_launch_token)]
+
+    def build_agent_runtime() -> AgentRuntime:
+        """使用请求开始时的凭证与运行设置创建独立 Agent Runtime。"""
+
+        if resolved_data_root is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        embedding_key = resolved_credentials.get(EMBEDDING_API_KEY_USERNAME)
+        if not embedding_key:
+            raise IngestFailure(
+                "embedding_api_key_missing",
+                "configure an embedding API key before asking questions",
+                409,
+            )
+        chat_key = resolved_credentials.get(CHAT_API_KEY_USERNAME)
+        if not chat_key:
+            raise IngestFailure(
+                "chat_api_key_missing",
+                "configure a chat API key before asking questions",
+                409,
+            )
+        runtime_settings = (
+            runtime_settings_service.get()
+            if runtime_settings_service is not None
+            else RuntimeSettingsResponse()
+        )
+        embedding_provider = (
+            embedding_provider_factory()
+            if embedding_provider_factory is not None
+            else DashScopeEmbeddingProvider(embedding_key)
+        )
+        chat_provider = (
+            chat_provider_factory(chat_key)
+            if chat_provider_factory is not None
+            else DeepSeekChatProvider(chat_key)
+        )
+        return AgentRuntime(
+            resolved_data_root,
+            chat_provider=chat_provider,
+            embedding_provider=embedding_provider,
+            config=AgentRunConfig(
+                max_tool_calls=runtime_settings.max_tool_calls,
+                max_context_tokens=runtime_settings.max_context_tokens,
+                max_request_tokens=runtime_settings.max_request_tokens,
+                max_output_tokens=runtime_settings.max_output_tokens,
+            ),
+            retrieval_profile=replace(
+                DEFAULT_HYBRID_RETRIEVAL_PROFILE,
+                top_k=runtime_settings.top_k,
+            ),
+        )
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
@@ -511,6 +577,85 @@ def create_app(
         return await model_settings_service.test_chat()
 
     @app.post(
+        "/api/agent/runs",
+        response_model=AgentRunStartResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=protected,
+    )
+    async def start_agent_run(request: AgentRunRequest) -> AgentRunStartResponse:
+        """启动一次后台流式问答并返回运行与事件定位标识。"""
+
+        runtime = build_agent_runtime()
+        started = await agent_stream_service.start(runtime, request.question)
+        run_id = str(started.payload["run_id"])
+        return AgentRunStartResponse(run_id=run_id, trace_id=started.trace_id)
+
+    @app.get(
+        "/api/agent/runs/{run_id}/events",
+        dependencies=protected,
+    )
+    async def stream_agent_run(run_id: str, request: Request) -> StreamingResponse:
+        """按 Last-Event-ID 回放并持续发送本次问答事件。"""
+
+        raw_cursor = request.headers.get("last-event-id") or request.query_params.get(
+            "after",
+            "0",
+        )
+        try:
+            after_sequence = int(raw_cursor)
+        except ValueError as error:
+            raise IngestFailure(
+                "agent_event_cursor_invalid",
+                "Last-Event-ID must be a non-negative integer",
+                400,
+            ) from error
+        try:
+            agent_stream_service.validate_cursor(run_id, after_sequence)
+        except AgentRunNotFoundError as error:
+            raise IngestFailure(
+                "agent_run_not_found",
+                "agent run is no longer available for reconnect",
+                404,
+            ) from error
+        except AgentRunEventGapError as error:
+            raise IngestFailure(
+                "agent_event_gap",
+                "requested event position is no longer available",
+                409,
+            ) from error
+        return StreamingResponse(
+            (
+                envelope.to_sse()
+                async for envelope in agent_stream_service.subscribe(
+                    run_id,
+                    after_sequence=after_sequence,
+                )
+            ),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.post(
+        "/api/agent/runs/{run_id}/cancel",
+        dependencies=protected,
+    )
+    async def cancel_agent_run(run_id: str) -> dict[str, object]:
+        """请求取消一次仍在执行的流式问答。"""
+
+        try:
+            agent_stream_service.cancel(run_id)
+            return agent_stream_service.run_state(run_id)
+        except AgentRunNotFoundError as error:
+            raise IngestFailure(
+                "agent_run_not_found",
+                "agent run is no longer available",
+                404,
+            ) from error
+
+    @app.post(
         "/api/agent/run",
         response_model=AgentRunResponse,
         dependencies=protected,
@@ -518,57 +663,7 @@ def create_app(
     async def run_agent(request: AgentRunRequest) -> AgentRunResponse:
         """执行一次非流式 Agent 单轮问答。"""
 
-        if resolved_data_root is None:
-            raise IngestFailure(
-                "data_root_unavailable",
-                "application data root is not configured",
-                503,
-            )
-        embedding_key = resolved_credentials.get(EMBEDDING_API_KEY_USERNAME)
-        if not embedding_key:
-            raise IngestFailure(
-                "embedding_api_key_missing",
-                "configure an embedding API key before asking questions",
-                409,
-            )
-        chat_key = resolved_credentials.get(CHAT_API_KEY_USERNAME)
-        if not chat_key:
-            raise IngestFailure(
-                "chat_api_key_missing",
-                "configure a chat API key before asking questions",
-                409,
-            )
-        runtime_settings = (
-            runtime_settings_service.get()
-            if runtime_settings_service is not None
-            else RuntimeSettingsResponse()
-        )
-        embedding_provider = (
-            embedding_provider_factory()
-            if embedding_provider_factory is not None
-            else DashScopeEmbeddingProvider(embedding_key)
-        )
-        chat_provider = (
-            chat_provider_factory(chat_key)
-            if chat_provider_factory is not None
-            else DeepSeekChatProvider(chat_key)
-        )
-        runtime = AgentRuntime(
-            resolved_data_root,
-            chat_provider=chat_provider,
-            embedding_provider=embedding_provider,
-            config=AgentRunConfig(
-                max_tool_calls=runtime_settings.max_tool_calls,
-                max_context_tokens=runtime_settings.max_context_tokens,
-                max_request_tokens=runtime_settings.max_request_tokens,
-                max_output_tokens=runtime_settings.max_output_tokens,
-            ),
-            retrieval_profile=replace(
-                DEFAULT_HYBRID_RETRIEVAL_PROFILE,
-                top_k=runtime_settings.top_k,
-            ),
-        )
-        result = await runtime.run(request.question)
+        result = await build_agent_runtime().run(request.question)
         return AgentRunResponse(
             status=result.status,
             answer=result.answer,
@@ -584,6 +679,7 @@ def create_app(
             model_calls=result.model_calls,
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
+            sources=result.sources,
             events=[
                 AgentRunEvent(event_type=event.event_type, payload=event.payload)
                 for event in result.events

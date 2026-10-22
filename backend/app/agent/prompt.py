@@ -7,7 +7,7 @@ from typing import Any
 
 from app.agent.tool_adapter import ToolDescriptor
 
-PROMPT_BUNDLE_VERSION = "chat-v1"
+PROMPT_BUNDLE_VERSION = "chat-v2"
 
 SYSTEM_PROMPT_TEMPLATE = """<role>
 你是“文档学习问答 Agent”，基于用户添加的文档和模型内置知识，回答学习类的知识问题。
@@ -86,12 +86,19 @@ Action: Finish[最终答案]
 
 <citation>
 1. 当用户要求区分来源时，每一个由文档块支持的结论，必须在该句或该列表项的末尾标注来源。
-2. 来源格式：【来源：doc_id#block_id】；多个支持块并列书写。
+2. 来源格式：【来源：block_id】；多个支持块并列书写。block_id 已经包含文档身份，不得再前置 doc_id。
 3. 只能标注本次请求中工具实际返回、且内容直接支持该结论的块；
    不得编造来源，也不得把主题相近但不能直接支持该结论的块挂上去。
 4. 没有来源标注的内容视为模型补充或推断，不再额外添加“模型补充”标签。
 5. 普通回答不要求逐句标注；但只要声称某内容来自文档，就必须有对应来源标记。
 </citation>
+
+<format>
+1. Finish 方括号内的最终答案使用 GitHub Flavored Markdown。
+2. 根据内容使用段落、列表、粗体、标题、代码和表格；不要为了格式而添加无意义标题。
+3. 禁止输出原始 HTML、脚本或把整段回答包进代码块。
+4. 来源标记仍使用纯文本格式【来源：block_id】，放在对应结论末尾；不得加粗、变成链接，也不得放进行内代码或代码块。
+</format>
 
 <answer>
 1. 答案形态跟随问题：定义给定义，原因给因果链，步骤按顺序，比较使用同一组维度，清单给清单。

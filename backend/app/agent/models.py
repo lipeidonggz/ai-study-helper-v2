@@ -30,7 +30,7 @@ class AgentRunEvent(BaseModel):
 class AgentRunResponse(BaseModel):
     """Agent 单轮运行的最终结果与审计事件。"""
 
-    status: Literal["succeeded", "partial", "failed"]
+    status: Literal["succeeded", "partial", "failed", "canceled"]
     answer: str | None
     answer_completeness: Literal["complete", "partial"]
     limitations: list[AgentLimitation]
@@ -44,4 +44,13 @@ class AgentRunResponse(BaseModel):
     model_calls: int = Field(ge=0)
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
+    sources: list[dict[str, Any]] = Field(default_factory=list)
     events: list[AgentRunEvent]
+
+
+class AgentRunStartResponse(BaseModel):
+    """异步流式 Agent 运行的启动句柄。"""
+
+    run_id: str
+    trace_id: str
+    status: Literal["running"] = "running"
