@@ -6,9 +6,9 @@
 
 ## 当前状态
 
-- 阶段：实现阶段，前十个垂直切片已实现，011 文档详情页正在验收。
-- 实现状态：桌面运行链、安装链、HTML 导入预览、SQLite 文档身份／版本登记以及 S5 候选双索引已实现。
-- 当前工作：010 入库工作台等待二次确认；011 文档详情页已实现，等待人工验收。
+- 阶段：实现阶段，015 后台交付和 016 确定性检索读取层已完成。
+- 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付和快照绑定检索读取能力已实现。
+- 当前工作：准备实现 017 `search_blocks` 混合检索。
 
 ## 设计基线
 
@@ -53,6 +53,7 @@
 - [0005 · 代码注释与可读性门禁](decisions/0005-code-quality-gates.md)
 - [0006 · 使用当前 HTML 入库快照作为检索基线](decisions/0006-use-current-html-corpus-for-retrieval-baseline.md)
 - [0007 · 人-AI 协同控制模型（试行中）](decisions/0007-human-ai-collaboration-control-model.md)
+- [0008 · Harness 统一计算 Tool Observation token](decisions/0008-harness-owned-result-token-accounting.md)
 - [切片控制契约与证据包模板](development/slices/TEMPLATE.md)
 - [001 · 桌面 sidecar 最小启动链（已完成）](development/slices/001-desktop-sidecar-bootstrap.md)
 - [002 · PyInstaller one-folder sidecar 与 release 冒烟（已完成）](development/slices/002-packaged-sidecar.md)
@@ -75,7 +76,8 @@
 - [013 · 入库工作台交互优化人工验收清单（已完成）](development/manual-tests/013-ingestion-workbench-ux.md)
 - [014 · 本地时间显示与 UTC 时间戳契约（已完成）](development/slices/014-local-time-timestamp-contract.md)
 - [014 · 本地时间显示人工验收清单（已完成）](development/manual-tests/014-local-time-timestamp-contract.md)
-- [015 · GitHub 后台交付与失败可见性（待确认）](development/slices/015-background-delivery.md)
+- [015 · GitHub 后台交付与失败可见性（已完成）](development/slices/015-background-delivery.md)
+- [016 · 检索确定性读取层（已完成）](development/slices/016-retrieval-read-layer.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库
