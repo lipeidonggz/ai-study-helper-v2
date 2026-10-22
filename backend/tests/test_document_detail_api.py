@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -9,6 +10,12 @@ from app.main import create_app
 from app.providers.embeddings import FakeEmbeddingProvider
 
 TOKEN = "document-detail-test-token"
+
+
+def _assert_utc_timestamp(value: str) -> None:
+    parsed = datetime.fromisoformat(value)
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset() == timedelta(0)
 
 
 def _html(title: str, body: str) -> bytes:
@@ -103,6 +110,9 @@ def test_document_detail_uses_active_snapshot_and_lists_versions(tmp_path: Path)
     assert first_detail["versions"][0]["is_active"] is True
     assert len(first_detail["activities"]) == 1
     assert first_detail["technical"]["extractor_version"] == "2"
+    _assert_utc_timestamp(first_detail["published_at"])
+    _assert_utc_timestamp(first_detail["versions"][0]["created_at"])
+    _assert_utc_timestamp(first_detail["activities"][0]["created_at"])
 
     assert second_detail["doc_version"] == 2
     assert [version["doc_version"] for version in second_detail["versions"]] == [2, 1]
@@ -110,6 +120,11 @@ def test_document_detail_uses_active_snapshot_and_lists_versions(tmp_path: Path)
     assert second_detail["versions"][1]["is_active"] is False
     assert len(second_detail["activities"]) == 2
     assert any("Second version" in block["text"] for block in second_detail["blocks"])
+    _assert_utc_timestamp(second_detail["versions"][1]["created_at"])
+    for activity in second_detail["activities"]:
+        _assert_utc_timestamp(activity["created_at"])
+        _assert_utc_timestamp(activity["started_at"])
+        _assert_utc_timestamp(activity["finished_at"])
 
 
 def test_document_detail_rejects_document_outside_active_snapshot(

@@ -4,6 +4,7 @@ import asyncio
 import json
 import sqlite3
 from collections.abc import Callable
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -13,6 +14,12 @@ from app.main import create_app
 from app.storage.document_registry import DocumentRegistry
 
 TOKEN = "persistence-test-token"
+
+
+def _assert_utc_timestamp(value: str) -> None:
+    parsed = datetime.fromisoformat(value)
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset() == timedelta(0)
 
 
 def _html(title: str, body: str) -> bytes:
@@ -109,6 +116,9 @@ def test_persist_registers_stable_document_and_content_versions(tmp_path: Path) 
     assert first_persist["is_new_version"] is True
     assert first_persist["document"]["doc_id"].startswith("doc_")
     assert first_persist["version"]["doc_version"] == 1
+    _assert_utc_timestamp(first_persist["document"]["created_at"])
+    _assert_utc_timestamp(first_persist["document"]["updated_at"])
+    _assert_utc_timestamp(first_persist["version"]["created_at"])
     assert first_persist["section_tree"]["doc_id"] == first_persist["document"]["doc_id"]
     assert first_persist["section_tree"]["doc_version"] == 1
     assert first_persist["section_tree"]["tree_hash"] == first_preview["section_tree"]["tree_hash"]
@@ -125,6 +135,9 @@ def test_persist_registers_stable_document_and_content_versions(tmp_path: Path) 
     assert duplicate["is_new_version"] is False
     assert duplicate["document"]["doc_id"] == first_persist["document"]["doc_id"]
     assert duplicate["version"]["doc_version"] == 1
+    _assert_utc_timestamp(duplicate["document"]["created_at"])
+    _assert_utc_timestamp(duplicate["document"]["updated_at"])
+    _assert_utc_timestamp(duplicate["version"]["created_at"])
 
     html_path.write_bytes(
         _html(

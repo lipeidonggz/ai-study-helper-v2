@@ -21,6 +21,7 @@ from app.storage.models import (
     DocumentVersionRow,
     IngestionJobRow,
     SourceArtifactRow,
+    utc_iso,
     utc_now,
 )
 
@@ -59,8 +60,8 @@ def _document_record(row: DocumentRow) -> DocumentRecord:
         source_label=row.source_label,
         aliases=_decode_strings(row.aliases_json),
         language=cast(DocumentLanguage, row.language),
-        created_at=row.created_at.isoformat(),
-        updated_at=row.updated_at.isoformat(),
+        created_at=utc_iso(row.created_at),
+        updated_at=utc_iso(row.updated_at),
     )
 
 
@@ -79,7 +80,7 @@ def _version_record(row: DocumentVersionRow) -> DocumentVersionRecord:
         language=cast(DocumentLanguage, row.language),
         extractor_name=row.extractor_name,
         extractor_version=row.extractor_version,
-        created_at=row.created_at.isoformat(),
+        created_at=utc_iso(row.created_at),
     )
 
 

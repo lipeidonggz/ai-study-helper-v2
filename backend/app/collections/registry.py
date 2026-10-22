@@ -19,6 +19,7 @@ from app.storage.collection_models import (
     CollectionPublishRecordRow,
 )
 from app.storage.database import StorageDatabase
+from app.storage.models import utc_iso
 
 
 class CollectionRegistry:
@@ -283,8 +284,8 @@ class CollectionRegistry:
                 expected_generation=row.expected_generation,
                 result=result,
                 reason=reason,
-                started_at=row.started_at.isoformat(),
-                finished_at=finished_at.isoformat(),
+                started_at=utc_iso(row.started_at),
+                finished_at=utc_iso(finished_at),
                 verification=json.loads(row.verification_json),
             )
 
@@ -323,5 +324,5 @@ class CollectionRegistry:
             manifest_hash=row.manifest_hash,
             generation=row.generation,
             previous_snapshot_id=row.previous_snapshot_id,
-            published_at=row.published_at.isoformat(),
+            published_at=utc_iso(row.published_at),
         )
