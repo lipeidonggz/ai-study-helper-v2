@@ -82,6 +82,8 @@
 - [018 · Agent Runtime 主循环（已完成）](development/slices/018-agent-runtime-core.md)
 - [019 · Agent 与检索统一设置页（已完成）](development/slices/019-agent-settings.md)
 - [019 · Agent 与检索统一设置页人工验收清单（已完成）](development/manual-tests/019-agent-settings.md)
+- [020 · 流式问答工作台（已完成）](development/slices/020-streaming-chat.md)
+- [020 · 流式问答工作台人工验收清单（已完成）](development/manual-tests/020-streaming-chat.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库

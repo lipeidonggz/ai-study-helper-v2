@@ -63,6 +63,8 @@ def test_release_prompt_bundle_has_stable_version_and_hash() -> None:
     first = release_prompt_bundle()
     second = release_prompt_bundle()
 
-    assert first.version == "chat-v1"
+    assert first.version == "chat-v2"
     assert first.template_hash == second.template_hash
     assert len(first.template_hash) == 64
+    assert "GitHub Flavored Markdown" in first.template
+    assert "禁止输出原始 HTML" in first.template

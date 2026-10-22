@@ -136,3 +136,29 @@ def test_runtime_settings_put_is_allowed_by_browser_cors_preflight(tmp_path: Pat
     assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:1420"
     assert "PUT" in response.headers["access-control-allow-methods"]
     assert "x-launch-token" in response.headers["access-control-allow-headers"].lower()
+
+
+def test_agent_event_stream_headers_are_allowed_by_browser_cors_preflight(
+    tmp_path: Path,
+) -> None:
+    app = create_app(TOKEN, data_root=tmp_path)
+
+    async def run() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.options(
+                "/api/agent/runs/example/events",
+                headers={
+                    "origin": "http://127.0.0.1:1420",
+                    "access-control-request-method": "GET",
+                    "access-control-request-headers": "last-event-id,x-launch-token",
+                },
+            )
+
+    response = asyncio.run(run())
+
+    assert response.status_code == 200
+    assert "last-event-id" in response.headers["access-control-allow-headers"].lower()

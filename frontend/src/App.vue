@@ -2,9 +2,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 
 import { API_TIMEOUT_MS, fetchWithTimeout } from "./api";
+import {
+  normalizeChatSourceKey,
+  renderChatMarkdown,
+} from "./chat-markdown";
 
 /** Python sidecar 的 UI 生命周期状态。 */
 type ManagerStatus =
@@ -16,7 +20,7 @@ type ManagerStatus =
 /** 当前版本支持的文档来源类型。 */
 type SourceKind = "file" | "url";
 /** 主导航中的稳定工作区标识。 */
-type AppSection = "knowledge" | "ingest" | "history" | "settings";
+type AppSection = "chat" | "knowledge" | "ingest" | "history" | "settings";
 /** 入库工作区的两个子页面。 */
 type IngestMode = "batch" | "single";
 
@@ -172,6 +176,68 @@ type RuntimeSettingsFieldErrors = Record<
   "top_k" | "max_output_tokens" | "max_context_tokens" | "max_request_tokens" | "max_tool_calls",
   string
 >;
+
+/** 本次问答运行对用户可见的生命周期状态。 */
+type AgentChatStatus =
+  | "idle"
+  | "starting"
+  | "running"
+  | "reconnecting"
+  | "succeeded"
+  | "partial"
+  | "failed"
+  | "canceled"
+  | "interrupted";
+
+/** 流式问答返回的一条结构化来源。 */
+interface AgentChatSource {
+  source_key: string;
+  doc_id: string;
+  block_id: string;
+  doc_title: string;
+  source_label: string;
+  section_path: string[];
+  excerpt: string;
+  tool: string;
+}
+
+/** SSE 事件 envelope 中前端会消费的载荷字段。 */
+interface AgentStreamPayload {
+  run_id?: string;
+  snapshot_id?: string;
+  label?: string;
+  stage?: string;
+  tool?: string;
+  delta?: string;
+  answer?: string | null;
+  answer_completeness?: "complete" | "partial";
+  termination_reason?: string;
+  input_tokens?: number;
+  output_tokens?: number;
+  input_source?: "provider" | "estimated";
+  output_source?: "provider" | "estimated";
+  sources?: AgentChatSource[];
+  source_count?: number;
+  message?: string;
+  reason?: string;
+  limitations?: Array<{ code: string; message: string }>;
+}
+
+/** 流式 SSE 事件及其稳定序号。 */
+interface AgentStreamEnvelope {
+  schema_version: string;
+  trace_id: string;
+  sequence: number;
+  event_type: string;
+  payload: AgentStreamPayload;
+}
+
+/** 流式问答启动接口返回的运行标识。 */
+interface AgentRunStartResponse {
+  run_id: string;
+  trace_id: string;
+  status: "running";
+}
 
 /** 后台任务的可查询生命周期状态。 */
 type BackgroundTaskStatus =
@@ -384,19 +450,47 @@ const documentDetail = ref<DocumentDetailResponse | null>(null);
 const documentDetailLoading = ref(false);
 const documentDetailError = ref("");
 const documentDetailTab = ref<"content" | "versions" | "technical">("content");
+const highlightedDocumentBlockId = ref("");
+const chatQuestion = ref("");
+const chatRunId = ref("");
+const chatTraceId = ref("");
+const chatSnapshotId = ref("");
+const chatStatus = ref<AgentChatStatus>("idle");
+const chatActivity = ref("等待提问");
+const chatAnswer = ref("");
+const chatSources = ref<AgentChatSource[]>([]);
+const chatInputTokens = ref(0);
+const chatOutputTokens = ref(0);
+const chatInputSource = ref<"provider" | "estimated">("estimated");
+const chatOutputSource = ref<"provider" | "estimated">("estimated");
+const chatError = ref("");
+const chatWarning = ref("");
+const chatStopping = ref(false);
+const chatLastEventId = ref(0);
+const chatSourcesExpanded = ref(false);
+const selectedChatSourceKey = ref("");
+const expandedChatSourceKey = ref("");
+const chatSourceNotice = ref("");
+const pendingChatEvents: AgentStreamEnvelope[] = [];
 
 let unlisten: UnlistenFn | undefined;
 let healthTimer: number | undefined;
 let taskTimer: number | undefined;
 let taskRefreshInFlight = false;
 let disposed = false;
+let chatStreamController: AbortController | undefined;
+let pendingDocumentBlockId = "";
+let chatEventPump: Promise<void> | null = null;
 
-/** 从 URL hash 解析当前工作区；未知值回退到知识库。 */
+/** 从 URL hash 解析当前工作区；未知值回退到问答工作台。 */
 function readSectionFromHash(): AppSection {
   const value = window.location.hash.replace(/^#/, "").split("/")[0];
-  return value === "ingest" || value === "history" || value === "settings"
+  return value === "knowledge" ||
+    value === "ingest" ||
+    value === "history" ||
+    value === "settings"
     ? value
-    : "knowledge";
+    : "chat";
 }
 
 /** 从知识库详情 URL 中读取活动文档 ID。 */
@@ -426,7 +520,7 @@ function syncSectionFromHash(): void {
   activeSection.value = readSectionFromHash();
   activeDocumentId.value = readDocumentIdFromHash();
   if (activeDocumentId.value) {
-    void loadDocumentDetail(activeDocumentId.value);
+    void loadAndFocusDocumentDetail(activeDocumentId.value);
   } else {
     documentDetail.value = null;
   }
@@ -518,6 +612,109 @@ const taskQueueSummary = computed(() => {
   }
   return `${activeTasks.value.length} 个任务待处理`;
 });
+
+/** 当前问答是否仍在接收事件。 */
+const chatIsActive = computed(() =>
+  ["starting", "running", "reconnecting"].includes(chatStatus.value),
+);
+
+/** 问答提交所需的服务、模型 Key 和知识库条件。 */
+const canAskQuestion = computed(
+  () =>
+    managerStatus.value === "running" &&
+    runtime.value !== null &&
+    modelSettings.value?.embedding_configured === true &&
+    modelSettings.value?.chat_configured === true &&
+    currentCollection.value !== null &&
+    !chatIsActive.value &&
+    chatQuestion.value.trim().length > 0,
+);
+
+/** 把问答运行状态映射到用户可读标签。 */
+const chatStatusLabel = computed(() => {
+  const labels: Record<AgentChatStatus, string> = {
+    idle: "等待提问",
+    starting: "正在启动",
+    running: "正在回答",
+    reconnecting: "正在恢复连接",
+    succeeded: "回答完成",
+    partial: "部分完成",
+    failed: "运行失败",
+    canceled: "已停止",
+    interrupted: "连接已中断",
+  };
+  return labels[chatStatus.value];
+});
+
+/** 按来源首次出现顺序生成稳定的引用编号。 */
+const chatSourceNumbers = computed(() => {
+  const numbers = new Map<string, number>();
+  chatSources.value.forEach((source, index) => {
+    numbers.set(normalizeChatSourceKey(source.source_key), index + 1);
+  });
+  return numbers;
+});
+
+/** 渲染安全 Markdown；来源数字随本次运行来源列表实时更新。 */
+const chatAnswerHtml = computed(() =>
+  renderChatMarkdown(chatAnswer.value, chatSourceNumbers.value),
+);
+
+/** 展开来源区、目标卡片，并滚动到本次运行实际返回的来源。 */
+async function focusChatSource(sourceKey: string): Promise<void> {
+  chatSourcesExpanded.value = true;
+  selectedChatSourceKey.value = sourceKey;
+  expandedChatSourceKey.value = sourceKey;
+  await nextTick();
+  document
+    .getElementById(`chat-source-${encodeURIComponent(sourceKey)}`)
+    ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+/** 展开或收起答案下方的来源汇总。 */
+function toggleChatSources(): void {
+  chatSourcesExpanded.value = !chatSourcesExpanded.value;
+}
+
+/** 单独展开一条来源的摘要；同一时间只展开一个正文摘要。 */
+function toggleChatSourceCard(sourceKey: string): void {
+  expandedChatSourceKey.value =
+    expandedChatSourceKey.value === sourceKey ? "" : sourceKey;
+}
+
+/** 代理安全 Markdown 中的来源链接点击，定位到本次运行来源卡片。 */
+function handleChatAnswerClick(event: MouseEvent): void {
+  const target = event.target;
+  if (!(target instanceof Element)) {
+    return;
+  }
+  const citation = target.closest<HTMLElement>("[data-chat-source-key]");
+  if (!citation) {
+    return;
+  }
+  event.preventDefault();
+  const normalizedKey = normalizeChatSourceKey(
+    decodeURIComponent(citation.dataset.chatSourceKey ?? ""),
+  );
+  const source = chatSources.value.find(
+    (candidate) =>
+      normalizeChatSourceKey(candidate.source_key) === normalizedKey,
+  );
+  if (!source) {
+    chatSourceNotice.value = "模型引用的来源未在本次检索结果中找到。";
+    chatSourcesExpanded.value = true;
+    return;
+  }
+  chatSourceNotice.value = "";
+  void focusChatSource(source.source_key);
+}
+
+/** 只有当前活动快照与本次运行一致时才允许打开文档详情。 */
+const canOpenChatSourceDocument = computed(
+  () =>
+    chatSnapshotId.value.length > 0 &&
+    currentCollection.value?.pointer.snapshot_id === chatSnapshotId.value,
+);
 
 /** 只有没有 queued／running 任务且确认短语完全匹配时才允许执行全量清空。 */
 const canConfirmReset = computed(
@@ -1250,11 +1447,13 @@ async function loadDocumentDetail(docId: string): Promise<void> {
   }
 }
 
-/** 打开知识库中的文档详情，并用 URL hash 保留当前位置。 */
-function openDocumentDetail(docId: string): void {
+/** 打开知识库中的文档详情，并可定位到本次回答引用的 block。 */
+function openDocumentDetail(docId: string, blockId = ""): void {
+  pendingDocumentBlockId = blockId;
+  highlightedDocumentBlockId.value = blockId;
   const location = `knowledge/${encodeURIComponent(docId)}`;
   if (window.location.hash === `#${location}`) {
-    void loadDocumentDetail(docId);
+    void loadAndFocusDocumentDetail(docId);
     return;
   }
   activeSection.value = "knowledge";
@@ -1264,8 +1463,30 @@ function openDocumentDetail(docId: string): void {
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
+/** 加载文档详情，并在渲染完成后滚动到待定位的 block。 */
+async function loadAndFocusDocumentDetail(docId: string): Promise<void> {
+  await loadDocumentDetail(docId);
+  if (!pendingDocumentBlockId || documentDetail.value?.doc_id !== docId) {
+    return;
+  }
+  const blockId = pendingDocumentBlockId;
+  pendingDocumentBlockId = "";
+  await nextTick();
+  const element = document.getElementById(
+    `document-block-${encodeURIComponent(blockId)}`,
+  );
+  if (!element) {
+    documentDetailError.value = "文档已打开，但没有找到本次回答引用的原文片段。";
+    return;
+  }
+  highlightedDocumentBlockId.value = blockId;
+  element.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
 /** 从详情页返回知识库文章清单。 */
 function closeDocumentDetail(): void {
+  pendingDocumentBlockId = "";
+  highlightedDocumentBlockId.value = "";
   selectSection("knowledge");
 }
 
@@ -1989,6 +2210,391 @@ async function saveDocument(): Promise<void> {
   }
 }
 
+/** 把流式问答 API 错误转换为普通用户可操作的提示。 */
+function agentChatErrorMessage(code: string, detail: string): string {
+  const labels: Record<string, string> = {
+    chat_api_key_missing: "请先在设置中配置对话 API Key。",
+    embedding_api_key_missing: "请先在设置中配置 embedding API Key。",
+    collection_unavailable: "当前没有可用的知识库快照，请先完成入库。",
+    agent_run_not_found: "这次回答的运行现场已过期，请重新提问。",
+    agent_event_gap: "事件恢复位置已失效，请重新提问。",
+    agent_event_cursor_invalid: "事件恢复位置无效，请重新提问。",
+    chat_authentication_failed: "对话模型鉴权失败，请检查 API Key。",
+    chat_rate_limited: "对话模型请求被限流，请稍后重试。",
+    chat_upstream_unavailable: "暂时无法连接对话模型，请检查网络后重试。",
+  };
+  return labels[code]
+    ? `${labels[code]}（错误码：${code}）`
+    : `${detail}（错误码：${code}）`;
+}
+
+/** 重置上一次问答的展示状态。 */
+function resetChatState(): void {
+  pendingChatEvents.length = 0;
+  chatRunId.value = "";
+  chatTraceId.value = "";
+  chatSnapshotId.value = "";
+  chatStatus.value = "idle";
+  chatActivity.value = "等待提问";
+  chatAnswer.value = "";
+  chatSources.value = [];
+  chatInputTokens.value = 0;
+  chatOutputTokens.value = 0;
+  chatInputSource.value = "estimated";
+  chatOutputSource.value = "estimated";
+  chatError.value = "";
+  chatWarning.value = "";
+  chatStopping.value = false;
+  chatLastEventId.value = 0;
+  chatSourcesExpanded.value = false;
+  selectedChatSourceKey.value = "";
+  expandedChatSourceKey.value = "";
+  chatSourceNotice.value = "";
+}
+
+/** 按来源键合并实时来源，避免重连回放产生重复卡片。 */
+function mergeChatSources(sources: AgentChatSource[]): void {
+  const merged = new Map(
+    chatSources.value.map((source) => [source.source_key, source]),
+  );
+  sources.forEach((source) => merged.set(source.source_key, source));
+  chatSources.value = [...merged.values()];
+}
+
+/** 等待浏览器完成一个可见动画帧，避免同批事件被合成一次渲染。 */
+function waitForAnimationFrame(): Promise<void> {
+  return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
+}
+
+/** 把网络接收与界面消费解耦，保证真实分块按可见节奏进入页面。 */
+function enqueueAgentStreamEvent(envelope: AgentStreamEnvelope): void {
+  chatLastEventId.value = Math.max(chatLastEventId.value, envelope.sequence);
+  pendingChatEvents.push(envelope);
+  chatEventPump ??= pumpAgentStreamEvents().finally(() => {
+    chatEventPump = null;
+  });
+}
+
+/** 每帧最多消费约 12 个答案字符，同时保持事件原始顺序。 */
+async function pumpAgentStreamEvents(): Promise<void> {
+  while (pendingChatEvents.length > 0) {
+    let answerCharacters = 0;
+    let processed = 0;
+    while (pendingChatEvents.length > 0 && processed < 40) {
+      const next = pendingChatEvents[0];
+      if (next.event_type === "answer_delta") {
+        const deltaLength = next.payload.delta?.length ?? 0;
+        if (answerCharacters > 0 && answerCharacters + deltaLength > 12) {
+          break;
+        }
+        answerCharacters += deltaLength;
+      }
+      pendingChatEvents.shift();
+      applyAgentStreamEvent(next);
+      processed += 1;
+      if (answerCharacters >= 12) {
+        break;
+      }
+    }
+    await waitForAnimationFrame();
+  }
+}
+
+/** 等待当前事件队列全部渲染完成，再做终态和断线判断。 */
+async function drainAgentStreamEvents(): Promise<void> {
+  while (chatEventPump !== null) {
+    await chatEventPump;
+  }
+}
+
+/** 消费一个 SSE 事件并更新固定状态区、正文、token 和来源。 */
+function applyAgentStreamEvent(envelope: AgentStreamEnvelope): void {
+  const payload = envelope.payload;
+  switch (envelope.event_type) {
+    case "run_started":
+      chatSnapshotId.value = payload.snapshot_id ?? "";
+      chatStatus.value = "running";
+      chatActivity.value = "正在分析问题";
+      break;
+    case "snapshot_bound":
+      chatSnapshotId.value = payload.snapshot_id ?? chatSnapshotId.value;
+      break;
+    case "activity_changed":
+      chatActivity.value = payload.label ?? chatActivity.value;
+      break;
+    case "tool_started":
+      chatActivity.value = payload.label ?? "正在检索知识库";
+      break;
+    case "tool_finished":
+      chatActivity.value =
+        payload.source_count && payload.source_count > 0
+          ? `检索完成，找到 ${payload.source_count} 个相关片段`
+          : "检索完成，正在判断证据";
+      break;
+    case "sources_available":
+      if (payload.sources) {
+        mergeChatSources(payload.sources);
+      }
+      break;
+    case "answer_delta":
+      if (payload.delta) {
+        chatAnswer.value += payload.delta;
+      }
+      break;
+    case "usage_update":
+      chatInputTokens.value = payload.input_tokens ?? chatInputTokens.value;
+      chatOutputTokens.value = payload.output_tokens ?? chatOutputTokens.value;
+      chatInputSource.value = payload.input_source ?? "estimated";
+      chatOutputSource.value = payload.output_source ?? "estimated";
+      break;
+    case "budget_warning":
+      chatWarning.value =
+        payload.reason === "max_tool_calls"
+          ? "已达到最大工具调用数，回答可能不完整。"
+          : "已达到运行预算，回答可能不完整。";
+      break;
+    case "answer_completed":
+      if (!chatAnswer.value && payload.answer) {
+        chatAnswer.value = payload.answer;
+      }
+      if (payload.sources) {
+        mergeChatSources(payload.sources);
+      }
+      chatInputTokens.value = payload.input_tokens ?? chatInputTokens.value;
+      chatOutputTokens.value = payload.output_tokens ?? chatOutputTokens.value;
+      chatInputSource.value = payload.input_source ?? chatInputSource.value;
+      chatOutputSource.value = payload.output_source ?? chatOutputSource.value;
+      if (payload.limitations?.length) {
+        chatWarning.value = payload.limitations
+          .map((limitation) => limitation.message)
+          .join("；");
+      }
+      chatStatus.value =
+        payload.answer_completeness === "partial" ? "partial" : "succeeded";
+      chatActivity.value =
+        chatStatus.value === "partial" ? "回答已生成，但内容不完整" : "回答完成";
+      chatStopping.value = false;
+      break;
+    case "run_failed":
+      chatStatus.value = "failed";
+      chatError.value =
+        payload.message ??
+        `运行失败：${payload.termination_reason ?? payload.reason ?? "未知原因"}`;
+      chatActivity.value = "运行失败";
+      chatStopping.value = false;
+      break;
+    case "run_canceled":
+      chatStatus.value = "canceled";
+      chatActivity.value = chatAnswer.value
+        ? "已停止，保留已生成内容"
+        : "已停止，尚未生成回答";
+      chatStopping.value = false;
+      break;
+  }
+}
+
+/** 解析一个 SSE 文本帧；格式错误时保留明确错误而不是静默忽略。 */
+function parseAgentSseFrame(frame: string): AgentStreamEnvelope | null {
+  const data = frame
+    .split("\n")
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trimStart())
+    .join("\n");
+  if (!data) {
+    return null;
+  }
+  try {
+    return JSON.parse(data) as AgentStreamEnvelope;
+  } catch {
+    throw new Error("收到无法解析的流式事件。");
+  }
+}
+
+/** 连接同一个 run 的 SSE，并在断线后按最后事件序号恢复。 */
+async function consumeAgentEventStream(
+  runId: string,
+  reconnectAttempt = 0,
+): Promise<void> {
+  if (!connection.value || disposed) {
+    return;
+  }
+  const controller = new AbortController();
+  chatStreamController = controller;
+  try {
+    const response = await fetchWithTimeout(
+      `${connection.value.baseUrl}/api/agent/runs/${runId}/events`,
+      {
+        headers: {
+          accept: "text/event-stream",
+          "x-launch-token": connection.value.token,
+          "last-event-id": String(chatLastEventId.value),
+        },
+        cache: "no-store",
+        signal: controller.signal,
+      },
+      API_TIMEOUT_MS.quick,
+    );
+    if (!response.ok) {
+      const failure = (await response.json()) as ApiErrorBody;
+      const code = failure.error?.code ?? "request_failed";
+      const detail = failure.error?.message ?? failure.detail ?? `HTTP ${response.status}`;
+      throw new Error(agentChatErrorMessage(code, detail));
+    }
+    if (!response.body) {
+      throw new Error("问答事件流没有可读取的响应正文。");
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary >= 0) {
+        const frame = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const envelope = parseAgentSseFrame(frame);
+        if (envelope) {
+          enqueueAgentStreamEvent(envelope);
+        }
+        boundary = buffer.indexOf("\n\n");
+      }
+    }
+    await drainAgentStreamEvents();
+    if (chatIsActive.value && !disposed && !chatStreamController?.signal.aborted) {
+      throw new Error("问答事件流在终态前结束。");
+    }
+  } catch (error) {
+    await drainAgentStreamEvents();
+    if (disposed || controller.signal.aborted) {
+      return;
+    }
+    if (chatIsActive.value && reconnectAttempt < 3) {
+      chatStatus.value = "reconnecting";
+      chatActivity.value = "连接中断，正在恢复本次回答";
+      await new Promise((resolve) =>
+        window.setTimeout(resolve, 500 * (reconnectAttempt + 1)),
+      );
+      await consumeAgentEventStream(runId, reconnectAttempt + 1);
+      return;
+    }
+    if (chatIsActive.value) {
+      chatStatus.value = "interrupted";
+      chatActivity.value = "连接已中断";
+    }
+    chatError.value =
+      error instanceof TypeError
+        ? "无法连接本地问答服务，请检查应用状态后重试。"
+        : String(error);
+    chatStopping.value = false;
+  } finally {
+    if (chatStreamController === controller) {
+      chatStreamController = undefined;
+    }
+  }
+}
+
+/** 启动一次流式问答并立即进入事件消费。 */
+async function askAgentQuestion(): Promise<void> {
+  if (!connection.value || !canAskQuestion.value) {
+    return;
+  }
+  resetChatState();
+  chatStatus.value = "starting";
+  chatActivity.value = "正在启动回答";
+  try {
+    const response = await fetchWithTimeout(
+      `${connection.value.baseUrl}/api/agent/runs`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-launch-token": connection.value.token,
+        },
+        body: JSON.stringify({ question: chatQuestion.value.trim() }),
+      },
+      API_TIMEOUT_MS.quick,
+    );
+    const body = (await response.json()) as AgentRunStartResponse | ApiErrorBody;
+    if (!response.ok) {
+      const failure = body as ApiErrorBody;
+      const code = failure.error?.code ?? "request_failed";
+      const detail = failure.error?.message ?? failure.detail ?? `HTTP ${response.status}`;
+      throw new Error(agentChatErrorMessage(code, detail));
+    }
+    const started = body as AgentRunStartResponse;
+    chatRunId.value = started.run_id;
+    chatTraceId.value = started.trace_id;
+    chatStatus.value = "running";
+    chatActivity.value = "正在准备检索";
+    await consumeAgentEventStream(started.run_id);
+  } catch (error) {
+    chatStatus.value = "failed";
+    chatActivity.value = "无法开始回答";
+    chatError.value =
+      error instanceof TypeError
+        ? "无法连接本地问答服务，请检查应用状态后重试。"
+        : String(error);
+    chatStopping.value = false;
+  }
+}
+
+/** 请求后端停止当前问答；事件流仍会等待明确的取消终态。 */
+async function stopAgentQuestion(): Promise<void> {
+  if (!connection.value || !chatRunId.value || !chatIsActive.value) {
+    return;
+  }
+  chatStopping.value = true;
+  chatActivity.value = "正在停止回答";
+  try {
+    const response = await fetchWithTimeout(
+      `${connection.value.baseUrl}/api/agent/runs/${chatRunId.value}/cancel`,
+      {
+        method: "POST",
+        headers: { "x-launch-token": connection.value.token },
+      },
+      API_TIMEOUT_MS.quick,
+    );
+    if (!response.ok) {
+      const failure = (await response.json()) as ApiErrorBody;
+      const code = failure.error?.code ?? "request_failed";
+      throw new Error(
+        agentChatErrorMessage(
+          code,
+          failure.error?.message ?? failure.detail ?? `HTTP ${response.status}`,
+        ),
+      );
+    }
+  } catch (error) {
+    chatStopping.value = false;
+    chatError.value = `停止请求失败：${String(error)}`;
+  }
+}
+
+/** 用户可在三次自动续传失败后，手动恢复同一个 run 的事件流。 */
+async function resumeAgentQuestionStream(): Promise<void> {
+  if (!chatRunId.value || chatStatus.value !== "interrupted") {
+    return;
+  }
+  chatError.value = "";
+  chatStatus.value = "reconnecting";
+  chatActivity.value = "正在恢复同一问答";
+  await consumeAgentEventStream(chatRunId.value);
+}
+
+/** 从来源卡片打开仍与本次回答快照一致的文档详情。 */
+function openChatSourceDocument(source: AgentChatSource): void {
+  chatSourceNotice.value = "";
+  if (!canOpenChatSourceDocument.value) {
+    chatSourceNotice.value = "本次回答使用的知识库快照已切换，无法打开原文档版本。";
+    return;
+  }
+  openDocumentDetail(source.doc_id, source.block_id);
+}
+
 onMounted(async () => {
   window.addEventListener("hashchange", syncSectionFromHash);
   unlisten = await listen<BackendStatus>("backend-status", (event) => {
@@ -2006,6 +2612,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   disposed = true;
+  chatStreamController?.abort();
   window.removeEventListener("hashchange", syncSectionFromHash);
   unlisten?.();
   if (healthTimer !== undefined) {
@@ -2036,11 +2643,23 @@ onBeforeUnmount(() => {
     <nav class="main-nav" aria-label="主导航">
       <button
         type="button"
+        :class="{ active: activeSection === 'chat' }"
+        :aria-current="activeSection === 'chat' ? 'page' : undefined"
+        @click="selectSection('chat')"
+      >
+        <span class="nav-index">01</span>
+        <span>
+          <strong>问答</strong>
+          <small>{{ chatIsActive ? chatStatusLabel : "向知识库提问" }}</small>
+        </span>
+      </button>
+      <button
+        type="button"
         :class="{ active: activeSection === 'knowledge' }"
         :aria-current="activeSection === 'knowledge' ? 'page' : undefined"
         @click="selectSection('knowledge')"
       >
-        <span class="nav-index">01</span>
+        <span class="nav-index">02</span>
         <span>
           <strong>知识库</strong>
           <small>{{ currentCollection?.manifest.totals.documents ?? 0 }} 篇文章</small>
@@ -2052,7 +2671,7 @@ onBeforeUnmount(() => {
         :aria-current="activeSection === 'ingest' ? 'page' : undefined"
         @click="selectSection('ingest')"
       >
-        <span class="nav-index">02</span>
+        <span class="nav-index">03</span>
         <span>
           <strong>入库</strong>
           <small>{{ taskQueueSummary }}</small>
@@ -2064,7 +2683,7 @@ onBeforeUnmount(() => {
         :aria-current="activeSection === 'history' ? 'page' : undefined"
         @click="selectSection('history')"
       >
-        <span class="nav-index">03</span>
+        <span class="nav-index">04</span>
         <span>
           <strong>操作记录</strong>
           <small>{{ taskHistory.length }} 条记录</small>
@@ -2076,7 +2695,7 @@ onBeforeUnmount(() => {
         :aria-current="activeSection === 'settings' ? 'page' : undefined"
         @click="selectSection('settings')"
       >
-        <span class="nav-index">04</span>
+        <span class="nav-index">05</span>
         <span>
           <strong>设置</strong>
           <small>
@@ -2089,6 +2708,194 @@ onBeforeUnmount(() => {
         </span>
       </button>
     </nav>
+
+    <section v-if="activeSection === 'chat'" class="chat-layout">
+      <section class="chat-query-card">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">ASK YOUR LIBRARY</p>
+            <h2>向知识库提问</h2>
+          </div>
+          <span class="settings-pill" :class="{ configured: chatRunId }">
+            {{ chatStatusLabel }}
+          </span>
+        </div>
+        <p class="settings-description">
+          回答优先依据当前知识库；文档支持的结论可追溯，模型内置知识或推断不会伪装成文档证据。
+        </p>
+        <div
+          v-if="!modelSettings?.chat_configured || !modelSettings?.embedding_configured"
+          class="chat-prerequisite"
+        >
+          请先在设置中完成 embedding 与对话模型配置。
+          <button type="button" class="inline-link" @click="selectSection('settings')">
+            去设置
+          </button>
+        </div>
+        <div v-else-if="!currentCollection" class="chat-prerequisite">
+          当前知识库为空，请先入库文档。
+          <button type="button" class="inline-link" @click="selectSection('ingest')">
+            去入库
+          </button>
+        </div>
+
+        <label class="chat-question-field">
+          <span>你的问题</span>
+          <textarea
+            v-model="chatQuestion"
+            rows="4"
+            placeholder="例如：OpenAI 和 Anthropic 对人在回路中的角色有什么不同？"
+            :disabled="chatIsActive"
+            @keydown.enter.exact.prevent="askAgentQuestion"
+          />
+        </label>
+        <div class="chat-query-actions">
+          <button
+            type="button"
+            class="primary-button"
+            :disabled="!canAskQuestion"
+            @click="askAgentQuestion"
+          >
+            {{ chatIsActive ? "正在回答…" : "开始提问" }}
+          </button>
+          <button
+            v-if="chatIsActive"
+            type="button"
+            class="secondary-button"
+            :disabled="chatStopping"
+            @click="stopAgentQuestion"
+          >
+            {{ chatStopping ? "正在停止…" : "停止回答" }}
+          </button>
+          <span class="chat-enter-hint">Enter 提交，Shift + Enter 换行</span>
+        </div>
+      </section>
+
+      <section
+        v-if="chatRunId || chatError || chatAnswer"
+        class="chat-response-card"
+        aria-live="polite"
+      >
+        <div class="chat-run-status">
+          <div class="chat-activity">
+            <span
+              class="chat-activity-dot"
+              :class="{ active: chatIsActive, failed: chatStatus === 'failed' }"
+            />
+            <div>
+              <strong>{{ chatActivity }}</strong>
+              <small v-if="chatTraceId">运行 {{ chatTraceId.slice(-8) }}</small>
+            </div>
+          </div>
+          <dl class="chat-token-meter">
+            <div>
+              <dt>输入 token</dt>
+              <dd>
+                {{ chatInputTokens.toLocaleString() }}
+                <small>{{ chatInputSource === "provider" ? "实际" : "估算" }}</small>
+              </dd>
+            </div>
+            <div>
+              <dt>输出 token</dt>
+              <dd>
+                {{ chatOutputTokens.toLocaleString() }}
+                <small>{{ chatOutputSource === "provider" ? "实际" : "估算" }}</small>
+              </dd>
+            </div>
+          </dl>
+        </div>
+
+        <p v-if="chatWarning" class="chat-warning">{{ chatWarning }}</p>
+        <p v-if="chatError" class="error-box">{{ chatError }}</p>
+        <button
+          v-if="chatStatus === 'interrupted'"
+          type="button"
+          class="secondary-button chat-resume-button"
+          @click="resumeAgentQuestionStream"
+        >
+          重新连接本次回答
+        </button>
+
+        <article v-if="chatAnswer" class="chat-answer">
+          <p class="eyebrow">ANSWER</p>
+          <div
+            class="chat-answer-text"
+            @click="handleChatAnswerClick"
+            v-html="chatAnswerHtml"
+          />
+        </article>
+        <div v-else-if="chatIsActive" class="chat-answer-placeholder">
+          正在检索和组织答案，正文会在证据足够后逐步显示。
+        </div>
+
+        <section
+          v-if="chatSources.length || chatSourceNotice"
+          class="chat-sources"
+        >
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">SOURCES</p>
+              <h3>本次回答引用的资料</h3>
+            </div>
+            <button
+              type="button"
+              class="chat-sources-toggle"
+              :aria-expanded="chatSourcesExpanded"
+              @click="toggleChatSources"
+            >
+              {{
+                chatSourcesExpanded
+                  ? "收起来源"
+                  : `查看 ${chatSources.length} 条来源`
+              }}
+            </button>
+          </div>
+          <template v-if="chatSourcesExpanded">
+            <article
+              v-for="(source, index) in chatSources"
+              :id="`chat-source-${encodeURIComponent(source.source_key)}`"
+              :key="source.source_key"
+              class="chat-source-card"
+              :class="{ selected: selectedChatSourceKey === source.source_key }"
+            >
+              <button
+                type="button"
+                class="chat-source-heading"
+                :aria-expanded="expandedChatSourceKey === source.source_key"
+                @click="toggleChatSourceCard(source.source_key)"
+              >
+                <span class="chat-source-index">{{ index + 1 }}</span>
+                <div>
+                  <strong>{{ source.doc_title }}</strong>
+                  <small>
+                    {{ source.source_label || "本地文档" }}
+                    <template v-if="source.section_path.length">
+                      · {{ source.section_path.join(" › ") }}
+                    </template>
+                  </small>
+                </div>
+                <span class="chat-source-chevron">
+                  {{ expandedChatSourceKey === source.source_key ? "收起" : "展开" }}
+                </span>
+              </button>
+              <template v-if="expandedChatSourceKey === source.source_key">
+                <p>{{ source.excerpt || "该来源暂无正文摘录。" }}</p>
+                <button
+                  type="button"
+                  class="inline-link"
+                  @click="openChatSourceDocument(source)"
+                >
+                  查看文档详情
+                </button>
+              </template>
+            </article>
+          </template>
+          <p v-if="chatSourceNotice" class="chat-source-notice">
+            {{ chatSourceNotice }}
+          </p>
+        </section>
+      </section>
+    </section>
 
     <section v-if="activeSection === 'settings'" class="settings-card">
       <div class="section-heading">
@@ -2877,8 +3684,13 @@ onBeforeUnmount(() => {
               </header>
               <pre
                 v-for="block in item.blocks"
+                :id="`document-block-${encodeURIComponent(block.block_id)}`"
                 :key="block.block_id"
                 class="document-block"
+                :class="{
+                  'citation-highlight':
+                    highlightedDocumentBlockId === block.block_id,
+                }"
               >{{ block.text }}</pre>
               <p v-if="!item.blocks.length" class="detail-empty">
                 该章节没有直属内容。

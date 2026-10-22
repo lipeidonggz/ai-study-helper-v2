@@ -7,10 +7,15 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app.agent.runtime import AgentRunConfig, AgentRuntime
+from app.agent.runtime import AgentRunConfig, AgentRuntime, RunCancellationToken
 from app.agent.tool_adapter import RetrievalToolAdapter, ToolUnavailableError
 from app.main import create_app
-from app.providers.chat import ChatMessage, ChatProviderError, FakeChatProvider
+from app.providers.chat import (
+    ChatMessage,
+    ChatProviderError,
+    ChatStreamChunk,
+    FakeChatProvider,
+)
 from app.providers.embeddings import FakeEmbeddingProvider
 from app.retrieval.service import RetrievalReadService
 
@@ -137,6 +142,88 @@ def test_agent_runtime_executes_tool_and_finishes(tmp_path: Path) -> None:
     assert model_events[1].payload["usage_source"] == "provider"
     assert "harness_status" in chat_provider.requests[1][1].content
     assert "result_tokens" not in chat_provider.requests[1][1].content
+
+
+def test_agent_runtime_emits_safe_answer_activity_usage_and_sources(
+    tmp_path: Path,
+) -> None:
+    embedding_provider = _prepare_snapshot(tmp_path)
+    chat_provider = FakeChatProvider(
+        [
+            'Thought: 需要查找 MCP。\nAction: search_blocks[{"query":"MCP"}]',
+            "Thought: 已取得证据。\nAction: Finish[MCP 位于沙箱边界章节。]",
+        ],
+        stream_chunk_size=4,
+    )
+    runtime = AgentRuntime(
+        tmp_path,
+        chat_provider=chat_provider,
+        embedding_provider=embedding_provider,
+    )
+    emitted = []
+
+    result = asyncio.run(runtime.run("MCP 在哪个章节？", emit=emitted.append))
+
+    event_types = [event.event_type for event in emitted]
+    assert "activity_changed" in event_types
+    assert "tool_started" in event_types
+    assert "tool_finished" in event_types
+    assert "sources_available" in event_types
+    assert "answer_delta" in event_types
+    assert "usage_update" in event_types
+    assert (
+        "".join(event.payload["delta"] for event in emitted if event.event_type == "answer_delta")
+        == result.answer
+    )
+    assert result.sources
+    assert result.sources[0]["source_key"] == result.sources[0]["block_id"]
+    assert result.sources[0]["source_key"].startswith(result.sources[0]["doc_id"])
+    assert all(
+        "Thought:" not in event.payload.get("delta", "")
+        and "Observation:" not in event.payload.get("delta", "")
+        for event in emitted
+        if event.event_type == "answer_delta"
+    )
+
+
+def test_agent_runtime_cancel_interrupts_model_stream_without_later_calls(
+    tmp_path: Path,
+) -> None:
+    embedding_provider = _prepare_snapshot(tmp_path)
+
+    class WaitingProvider(FakeChatProvider):
+        started = asyncio.Event()
+
+        async def stream(self, messages, *, max_output_tokens=None):
+            yield ChatStreamChunk(delta="Thought: 尚未完成。\nAction: Finish[已生成的部分答案")
+            self.started.set()
+            await asyncio.Event().wait()
+
+    provider = WaitingProvider(["unused"])
+    token = RunCancellationToken()
+    runtime = AgentRuntime(
+        tmp_path,
+        chat_provider=provider,
+        embedding_provider=embedding_provider,
+    )
+
+    async def run() -> tuple:
+        task = asyncio.create_task(runtime.run("取消测试", cancellation=token))
+        await provider.started.wait()
+        token.cancel()
+        return await asyncio.wait_for(task, timeout=3)
+
+    result = asyncio.run(run())
+
+    assert result.status == "canceled"
+    assert result.termination_reason == "canceled_by_user"
+    assert result.answer == "已生成的部分答案"
+    assert result.model_calls == 1
+    assert result.input_tokens > 0
+    assert result.output_tokens > 0
+    canceled_event = next(event for event in result.events if event.event_type == "run_canceled")
+    assert canceled_event.payload["input_tokens"] == result.input_tokens
+    assert canceled_event.payload["output_tokens"] == result.output_tokens
 
 
 def test_protocol_error_becomes_observation_and_recovers(tmp_path: Path) -> None:
@@ -468,7 +555,7 @@ def test_protected_agent_api_runs_with_injected_providers(tmp_path: Path) -> Non
     assert result["answer"] == "API 运行成功"
     assert result["answer_completeness"] == "complete"
     assert result["limitations"] == []
-    assert result["prompt_bundle_version"] == "chat-v1"
+    assert result["prompt_bundle_version"] == "chat-v2"
     assert result["observation_token_counter_version"] == "chat-budget-conservative-v1"
 
 
@@ -659,6 +746,132 @@ def test_agent_api_runtime_failure_returns_structured_http_200(tmp_path: Path) -
     assert body["answer_completeness"] == "partial"
     assert body["termination_reason"] == "chat_authentication_failed"
     assert body["events"][-1]["event_type"] == "run_failed"
+
+
+def test_streaming_agent_api_replays_events_without_duplicate_text(
+    tmp_path: Path,
+) -> None:
+    embedding_provider = _prepare_snapshot(tmp_path)
+    chat_provider = FakeChatProvider(
+        ["Thought: 完成。\nAction: Finish[流式回答]"],
+        stream_chunk_size=2,
+    )
+    app = create_app(
+        TOKEN,
+        data_root=tmp_path,
+        credential_store=_MemoryCredentials(),
+        embedding_provider_factory=lambda: embedding_provider,
+        chat_provider_factory=lambda _key: chat_provider,
+    )
+
+    async def run() -> tuple[str, str, int]:
+        transport = httpx.ASGITransport(app=app)
+        headers = {"x-launch-token": TOKEN}
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            started = await client.post(
+                "/api/agent/runs",
+                headers=headers,
+                json={"question": "流式输出测试"},
+            )
+            started.raise_for_status()
+            run_id = started.json()["run_id"]
+            async with client.stream(
+                "GET",
+                f"/api/agent/runs/{run_id}/events",
+                headers=headers,
+            ) as response:
+                response.raise_for_status()
+                event_text = (await response.aread()).decode()
+            last_event_id = [
+                int(line.removeprefix("id: "))
+                for line in event_text.splitlines()
+                if line.startswith("id: ")
+            ][-1]
+            resumed = await client.get(
+                f"/api/agent/runs/{run_id}/events",
+                headers={
+                    **headers,
+                    "Last-Event-ID": str(last_event_id),
+                },
+            )
+            resumed.raise_for_status()
+            gap = await client.get(
+                f"/api/agent/runs/{run_id}/events",
+                headers=headers,
+                params={"after": last_event_id + 1},
+            )
+            return event_text, resumed.text, gap.status_code
+
+    event_text, resumed_text, gap_status = asyncio.run(run())
+
+    assert "event: run_started" in event_text
+    assert "event: usage_update" in event_text
+    assert "event: answer_delta" in event_text
+    assert "event: answer_completed" in event_text
+    assert "流式回答" in event_text
+    assert resumed_text == ""
+    assert gap_status == 409
+
+
+def test_streaming_agent_api_cancel_preserves_canceled_terminal_state(
+    tmp_path: Path,
+) -> None:
+    embedding_provider = _prepare_snapshot(tmp_path)
+
+    class WaitingProvider(FakeChatProvider):
+        started = asyncio.Event()
+
+        async def stream(self, messages, *, max_output_tokens=None):
+            yield ChatStreamChunk(delta="Thought: 尚未完成。\n")
+            self.started.set()
+            await asyncio.Event().wait()
+
+    provider = WaitingProvider(["unused"])
+    app = create_app(
+        TOKEN,
+        data_root=tmp_path,
+        credential_store=_MemoryCredentials(),
+        embedding_provider_factory=lambda: embedding_provider,
+        chat_provider_factory=lambda _key: provider,
+    )
+
+    async def run() -> str:
+        transport = httpx.ASGITransport(app=app)
+        headers = {"x-launch-token": TOKEN}
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            started = await client.post(
+                "/api/agent/runs",
+                headers=headers,
+                json={"question": "取消流式输出"},
+            )
+            started.raise_for_status()
+            run_id = started.json()["run_id"]
+            await asyncio.wait_for(provider.started.wait(), timeout=3)
+            canceled = await client.post(
+                f"/api/agent/runs/{run_id}/cancel",
+                headers=headers,
+            )
+            canceled.raise_for_status()
+            async with client.stream(
+                "GET",
+                f"/api/agent/runs/{run_id}/events",
+                headers=headers,
+                params={"after": 0},
+            ) as response:
+                response.raise_for_status()
+                return (await response.aread()).decode()
+
+    event_text = asyncio.run(run())
+
+    assert "event: run_canceled" in event_text
+    assert "event: answer_completed" not in event_text
+    assert "event: answer_delta" not in event_text
 
 
 def test_agent_api_missing_key_is_rejected_before_run(tmp_path: Path) -> None:
