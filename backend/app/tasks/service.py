@@ -62,39 +62,50 @@ class BackgroundTaskService:
         self._collections = collection_service
         self._database = StorageDatabase(self._data_root)
         self._sleep = sleep
-        self._workers: dict[str, asyncio.Task[None]] = {}
+        self._dispatcher: asyncio.Task[None] | None = None
+        self._dispatch_event = asyncio.Event()
+        self._active_task_id: str | None = None
         self._started = False
 
     async def start(self) -> None:
         """启动服务；把崩溃前遗留的 running 任务标为 interrupted。"""
 
-        if self._started:
-            return
-        self._started = True
-        with self._database.session() as session, session.begin():
-            rows = session.scalars(
-                select(IngestionTaskRow).where(IngestionTaskRow.status == "running")
-            ).all()
-            for row in rows:
-                row.status = "interrupted"
-                row.error_code = "process_restarted"
-                row.error_message = "background task was interrupted by a process restart"
-                row.retryable = True
+        if not self._started:
+            self._started = True
+            with self._database.session() as session, session.begin():
+                rows = session.scalars(
+                    select(IngestionTaskRow).where(IngestionTaskRow.status == "running")
+                ).all()
+                for row in rows:
+                    row.status = "interrupted"
+                    row.error_code = "process_restarted"
+                    row.error_message = "background task was interrupted by a process restart"
+                    row.retryable = True
+        self._ensure_dispatcher()
 
     async def stop(self) -> None:
         """停止当前进程内的 worker，不删除持久任务记录。"""
 
-        workers = list(self._workers.values())
-        self._workers.clear()
-        for worker in workers:
-            worker.cancel()
-        if workers:
-            await asyncio.gather(*workers, return_exceptions=True)
+        dispatcher = self._dispatcher
+        self._dispatcher = None
+        self._dispatch_event.clear()
+        if dispatcher is not None:
+            dispatcher.cancel()
+            await asyncio.gather(dispatcher, return_exceptions=True)
+        self._active_task_id = None
 
     def has_live_workers(self) -> bool:
-        """返回当前进程是否仍有未结束的后台任务 worker。"""
+        """返回是否仍有正在执行或等待执行的任务，供破坏性清空阻止竞态。"""
 
-        return any(not worker.done() for worker in self._workers.values())
+        if self._active_task_id is not None:
+            return True
+        with self._database.session() as session:
+            pending = session.scalar(
+                select(IngestionTaskRow.task_id)
+                .where(IngestionTaskRow.status.in_(("queued", "running")))
+                .limit(1)
+            )
+        return pending is not None
 
     async def create(self, request: BackgroundIngestRequest) -> BackgroundTaskRecord:
         """持久化任务并立即启动后台 worker。"""
@@ -124,7 +135,7 @@ class BackgroundTaskService:
         with self._database.session() as session, session.begin():
             session.add(row)
         record = self._record(row)
-        self._spawn(task_id)
+        self._wake_dispatcher()
         return record
 
     async def create_from_preview(
@@ -170,7 +181,7 @@ class BackgroundTaskService:
         with self._database.session() as session, session.begin():
             session.add(row)
         record = self._record(row)
-        self._spawn(task_id)
+        self._wake_dispatcher()
         return record
 
     def get(self, task_id: str) -> BackgroundTaskRecord:
@@ -191,6 +202,21 @@ class BackgroundTaskService:
                 .order_by(
                     IngestionTaskRow.created_at.desc(),
                     IngestionTaskRow.task_id.desc(),
+                )
+                .limit(limit)
+            ).all()
+            return [self._record(row) for row in rows]
+
+    def list_active(self, *, limit: int = 100) -> list[BackgroundTaskRecord]:
+        """按创建顺序返回仍处于任务生命周期的记录，供持久队列界面展示。"""
+
+        with self._database.session() as session:
+            rows = session.scalars(
+                select(IngestionTaskRow)
+                .where(IngestionTaskRow.status.in_(("queued", "running", "paused", "interrupted")))
+                .order_by(
+                    IngestionTaskRow.created_at.asc(),
+                    IngestionTaskRow.task_id.asc(),
                 )
                 .limit(limit)
             ).all()
@@ -255,7 +281,7 @@ class BackgroundTaskService:
             row.error_message = None
             row.retryable = False
             result = self._record(row)
-        self._spawn(task_id)
+        self._wake_dispatcher()
         return result
 
     def _change_control_status(
@@ -282,11 +308,51 @@ class BackgroundTaskService:
                 row.error_message = "background task was canceled by the user"
             return self._record(row)
 
-    def _spawn(self, task_id: str) -> None:
-        worker = self._workers.get(task_id)
-        if worker is not None and not worker.done():
+    def _ensure_dispatcher(self) -> None:
+        """确保进程中只有一个负责领取 queued 任务的 dispatcher。"""
+
+        if self._dispatcher is not None and not self._dispatcher.done():
             return
-        self._workers[task_id] = asyncio.create_task(self._run(task_id))
+        self._dispatcher = asyncio.create_task(self._dispatch_loop())
+
+    def _wake_dispatcher(self) -> None:
+        """在创建或恢复任务后唤醒 dispatcher；任务执行顺序仍由数据库决定。"""
+
+        self._ensure_dispatcher()
+        self._dispatch_event.set()
+
+    def _next_queued_task_id(self) -> str | None:
+        """按创建顺序领取下一个可执行任务，暂停和取消的任务不会被选中。"""
+
+        with self._database.session() as session:
+            return session.scalar(
+                select(IngestionTaskRow.task_id)
+                .where(IngestionTaskRow.status == "queued")
+                .order_by(
+                    IngestionTaskRow.created_at.asc(),
+                    IngestionTaskRow.task_id.asc(),
+                )
+                .limit(1)
+            )
+
+    async def _dispatch_loop(self) -> None:
+        """单 dispatcher 串行执行所有 queued 任务。"""
+
+        try:
+            while True:
+                # 先清事件再查库，确保查询结束后新入队任务不会丢失唤醒。
+                self._dispatch_event.clear()
+                task_id = self._next_queued_task_id()
+                if task_id is None:
+                    await self._dispatch_event.wait()
+                    continue
+                self._active_task_id = task_id
+                try:
+                    await self._run(task_id)
+                finally:
+                    self._active_task_id = None
+        except asyncio.CancelledError:
+            raise
 
     async def _run(self, task_id: str) -> None:
         """执行一个任务；暂停、取消和进程停止都在阶段边界可观察。"""
@@ -335,8 +401,6 @@ class BackgroundTaskService:
             return
         except Exception as error:
             self._mark_failed(task_id, error)
-        finally:
-            self._workers.pop(task_id, None)
 
     async def _run_preview_job(self, task_id: str, job_id: str) -> None:
         """从固定预览 job 继续 S2-S6，避免重新抓取用户已经确认的内容。"""

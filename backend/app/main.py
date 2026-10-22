@@ -459,6 +459,24 @@ def create_app(
         return await task_service.create(request)
 
     @app.get(
+        "/api/tasks/active",
+        response_model=list[BackgroundTaskRecord],
+        dependencies=protected,
+    )
+    async def list_active_background_tasks(
+        limit: int = Query(default=100, ge=1, le=100),
+    ) -> list[BackgroundTaskRecord]:
+        """返回 queued、running、paused 和 interrupted 的持久任务队列。"""
+
+        if task_service is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return task_service.list_active(limit=limit)
+
+    @app.get(
         "/api/tasks",
         response_model=list[BackgroundTaskRecord],
         dependencies=protected,
