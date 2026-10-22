@@ -1,9 +1,16 @@
 from __future__ import annotations
 
-from app.settings.models import RuntimeSettingsPayload, RuntimeSettingsResponse
+from typing import cast
+
+from app.settings.models import (
+    DEFAULT_TRACE_MODE,
+    RuntimeSettingsPayload,
+    RuntimeSettingsResponse,
+)
 from app.storage.database import StorageDatabase
 from app.storage.models import utc_iso
 from app.storage.settings_models import RuntimeSettingsRow
+from app.tracing.models import TraceMode
 
 
 class RuntimeSettingsService:
@@ -34,6 +41,7 @@ class RuntimeSettingsService:
                     max_context_tokens=settings.max_context_tokens,
                     max_request_tokens=settings.max_request_tokens,
                     max_tool_calls=settings.max_tool_calls,
+                    trace_mode=settings.trace_mode,
                 )
                 session.add(row)
             else:
@@ -42,6 +50,7 @@ class RuntimeSettingsService:
                 row.max_context_tokens = settings.max_context_tokens
                 row.max_request_tokens = settings.max_request_tokens
                 row.max_tool_calls = settings.max_tool_calls
+                row.trace_mode = settings.trace_mode
             session.flush()
             return self._response(row)
 
@@ -53,5 +62,13 @@ class RuntimeSettingsService:
             max_context_tokens=row.max_context_tokens,
             max_request_tokens=row.max_request_tokens,
             max_tool_calls=row.max_tool_calls,
+            trace_mode=cast(
+                TraceMode,
+                (
+                    row.trace_mode
+                    if row.trace_mode in {"off", "metadata", "full"}
+                    else DEFAULT_TRACE_MODE
+                ),
+            ),
             updated_at=utc_iso(row.updated_at),
         )

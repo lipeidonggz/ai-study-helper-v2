@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
 from langgraph.graph import END, StateGraph
 
+from app import __version__
 from app.agent.actions import (
     ActionProtocolError,
     FinishAction,
@@ -24,6 +25,7 @@ from app.agent.token_counter import (
     ObservationTokenCounter,
 )
 from app.agent.tool_adapter import (
+    TOOL_CONTRACT_VERSION,
     RetrievalToolAdapter,
     ToolUnavailableError,
 )
@@ -37,6 +39,8 @@ from app.providers.chat import (
 from app.providers.embeddings import EmbeddingProvider
 from app.retrieval.hybrid import DEFAULT_HYBRID_RETRIEVAL_PROFILE, HybridRetrievalProfile
 from app.retrieval.service import RetrievalFailure, RetrievalReadService, RetrievalSnapshotReader
+from app.tracing.models import TraceMode
+from app.tracing.store import TraceSession, TraceSpanHandle, TraceStore, new_trace_id
 
 AGENT_LOOP_VERSION = "react-langgraph-v1"
 HISTORY_ASSISTANT_WRAPPER = "Assistant response:\n"
@@ -88,6 +92,7 @@ class AgentRunResult:
     """一次 Agent 请求的最终回答和审计信息。"""
 
     status: Literal["succeeded", "partial", "failed", "canceled"]
+    trace_id: str
     answer: str | None
     answer_completeness: Literal["complete", "partial"]
     limitations: tuple[AgentLimitation, ...]
@@ -126,6 +131,7 @@ class _AgentGraphState(TypedDict, total=False):
     next_context_estimate: int | None
     context_estimate_source: Literal["provider_anchor", "estimated"]
     sources: list[dict[str, Any]]
+    current_turn_span: TraceSpanHandle | None
 
 
 class RunCancellationToken:
@@ -179,6 +185,8 @@ class AgentRuntime:
         prompt_bundle: PromptBundle | None = None,
         token_counter: ObservationTokenCounter | None = None,
         retrieval_profile: HybridRetrievalProfile = DEFAULT_HYBRID_RETRIEVAL_PROFILE,
+        trace_store: TraceStore | None = None,
+        trace_mode: TraceMode = "off",
     ) -> None:
         self._data_root = data_root.resolve()
         self._chat_provider = chat_provider
@@ -187,6 +195,8 @@ class AgentRuntime:
         self._prompt_bundle = prompt_bundle or release_prompt_bundle()
         self._token_counter = token_counter or ConservativeObservationTokenCounter()
         self._retrieval_profile = retrieval_profile
+        self._trace_store = trace_store
+        self._trace_mode = trace_mode
 
     async def run(
         self,
@@ -194,61 +204,140 @@ class AgentRuntime:
         *,
         emit: EventSink | None = None,
         cancellation: RunCancellationToken | None = None,
+        trace_session: TraceSession | None = None,
+        trace_id: str | None = None,
     ) -> AgentRunResult:
         """在当前活动快照上执行一次单轮 Agent 请求，并可实时回调事件。"""
 
         normalized_question = question.strip()
         if not normalized_question:
             raise ValueError("question must not be empty")
+        if trace_session is None and trace_id is None:
+            trace_id, trace_session = self.begin_trace(normalized_question)
+        resolved_trace_id = (
+            trace_session.trace_id if trace_session is not None else trace_id or new_trace_id()
+        )
         cancellation = cancellation or RunCancellationToken()
-        if cancellation.is_cancelled:
-            return self._canceled_before_run(emit)
         try:
-            reader = RetrievalReadService(self._data_root).bind_current()
-        except RetrievalFailure as error:
-            return self._failed_before_run(error.code, emit)
-        adapter = RetrievalToolAdapter(
-            reader,
-            self._embedding_provider,
-            search_profile=self._retrieval_profile,
-        )
-        execution = _AgentGraphExecution(
-            question=normalized_question,
-            reader=reader,
-            adapter=adapter,
-            chat_provider=self._chat_provider,
-            config=self._config,
-            prompt_bundle=self._prompt_bundle,
-            token_counter=self._token_counter,
-            emit=emit,
-            cancellation=cancellation,
-        )
-        return await execution.run()
+            if cancellation.is_cancelled:
+                result = self._canceled_before_run(emit, resolved_trace_id)
+            else:
+                try:
+                    reader = RetrievalReadService(self._data_root).bind_current()
+                except RetrievalFailure as error:
+                    result = self._failed_before_run(
+                        error.code,
+                        emit,
+                        resolved_trace_id,
+                    )
+                else:
+                    if trace_session is not None:
+                        trace_session.set_snapshot(
+                            snapshot_id=reader.snapshot_id,
+                            snapshot_status=reader.manifest.status,
+                            completeness=reader.completeness,
+                        )
+                    adapter = RetrievalToolAdapter(
+                        reader,
+                        self._embedding_provider,
+                        search_profile=self._retrieval_profile,
+                    )
+                    execution = _AgentGraphExecution(
+                        question=normalized_question,
+                        reader=reader,
+                        adapter=adapter,
+                        chat_provider=self._chat_provider,
+                        config=self._config,
+                        prompt_bundle=self._prompt_bundle,
+                        token_counter=self._token_counter,
+                        emit=emit,
+                        cancellation=cancellation,
+                        trace_session=trace_session,
+                        trace_id=resolved_trace_id,
+                    )
+                    result = await execution.run()
+        except Exception:
+            self._finish_trace_failure(trace_session)
+            raise
+        self._finish_trace(trace_session, result)
+        return result
 
-    def _failed_before_run(self, reason: str, emit: EventSink | None) -> AgentRunResult:
+    def begin_trace(self, question: str) -> tuple[str, TraceSession | None]:
+        """在模型和工具启动前创建运行级 trace 上下文。"""
+
+        if self._trace_store is None or self._trace_mode == "off":
+            return new_trace_id(), None
+        profile = self._chat_provider.profile
+        try:
+            session = self._trace_store.new_session(
+                mode=cast(TraceMode, self._trace_mode),
+                question=question,
+                app_version=__version__,
+                versions={
+                    "app_version": __version__,
+                    "prompt_bundle_version": self._prompt_bundle.version,
+                    "prompt_template_hash": self._prompt_bundle.template_hash,
+                    "agent_loop_version": AGENT_LOOP_VERSION,
+                    "tool_contract_version": TOOL_CONTRACT_VERSION,
+                    "observation_token_counter_version": self._token_counter.version,
+                    "chat_provider": profile.provider,
+                    "chat_model_id": profile.model_id,
+                    "chat_temperature": profile.temperature,
+                    "thinking_enabled": profile.thinking_enabled,
+                    "retrieval_profile": asdict(self._retrieval_profile),
+                },
+                budget={
+                    "max_tool_calls": self._config.max_tool_calls,
+                    "max_context_tokens": self._config.max_context_tokens,
+                    "max_request_tokens": self._config.max_request_tokens,
+                    "finalization_reserve_tokens": self._config.finalization_reserve_tokens,
+                    "max_output_tokens": self._config.max_output_tokens,
+                },
+            )
+        except Exception:
+            return new_trace_id(), None
+        return session.trace_id, session
+
+    def _failed_before_run(
+        self,
+        reason: str,
+        emit: EventSink | None,
+        trace_id: str,
+    ) -> AgentRunResult:
         event = AgentEvent(event_type="run_failed", payload={"reason": reason})
         if emit is not None:
             emit(event)
-        return self._terminal_before_run(reason, event)
+        return self._terminal_before_run(reason, event, trace_id=trace_id)
 
-    def _canceled_before_run(self, emit: EventSink | None) -> AgentRunResult:
+    def _canceled_before_run(
+        self,
+        emit: EventSink | None,
+        trace_id: str,
+    ) -> AgentRunResult:
         event = AgentEvent(
             event_type="run_canceled",
             payload={"reason": "canceled_by_user"},
         )
         if emit is not None:
             emit(event)
-        return self._terminal_before_run("canceled_by_user", event, status="canceled")
+        return self._terminal_before_run(
+            "canceled_by_user",
+            event,
+            trace_id=trace_id,
+            status="canceled",
+        )
 
     def _terminal_before_run(
         self,
         reason: str,
         event: AgentEvent,
         *,
+        trace_id: str,
         status: Literal["failed", "canceled"] = "failed",
     ) -> AgentRunResult:
         return AgentRunResult(
             status=status,
+            trace_id=trace_id,
             answer=None,
             answer_completeness="partial",
             limitations=(
@@ -271,6 +360,57 @@ class AgentRuntime:
             events=(event,),
         )
 
+    def _finish_trace(
+        self,
+        trace_session: TraceSession | None,
+        result: AgentRunResult,
+    ) -> None:
+        if trace_session is None:
+            return
+        try:
+            trace_session.finish(
+                status=result.status,
+                termination_reason=result.termination_reason,
+                answer_completeness=result.answer_completeness,
+                agent_turns=result.agent_turns,
+                tool_calls=result.tool_calls,
+                model_calls=result.model_calls,
+                retry_count=max(0, result.model_calls - result.agent_turns),
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                answer=result.answer,
+                limitations=[limitation.model_dump() for limitation in result.limitations],
+            )
+        except Exception:
+            if self._trace_store is not None:
+                self._trace_store.mark_failure(
+                    trace_session.trace_id,
+                    "trace finalization failed",
+                )
+
+    def _finish_trace_failure(self, trace_session: TraceSession | None) -> None:
+        if trace_session is None or self._trace_store is None:
+            return
+        try:
+            trace_session.finish(
+                status="failed",
+                termination_reason="harness_internal_error",
+                answer_completeness="partial",
+                agent_turns=0,
+                tool_calls=0,
+                model_calls=0,
+                retry_count=0,
+                input_tokens=0,
+                output_tokens=0,
+                answer=None,
+                limitations=[],
+            )
+        except Exception:
+            self._trace_store.mark_failure(
+                trace_session.trace_id,
+                "agent run raised an unexpected exception",
+            )
+
 
 class _AgentGraphExecution:
     """一次运行私有的 LangGraph 节点集合。"""
@@ -287,6 +427,8 @@ class _AgentGraphExecution:
         token_counter: ObservationTokenCounter,
         emit: EventSink | None,
         cancellation: RunCancellationToken,
+        trace_session: TraceSession | None,
+        trace_id: str,
     ) -> None:
         self._question = question
         self._reader = reader
@@ -297,6 +439,8 @@ class _AgentGraphExecution:
         self._token_counter = token_counter
         self._emit = emit
         self._cancellation = cancellation
+        self._trace_session = trace_session
+        self._trace_id = trace_id
         self._graph = self._build_graph()
 
     async def run(self) -> AgentRunResult:
@@ -333,6 +477,7 @@ class _AgentGraphExecution:
             "next_context_estimate": None,
             "context_estimate_source": "estimated",
             "sources": [],
+            "current_turn_span": None,
         }
         final = await self._graph.ainvoke(
             initial,
@@ -346,6 +491,7 @@ class _AgentGraphExecution:
         termination_reason = final.get("termination_reason") or "harness_internal_error"
         return AgentRunResult(
             status=status,
+            trace_id=self._trace_id,
             answer=final.get("final_answer"),
             answer_completeness=answer_completeness,
             limitations=limitations,
@@ -404,11 +550,78 @@ class _AgentGraphExecution:
             extra=terminal_extra,
         )
 
+    def _trace_turn_span(self, state: _AgentGraphState) -> TraceSpanHandle | None:
+        """返回当前 ReAct 轮次 span；没有时创建并关联到本次运行根 span。"""
+
+        existing = state.get("current_turn_span")
+        if existing is not None or self._trace_session is None:
+            return existing
+        return self._trace_session.start_span(
+            "agent.turn",
+            "INTERNAL",
+            attributes={
+                "app.turn_index": state.get("agent_turns", 0) + 1,
+            },
+        )
+
+    def _end_trace_turn(
+        self,
+        handle: TraceSpanHandle | None,
+        *,
+        status: str,
+        error_code: str | None = None,
+        attributes: dict[str, Any] | None = None,
+    ) -> None:
+        """结束一个轮次 span；trace 关闭时是空操作。"""
+
+        if handle is None or self._trace_session is None:
+            return
+        self._trace_session.end_span(
+            handle,
+            status=status,
+            error_code=error_code,
+            attributes=attributes,
+        )
+
+    def _trace_budget_check(
+        self,
+        turn_span: TraceSpanHandle | None,
+        *,
+        phase: str,
+        limit_kind: str,
+        limit_tokens: int | None,
+        observed_tokens: int | None,
+        decision: str,
+    ) -> None:
+        """记录预算准入或拒绝，不参与实际预算判断。"""
+
+        if turn_span is None or self._trace_session is None:
+            return
+        remaining = (
+            max(0, limit_tokens - observed_tokens)
+            if limit_tokens is not None and observed_tokens is not None
+            else None
+        )
+        self._trace_session.add_span_event(
+            turn_span,
+            "budget.check",
+            {
+                "app.phase": phase,
+                "app.limit_kind": limit_kind,
+                "app.limit_tokens": limit_tokens,
+                "app.observed_tokens": observed_tokens,
+                "app.remaining_tokens": remaining,
+                "app.decision": decision,
+            },
+        )
+
     async def _model_node(self, state: _AgentGraphState) -> _AgentGraphState:
         events = list(state.get("events", []))
         history = list(state.get("history", []))
         limitations = list(state.get("limitations", []))
         tool_calls = state.get("tool_calls", 0)
+        trace_turn = self._trace_turn_span(state)
+        state["current_turn_span"] = trace_turn
         finalization_mode = state.get("finalization_mode", False)
         tools_enabled = tool_calls < self._config.max_tool_calls
 
@@ -430,6 +643,14 @@ class _AgentGraphExecution:
                     event_type="budget_warning",
                     payload={"reason": "max_tool_calls", "limit": self._config.max_tool_calls},
                 ),
+            )
+            self._trace_budget_check(
+                trace_turn,
+                phase="pre_turn",
+                limit_kind="max_tool_calls",
+                limit_tokens=self._config.max_tool_calls,
+                observed_tokens=tool_calls,
+                decision="terminate",
             )
 
         used_tokens = state.get("input_tokens", 0) + state.get("output_tokens", 0)
@@ -456,6 +677,14 @@ class _AgentGraphExecution:
                     event_type="budget_warning",
                     payload={"reason": "request_budget", "used_tokens": used_tokens},
                 ),
+            )
+            self._trace_budget_check(
+                trace_turn,
+                phase="pre_turn",
+                limit_kind="request",
+                limit_tokens=self._config.max_request_tokens,
+                observed_tokens=used_tokens,
+                decision="terminate",
             )
         if used_tokens >= self._config.max_request_tokens:
             return self._terminal_state(
@@ -491,6 +720,14 @@ class _AgentGraphExecution:
             )
             context_estimate_source = "estimated"
         if context_estimate > self._config.max_context_tokens:
+            self._trace_budget_check(
+                trace_turn,
+                phase="pre_turn",
+                limit_kind="context",
+                limit_tokens=self._config.max_context_tokens,
+                observed_tokens=context_estimate,
+                decision="reject",
+            )
             if not finalization_mode:
                 finalization_mode = True
                 tools_enabled = False
@@ -528,6 +765,14 @@ class _AgentGraphExecution:
                         )
                     },
                 )
+        self._trace_budget_check(
+            trace_turn,
+            phase="pre_turn",
+            limit_kind="context",
+            limit_tokens=self._config.max_context_tokens,
+            observed_tokens=context_estimate,
+            decision="admit",
+        )
 
         if self._cancellation.is_cancelled:
             return self._canceled_state(state, events=events)
@@ -545,6 +790,33 @@ class _AgentGraphExecution:
             ChatMessage(role="system", content=system_prompt),
             ChatMessage(role="user", content=user_prompt),
         )
+        llm_span = (
+            self._trace_session.start_span(
+                "llm.call",
+                "LLM",
+                parent_span_id=(trace_turn.span_id if trace_turn is not None else None),
+                attributes={
+                    "llm.provider": self._chat_provider.profile.provider,
+                    "llm.request.model": self._chat_provider.profile.model_id,
+                    "llm.invocation_parameters.temperature": (
+                        self._chat_provider.profile.temperature
+                    ),
+                    "llm.invocation_parameters.max_tokens": (self._config.max_output_tokens),
+                    "app.turn_index": state.get("agent_turns", 0) + 1,
+                },
+            )
+            if self._trace_session is not None
+            else None
+        )
+        if llm_span is not None and self._trace_session is not None:
+            prompt_artifact = self._trace_session.record_artifact(
+                kind="llm.prompt",
+                mime_type="application/json",
+                content=[
+                    {"role": message.role, "content": message.content} for message in messages
+                ],
+            )
+            llm_span.attributes["llm.prompt"] = prompt_artifact.model_dump(mode="json")
         outcome = await self._complete_with_retry(
             messages,
             state,
@@ -555,6 +827,38 @@ class _AgentGraphExecution:
         error = outcome.error
         attempts = outcome.attempts
         model_calls = state.get("model_calls", 0) + attempts
+        if llm_span is not None and self._trace_session is not None:
+            output_artifact = self._trace_session.record_artifact(
+                kind="llm.output",
+                mime_type="text/plain; charset=utf-8",
+                content=outcome.raw_content,
+            )
+            llm_span.attributes.update(
+                {
+                    "llm.output": output_artifact.model_dump(mode="json"),
+                    "app.attempts": attempts,
+                    "llm.finish_reason": (
+                        outcome.result.finish_reason if outcome.result is not None else None
+                    ),
+                    "llm.token_count.prompt": (
+                        outcome.result.input_tokens if outcome.result is not None else 0
+                    ),
+                    "llm.token_count.completion": (
+                        outcome.result.output_tokens
+                        if outcome.result is not None
+                        else self._token_counter.count(outcome.raw_content)
+                    ),
+                    "llm.request.id": (
+                        outcome.result.request_id if outcome.result is not None else None
+                    ),
+                }
+            )
+            if attempts > 1:
+                self._trace_session.add_span_event(
+                    llm_span,
+                    "retry",
+                    {"app.attempts": attempts},
+                )
         if outcome.cancelled:
             provider_input = outcome.result.input_tokens if outcome.result is not None else 0
             provider_output = outcome.result.output_tokens if outcome.result is not None else 0
@@ -565,6 +869,17 @@ class _AgentGraphExecution:
                 else self._token_counter.count(outcome.raw_content)
             )
             failed_attempt_input_tokens = max(0, attempts - 1) * context_estimate
+            if llm_span is not None and self._trace_session is not None:
+                self._trace_session.end_span(
+                    llm_span,
+                    status="error",
+                    error_code="canceled_by_user",
+                    attributes={
+                        "app.cancelled": True,
+                        "llm.token_count.prompt": current_input,
+                        "llm.token_count.completion": current_output,
+                    },
+                )
             return self._canceled_state(
                 state,
                 events=events,
@@ -581,6 +896,17 @@ class _AgentGraphExecution:
             reason = error.code if error is not None else "chat_failed"
             failed_input_tokens = attempts * context_estimate
             failed_output_tokens = self._token_counter.count(outcome.raw_content)
+            if llm_span is not None and self._trace_session is not None:
+                self._trace_session.end_span(
+                    llm_span,
+                    status="error",
+                    error_code=reason,
+                    attributes={
+                        "llm.token_count.prompt": failed_input_tokens,
+                        "llm.token_count.completion": failed_output_tokens,
+                        "app.usage_source": "estimated",
+                    },
+                )
             self._record_event(
                 events,
                 AgentEvent(
@@ -628,6 +954,16 @@ class _AgentGraphExecution:
         next_context_estimate_source = (
             "provider_anchor" if provider_usage_available else "estimated"
         )
+        if llm_span is not None and self._trace_session is not None:
+            self._trace_session.end_span(
+                llm_span,
+                status="ok",
+                attributes={
+                    "llm.token_count.prompt": current_input_tokens,
+                    "llm.token_count.completion": current_output_tokens,
+                    "app.usage_source": usage_source,
+                },
+            )
         self._record_event(
             events,
             AgentEvent(
@@ -670,6 +1006,12 @@ class _AgentGraphExecution:
                     },
                 ),
             )
+            self._end_trace_turn(
+                trace_turn,
+                status="error",
+                error_code="protocol_error",
+                attributes={"app.protocol_error": str(protocol_error)},
+            )
             return {
                 "history": history,
                 "events": events,
@@ -684,6 +1026,7 @@ class _AgentGraphExecution:
                 "next_context_estimate": next_context_estimate + observation_tokens,
                 "context_estimate_source": next_context_estimate_source,
                 "limitations": limitations,
+                "current_turn_span": None,
             }
 
         if isinstance(action, FinishAction):
@@ -717,6 +1060,14 @@ class _AgentGraphExecution:
                     },
                 ),
             )
+            self._end_trace_turn(
+                trace_turn,
+                status="ok",
+                attributes={
+                    "app.termination_reason": "finish",
+                    "app.answer_completeness": ("partial" if limitations else "complete"),
+                },
+            )
             return {
                 "history": history,
                 "events": events,
@@ -735,6 +1086,7 @@ class _AgentGraphExecution:
                 "next_context_estimate": next_context_estimate,
                 "context_estimate_source": next_context_estimate_source,
                 "limitations": limitations,
+                "current_turn_span": None,
             }
 
         if not tools_enabled:
@@ -758,6 +1110,12 @@ class _AgentGraphExecution:
                     },
                 ),
             )
+            self._end_trace_turn(
+                trace_turn,
+                status="error",
+                error_code="tool_unavailable",
+                attributes={"app.reason": "finalization"},
+            )
             return {
                 "history": history,
                 "events": events,
@@ -772,6 +1130,7 @@ class _AgentGraphExecution:
                 "next_context_estimate": next_context_estimate + observation_tokens,
                 "context_estimate_source": next_context_estimate_source,
                 "limitations": limitations,
+                "current_turn_span": None,
             }
         return {
             "history": history,
@@ -787,6 +1146,7 @@ class _AgentGraphExecution:
             "next_context_estimate": next_context_estimate,
             "context_estimate_source": next_context_estimate_source,
             "limitations": limitations,
+            "current_turn_span": trace_turn,
         }
 
     async def _tool_node(self, state: _AgentGraphState) -> _AgentGraphState:
@@ -799,6 +1159,28 @@ class _AgentGraphExecution:
         if self._cancellation.is_cancelled:
             return self._canceled_state(state, events=events)
         activity_label = TOOL_ACTIVITY_LABELS.get(action.tool_name, "正在检索知识库")
+        trace_turn = state.get("current_turn_span")
+        tool_span = (
+            self._trace_session.start_span(
+                "tool.call",
+                "TOOL",
+                parent_span_id=(trace_turn.span_id if trace_turn is not None else None),
+                attributes={
+                    "tool.name": action.tool_name,
+                },
+            )
+            if self._trace_session is not None
+            else None
+        )
+        if tool_span is not None and self._trace_session is not None:
+            arguments_artifact = self._trace_session.record_artifact(
+                kind="tool.arguments",
+                mime_type="application/json",
+                content=action.arguments,
+            )
+            tool_span.attributes["app.arguments_artifact"] = arguments_artifact.model_dump(
+                mode="json"
+            )
         self._record_event(
             events,
             AgentEvent(
@@ -820,6 +1202,12 @@ class _AgentGraphExecution:
         try:
             execution = await self._adapter.execute(action.tool_name, action.arguments)
         except ToolUnavailableError:
+            if tool_span is not None and self._trace_session is not None:
+                self._trace_session.end_span(
+                    tool_span,
+                    status="error",
+                    error_code="tool_unavailable",
+                )
             observation = _observation(
                 harness_status="tool_unavailable",
                 tool=action.tool_name,
@@ -839,6 +1227,12 @@ class _AgentGraphExecution:
                     },
                 ),
             )
+            self._end_trace_turn(
+                trace_turn,
+                status="error",
+                error_code="tool_unavailable",
+                attributes={"app.tool": action.tool_name},
+            )
             return {
                 "history": history,
                 "events": events,
@@ -847,12 +1241,38 @@ class _AgentGraphExecution:
                     (state.get("next_context_estimate") or 0) + observation_tokens
                 ),
                 "limitations": limitations,
+                "current_turn_span": None,
             }
 
         if self._cancellation.is_cancelled:
+            if tool_span is not None and self._trace_session is not None:
+                self._trace_session.end_span(
+                    tool_span,
+                    status="error",
+                    error_code="canceled_by_user",
+                )
             return self._canceled_state(state, events=events)
         source_refs = _source_refs(action.tool_name, execution.payload)
         merged_sources = _merge_sources(state.get("sources", []), source_refs)
+        if tool_span is not None and self._trace_session is not None:
+            payload_artifact = self._trace_session.record_artifact(
+                kind="tool.payload",
+                mime_type="application/json",
+                content=execution.payload,
+            )
+            tool_span.attributes.update(
+                {
+                    "app.payload_artifact": payload_artifact.model_dump(mode="json"),
+                    "app.source_count": len(source_refs),
+                }
+            )
+            if self._trace_session.mode == "full":
+                tool_span.attributes.update(
+                    {
+                        "app.tool_arguments": action.arguments,
+                        "app.diagnostics": execution.diagnostics,
+                    }
+                )
         self._record_event(
             events,
             AgentEvent(
@@ -880,6 +1300,22 @@ class _AgentGraphExecution:
         observation_text = f"Observation:\n{_canonical_json(observation)}"
         result_tokens = self._token_counter.count(observation_text)
         prospective = (state.get("next_context_estimate") or 0) + result_tokens
+        if tool_span is not None and self._trace_session is not None:
+            tool_span.attributes.update(
+                {
+                    "app.result_tokens": result_tokens,
+                    "app.admitted": (prospective <= self._config.max_context_tokens),
+                }
+            )
+            self._trace_session.end_span(tool_span, status="ok")
+        self._trace_budget_check(
+            trace_turn,
+            phase="post_tool",
+            limit_kind="context",
+            limit_tokens=self._config.max_context_tokens,
+            observed_tokens=prospective,
+            decision=("admit" if prospective <= self._config.max_context_tokens else "reject"),
+        )
         self._record_event(
             events,
             AgentEvent(
@@ -914,6 +1350,12 @@ class _AgentGraphExecution:
             budget_text = f"Observation:\n{_canonical_json(budget_observation)}"
             budget_tokens = self._token_counter.count(budget_text)
             history.append(budget_text)
+            self._end_trace_turn(
+                trace_turn,
+                status="error",
+                error_code="context_budget_exceeded",
+                attributes={"app.tool": action.tool_name},
+            )
             return {
                 "history": history,
                 "events": events,
@@ -926,8 +1368,14 @@ class _AgentGraphExecution:
                 ),
                 "limitations": limitations,
                 "sources": merged_sources,
+                "current_turn_span": None,
             }
         history.append(observation_text)
+        self._end_trace_turn(
+            trace_turn,
+            status="ok",
+            attributes={"app.tool": action.tool_name},
+        )
         return {
             "history": history,
             "events": events,
@@ -936,6 +1384,7 @@ class _AgentGraphExecution:
             "next_context_estimate": prospective,
             "limitations": limitations,
             "sources": merged_sources,
+            "current_turn_span": None,
         }
 
     def _route_after_model(self, state: _AgentGraphState) -> str:
@@ -1146,6 +1595,12 @@ class _AgentGraphExecution:
         reason: str,
         extra: dict[str, Any] | None = None,
     ) -> _AgentGraphState:
+        self._end_trace_turn(
+            state.get("current_turn_span"),
+            status="ok" if status == "succeeded" else "error",
+            error_code=None if status == "succeeded" else reason,
+            attributes={"app.termination_reason": reason},
+        )
         merged = cast(_AgentGraphState, {**state, **(extra or {})})
         event_type = {
             "failed": "run_failed",
@@ -1173,6 +1628,7 @@ class _AgentGraphExecution:
                 "status": status,
                 "answer_completeness": "complete" if status == "succeeded" else "partial",
                 "termination_reason": reason,
+                "current_turn_span": None,
             },
         )
 

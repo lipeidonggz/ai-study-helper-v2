@@ -632,6 +632,19 @@ input {
   margin-top: 12px;
 }
 
+.chat-trace-link {
+  width: fit-content;
+  border: 0;
+  padding: 0;
+  color: #47725a;
+  background: transparent;
+  cursor: pointer;
+  font-family: Consolas, monospace;
+  font-size: 0.68rem;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 .chat-answer {
   margin-top: 22px;
 }
@@ -851,6 +864,320 @@ input {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
+}
+
+.diagnostics-mode-field select {
+  width: 100%;
+  border: 1px solid #bdc9bd;
+  border-radius: 11px;
+  padding: 11px 13px;
+  color: #21382a;
+  background: #fbfcfa;
+}
+
+.diagnostics-page {
+  margin-top: 34px;
+  border: 1px solid rgba(37, 71, 50, 0.12);
+  border-radius: 18px;
+  padding: 24px 28px;
+  background: rgba(252, 254, 251, 0.9);
+  box-shadow: 0 18px 48px rgba(45, 69, 52, 0.06);
+}
+
+.diagnostics-page-heading {
+  align-items: flex-start;
+}
+
+.diagnostics-page-heading .settings-description {
+  margin-bottom: 0;
+}
+
+.diagnostics-heading-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.diagnostics-heading-actions .secondary-button {
+  margin-top: 0;
+}
+
+.diagnostics-workspace {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.34fr) minmax(0, 0.66fr);
+  gap: 16px;
+  margin-top: 20px;
+  align-items: start;
+}
+
+.trace-list-panel,
+.trace-detail-panel,
+.trace-detail-placeholder {
+  border: 1px solid rgba(37, 71, 50, 0.11);
+  border-radius: 14px;
+  padding: 16px;
+  background: #f7faf6;
+}
+
+.trace-list-panel {
+  display: grid;
+  gap: 8px;
+  max-height: 72vh;
+  overflow: auto;
+}
+
+.trace-list-item {
+  display: grid;
+  width: 100%;
+  gap: 6px;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  padding: 11px 12px;
+  color: #34493a;
+  background: #fff;
+  cursor: pointer;
+  text-align: left;
+}
+
+.trace-list-item:hover,
+.trace-list-item.active {
+  border-color: #84a58d;
+  background: #edf5ec;
+}
+
+.trace-list-topline {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.trace-list-topline strong {
+  overflow: hidden;
+  font-size: 0.8rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-list-item small {
+  color: #76847a;
+  font-size: 0.69rem;
+  line-height: 1.5;
+}
+
+.trace-list-health,
+.trace-health-badge {
+  width: fit-content;
+  border-radius: 999px;
+  padding: 3px 7px;
+  font-size: 0.66rem;
+}
+
+.trace-health-complete {
+  color: #24623c;
+  background: #ddf0e1;
+}
+
+.trace-health-partial {
+  color: #7c5b12;
+  background: #fff0c9;
+}
+
+.trace-health-dropped {
+  color: #8c302d;
+  background: #ffe5e3;
+}
+
+.trace-detail-panel {
+  min-width: 0;
+}
+
+.trace-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.trace-detail-header h3 {
+  margin: 5px 0 0;
+  color: #24402d;
+  font-size: 1.05rem;
+}
+
+.trace-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 16px 0;
+}
+
+.trace-summary-grid > div {
+  min-width: 0;
+  border-radius: 9px;
+  padding: 8px 9px;
+  background: #eef3ec;
+}
+
+.trace-summary-grid dt {
+  color: #78857b;
+  font-size: 0.65rem;
+}
+
+.trace-summary-grid dd {
+  margin: 3px 0 0;
+  overflow: hidden;
+  color: #2b4834;
+  font-family: Consolas, monospace;
+  font-size: 0.74rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-metadata-block {
+  border: 1px solid rgba(37, 71, 50, 0.1);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #f1f5ef;
+}
+
+.trace-metadata-block summary {
+  color: #3d5c47;
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.trace-metadata-block pre,
+.trace-span-detail pre,
+.trace-artifact-preview pre {
+  max-height: 360px;
+  overflow: auto;
+  border-radius: 9px;
+  padding: 10px;
+  color: #2c4033;
+  background: #fff;
+  font-size: 0.7rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.trace-timeline,
+.trace-artifacts {
+  margin-top: 20px;
+  border-top: 1px solid rgba(37, 71, 50, 0.1);
+  padding-top: 14px;
+}
+
+.trace-span-card {
+  margin-top: 7px;
+  border: 1px solid rgba(37, 71, 50, 0.11);
+  border-left: 3px solid #7ca189;
+  border-radius: 10px;
+  padding: 9px 11px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.trace-span-card.selected {
+  border-color: #4c8963;
+  background: #f0f7ef;
+}
+
+.trace-span-card.trace-span-error {
+  border-left-color: #b4453e;
+}
+
+.trace-span-topline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.trace-span-topline strong {
+  color: #294532;
+  font-size: 0.78rem;
+}
+
+.trace-span-topline > span:last-child {
+  margin-left: auto;
+  color: #6e7d73;
+  font-size: 0.68rem;
+}
+
+.trace-span-kind {
+  border-radius: 5px;
+  padding: 2px 5px;
+  color: #4d6655;
+  background: #e6eee4;
+  font-family: Consolas, monospace;
+  font-size: 0.61rem;
+}
+
+.trace-span-card > small {
+  display: block;
+  margin-top: 5px;
+  color: #7c8980;
+  font-size: 0.67rem;
+}
+
+.trace-span-detail {
+  margin-top: 8px;
+}
+
+.trace-span-events {
+  margin-top: 8px;
+}
+
+.trace-span-events > strong {
+  color: #52675a;
+  font-size: 0.72rem;
+}
+
+.trace-artifact-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 7px;
+  border: 1px solid rgba(37, 71, 50, 0.1);
+  border-radius: 9px;
+  padding: 9px 11px;
+  color: #294532;
+  background: #fff;
+  cursor: pointer;
+  text-align: left;
+}
+
+.trace-artifact-row > span:first-child {
+  display: grid;
+  gap: 2px;
+}
+
+.trace-artifact-row strong {
+  font-size: 0.76rem;
+}
+
+.trace-artifact-row small,
+.trace-artifact-state {
+  color: #78857b;
+  font-size: 0.67rem;
+}
+
+.trace-artifact-preview {
+  margin-top: 12px;
+}
+
+.trace-artifacts-omitted {
+  margin: 8px 0;
+  border-radius: 9px;
+  padding: 9px 11px;
+  color: #75601f;
+  background: #fff4d8;
+  font-size: 0.74rem;
+  line-height: 1.55;
 }
 
 .settings-grid-primary {
@@ -2223,6 +2550,14 @@ input {
 
   .task-workspace {
     grid-template-columns: 1fr;
+  }
+
+  .diagnostics-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .trace-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .queue-task-select {

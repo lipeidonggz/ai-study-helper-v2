@@ -8,7 +8,7 @@
 
 - 阶段：实现阶段，015 后台交付和 016 确定性检索读取层已完成。
 - 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付和快照绑定检索读取能力已实现。
-- 当前工作：018 Agent Runtime 核心已完成，下一步进入聊天 UI、SSE 与 trace。
+- 当前工作：020 流式问答与运行诊断事件已完成，下一步进入 021 Trace 持久化与本地诊断。
 
 ## 设计基线
 
@@ -84,6 +84,8 @@
 - [019 · Agent 与检索统一设置页人工验收清单（已完成）](development/manual-tests/019-agent-settings.md)
 - [020 · 流式问答工作台（已完成）](development/slices/020-streaming-chat.md)
 - [020 · 流式问答工作台人工验收清单（已完成）](development/manual-tests/020-streaming-chat.md)
+- [021 · Trace 持久化与本地诊断（已完成）](development/slices/021-trace-persistence.md)
+- [021 · Trace 本地诊断人工验收清单（已完成）](development/manual-tests/021-trace-local-diagnostics.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库

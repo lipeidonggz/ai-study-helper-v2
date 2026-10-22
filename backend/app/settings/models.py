@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
+
+from app.tracing.models import TraceMode
 
 DEEPSEEK_CONTEXT_WINDOW_TOKENS = 1_000_000
 DEEPSEEK_MAX_OUTPUT_TOKENS = 384_000
@@ -11,6 +14,14 @@ DEFAULT_MAX_OUTPUT_TOKENS = 8_192
 DEFAULT_MAX_CONTEXT_TOKENS = 100_000
 DEFAULT_MAX_REQUEST_TOKENS = 400_000
 DEFAULT_MAX_TOOL_CALLS = 8
+
+
+def _default_trace_mode() -> TraceMode:
+    value = os.environ.get("ASH_TRACE_MODE", "off")
+    return value if value in {"off", "metadata", "full"} else "off"  # type: ignore[return-value]
+
+
+DEFAULT_TRACE_MODE = _default_trace_mode()
 
 
 class SetEmbeddingKeyRequest(BaseModel):
@@ -76,6 +87,7 @@ class RuntimeSettingsPayload(BaseModel):
     )
     max_request_tokens: int = Field(default=DEFAULT_MAX_REQUEST_TOKENS, ge=10_000)
     max_tool_calls: int = Field(default=DEFAULT_MAX_TOOL_CALLS, ge=1, le=20)
+    trace_mode: TraceMode = DEFAULT_TRACE_MODE
 
     @model_validator(mode="after")
     def validate_limits(self) -> RuntimeSettingsPayload:

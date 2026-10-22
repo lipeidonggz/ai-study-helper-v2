@@ -20,7 +20,13 @@ type ManagerStatus =
 /** 当前版本支持的文档来源类型。 */
 type SourceKind = "file" | "url";
 /** 主导航中的稳定工作区标识。 */
-type AppSection = "chat" | "knowledge" | "ingest" | "history" | "settings";
+type AppSection =
+  | "chat"
+  | "knowledge"
+  | "ingest"
+  | "history"
+  | "settings"
+  | "diagnostics";
 /** 入库工作区的两个子页面。 */
 type IngestMode = "batch" | "single";
 
@@ -168,7 +174,100 @@ interface RuntimeSettingsResponse {
   max_context_tokens: number;
   max_request_tokens: number;
   max_tool_calls: number;
+  trace_mode: TraceMode;
   updated_at: string | null;
+}
+
+/** 运行时 trace 的记录级别。 */
+type TraceMode = "off" | "metadata" | "full";
+
+/** trace 内按内容寻址的 artifact 引用。 */
+interface TraceArtifact {
+  artifact_id: string;
+  kind: string;
+  mime_type: string;
+  size_bytes: number;
+  content_hash: string;
+  state: "stored" | "omitted" | "missing";
+  relative_path: string | null;
+}
+
+/** 挂在 trace span 上的确定性事件。 */
+interface TraceSpanEvent {
+  name: string;
+  time: string;
+  attributes: Record<string, unknown>;
+}
+
+/** 本地 OTel 风格 trace span。 */
+interface TraceSpan {
+  trace_id: string;
+  span_id: string;
+  parent_span_id: string | null;
+  name: string;
+  kind: "INTERNAL" | "LLM" | "TOOL";
+  start_time_unix_nano: number;
+  end_time_unix_nano: number;
+  started_at: string;
+  ended_at: string;
+  status: "ok" | "error";
+  error_code: string | null;
+  attributes: Record<string, unknown>;
+  events: TraceSpanEvent[];
+}
+
+/** 一次问答 trace 的最终摘要。 */
+interface TraceManifest {
+  schema_version: string;
+  trace_id: string;
+  mode: TraceMode;
+  app_version: string;
+  started_at: string;
+  ended_at: string;
+  duration_ms: number;
+  status: string;
+  termination_reason: string;
+  answer_completeness: "complete" | "partial";
+  question_preview: string | null;
+  question_artifact: TraceArtifact | null;
+  snapshot_id: string | null;
+  snapshot_status: string | null;
+  completeness: string | null;
+  agent_turns: number;
+  tool_calls: number;
+  model_calls: number;
+  retry_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  budget: Record<string, unknown>;
+  versions: Record<string, unknown>;
+  artifacts: TraceArtifact[];
+  trace_status: "complete" | "partial" | "dropped";
+  dropped_events: number;
+  replay_scope: "metadata" | "evidence" | "retrieval";
+  limitations: Array<{ code: string; message: string }>;
+}
+
+/** 诊断列表中的一次 trace 摘要。 */
+interface TraceListItem {
+  trace_id: string;
+  mode: TraceMode;
+  started_at: string;
+  ended_at: string;
+  status: string;
+  termination_reason: string;
+  question_preview: string | null;
+  duration_ms: number;
+  input_tokens: number;
+  output_tokens: number;
+  trace_status: "complete" | "partial" | "dropped";
+  replay_scope: "metadata" | "evidence" | "retrieval";
+}
+
+/** trace 详情接口返回的 manifest 与 span。 */
+interface TraceDetail {
+  manifest: TraceManifest;
+  spans: TraceSpan[];
 }
 
 /** 运行设置表单中各字段的即时校验错误。 */
@@ -409,6 +508,7 @@ const runtimeSettingsForm = ref<RuntimeSettingsResponse>({
   max_context_tokens: 100000,
   max_request_tokens: 400000,
   max_tool_calls: 8,
+  trace_mode: "metadata",
   updated_at: null,
 });
 const runtimeSettingsFieldErrors = computed(() =>
@@ -427,6 +527,17 @@ const chatSettingsError = ref("");
 const chatSettingsMessage = ref("");
 const runtimeSettingsError = ref("");
 const runtimeSettingsMessage = ref("");
+const diagnosticsTraces = ref<TraceListItem[]>([]);
+const diagnosticsLoading = ref(false);
+const diagnosticsError = ref("");
+const selectedTrace = ref<TraceDetail | null>(null);
+const selectedTraceId = ref("");
+const selectedTraceSpanId = ref("");
+const traceArtifactPreview = ref("");
+const traceArtifactTitle = ref("");
+const diagnosticsTraceModeBusy = ref(false);
+const diagnosticsTraceModeMessage = ref("");
+const diagnosticsTraceModeError = ref("");
 const taskUrl = ref("");
 const taskSources = ref<BackgroundSource[]>([]);
 const backgroundTask = ref<BackgroundTaskRecord | null>(null);
@@ -454,6 +565,7 @@ const highlightedDocumentBlockId = ref("");
 const chatQuestion = ref("");
 const chatRunId = ref("");
 const chatTraceId = ref("");
+const chatTraceAvailable = ref(false);
 const chatSnapshotId = ref("");
 const chatStatus = ref<AgentChatStatus>("idle");
 const chatActivity = ref("等待提问");
@@ -488,7 +600,8 @@ function readSectionFromHash(): AppSection {
   return value === "knowledge" ||
     value === "ingest" ||
     value === "history" ||
-    value === "settings"
+    value === "settings" ||
+    value === "diagnostics"
     ? value
     : "chat";
 }
@@ -497,6 +610,19 @@ function readSectionFromHash(): AppSection {
 function readDocumentIdFromHash(): string | null {
   const parts = window.location.hash.replace(/^#/, "").split("/");
   if (parts[0] !== "knowledge" || !parts[1]) {
+    return null;
+  }
+  try {
+    return decodeURIComponent(parts[1]);
+  } catch {
+    return null;
+  }
+}
+
+/** 从诊断页 URL 中读取选中的 trace ID。 */
+function readTraceIdFromHash(): string | null {
+  const parts = window.location.hash.replace(/^#/, "").split("/");
+  if (parts[0] !== "diagnostics" || !parts[1]) {
     return null;
   }
   try {
@@ -523,6 +649,9 @@ function syncSectionFromHash(): void {
     void loadAndFocusDocumentDetail(activeDocumentId.value);
   } else {
     documentDetail.value = null;
+  }
+  if (activeSection.value === "diagnostics") {
+    void loadTraceDiagnostics(readTraceIdFromHash());
   }
 }
 
@@ -1331,6 +1460,7 @@ async function saveRuntimeSettings(): Promise<void> {
       max_context_tokens: runtimeSettingsForm.value.max_context_tokens,
       max_request_tokens: runtimeSettingsForm.value.max_request_tokens,
       max_tool_calls: runtimeSettingsForm.value.max_tool_calls,
+      trace_mode: runtimeSettingsForm.value.trace_mode,
     };
     const response = await fetchWithTimeout(
       `${connection.value.baseUrl}/api/settings/runtime`,
@@ -1368,11 +1498,259 @@ function restoreRuntimeDefaults(): void {
     max_context_tokens: 100000,
     max_request_tokens: 400000,
     max_tool_calls: 8,
+    trace_mode: runtimeSettings.value?.trace_mode ?? "metadata",
     updated_at: null,
   };
   runtimeSettingsError.value = "";
   runtimeSettingsMessage.value = "已恢复推荐值，点击“保存运行设置”后生效。";
 }
+
+/** 保存全局 trace 记录模式，只影响之后创建的问答运行。 */
+async function saveDiagnosticsTraceMode(): Promise<void> {
+  if (!connection.value || diagnosticsTraceModeBusy.value) {
+    return;
+  }
+  diagnosticsTraceModeBusy.value = true;
+  diagnosticsTraceModeError.value = "";
+  diagnosticsTraceModeMessage.value = "";
+  try {
+    const response = await fetchWithTimeout(
+      `${connection.value.baseUrl}/api/settings/runtime`,
+      {
+        method: "PUT",
+        headers: {
+          "content-type": "application/json",
+          "x-launch-token": connection.value.token,
+        },
+        body: JSON.stringify({
+          top_k: runtimeSettingsForm.value.top_k,
+          max_output_tokens: runtimeSettingsForm.value.max_output_tokens,
+          max_context_tokens: runtimeSettingsForm.value.max_context_tokens,
+          max_request_tokens: runtimeSettingsForm.value.max_request_tokens,
+          max_tool_calls: runtimeSettingsForm.value.max_tool_calls,
+          trace_mode: runtimeSettingsForm.value.trace_mode,
+        }),
+      },
+      API_TIMEOUT_MS.quick,
+    );
+    const body = (await response.json()) as RuntimeSettingsResponse | ApiErrorBody;
+    if (!response.ok) {
+      const failure = body as ApiErrorBody;
+      throw new Error(
+        failure.error?.message ?? failure.detail ?? `HTTP ${response.status}`,
+      );
+    }
+    applyRuntimeSettings(body as RuntimeSettingsResponse);
+    diagnosticsTraceModeMessage.value = "记录模式已保存，将从下一次问答开始生效。";
+  } catch (error) {
+    diagnosticsTraceModeError.value = String(error);
+  } finally {
+    diagnosticsTraceModeBusy.value = false;
+  }
+}
+
+/** 读取最近 trace 摘要。 */
+async function loadTraceList(): Promise<void> {
+  if (!connection.value) {
+    return;
+  }
+  diagnosticsLoading.value = true;
+  diagnosticsError.value = "";
+  try {
+    const response = await fetchWithTimeout(
+      `${connection.value.baseUrl}/api/traces?limit=100`,
+      {
+        headers: { "x-launch-token": connection.value.token },
+        cache: "no-store",
+      },
+      API_TIMEOUT_MS.quick,
+    );
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    diagnosticsTraces.value = (await response.json()) as TraceListItem[];
+  } catch (error) {
+    diagnosticsError.value = `读取运行诊断失败：${String(error)}`;
+  } finally {
+    diagnosticsLoading.value = false;
+  }
+}
+
+/** 读取一次 trace 的 manifest 与 span 树。 */
+async function loadTraceDetail(traceId: string): Promise<void> {
+  if (!connection.value) {
+    return;
+  }
+  selectedTraceId.value = traceId;
+  selectedTraceSpanId.value = "";
+  traceArtifactPreview.value = "";
+  traceArtifactTitle.value = "";
+  diagnosticsError.value = "";
+  try {
+    let body: TraceDetail | ApiErrorBody | null = null;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const response = await fetchWithTimeout(
+        `${connection.value.baseUrl}/api/traces/${encodeURIComponent(traceId)}`,
+        {
+          headers: { "x-launch-token": connection.value.token },
+          cache: "no-store",
+        },
+        API_TIMEOUT_MS.quick,
+      );
+      body = (await response.json()) as TraceDetail | ApiErrorBody;
+      if (response.ok) {
+        break;
+      }
+      if (response.status !== 404 || attempt === 4) {
+        const failure = body as ApiErrorBody;
+        const code = failure.error?.code ?? "request_failed";
+        throw new Error(
+          code === "trace_not_found"
+            ? "本次运行没有可读取的 trace，可能未写入、已关闭或已被清理；问答结果不受影响。"
+            : failure.error?.message ?? failure.detail ?? `HTTP ${response.status}`,
+        );
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 200));
+    }
+    selectedTrace.value = body as TraceDetail;
+  } catch (error) {
+    selectedTrace.value = null;
+    diagnosticsError.value = `读取 trace 失败：${String(error)}`;
+  }
+}
+
+/** 进入诊断工作区，并可直接打开指定 trace。 */
+function openTraceDiagnostics(traceId = ""): void {
+  selectedTrace.value = null;
+  activeSection.value = "diagnostics";
+  activeDocumentId.value = null;
+  documentDetail.value = null;
+  window.location.hash = traceId
+    ? `diagnostics/${encodeURIComponent(traceId)}`
+    : "diagnostics";
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+/** 进入诊断页并同步列表与可选详情。 */
+async function loadTraceDiagnostics(traceId: string | null): Promise<void> {
+  await loadTraceList();
+  if (traceId) {
+    await loadTraceDetail(traceId);
+  } else {
+    selectedTraceId.value = "";
+    selectedTrace.value = null;
+  }
+}
+
+/** 读取 full trace artifact，并作为纯文本或格式化 JSON 展示。 */
+async function openTraceArtifact(traceId: string, artifact: TraceArtifact): Promise<void> {
+  if (!connection.value) {
+    return;
+  }
+  traceArtifactTitle.value = artifact.kind;
+  traceArtifactPreview.value = "";
+  if (artifact.state !== "stored") {
+    traceArtifactPreview.value =
+      artifact.state === "omitted"
+        ? "当前 trace 模式未保存正文，仅保留内容 hash。"
+        : "artifact 写入失败，正文不可用。";
+    return;
+  }
+  try {
+    const response = await fetchWithTimeout(
+      `${connection.value.baseUrl}/api/traces/${encodeURIComponent(traceId)}/artifacts/${artifact.artifact_id}`,
+      {
+        headers: { "x-launch-token": connection.value.token },
+        cache: "no-store",
+      },
+      API_TIMEOUT_MS.quick,
+    );
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const text = await response.text();
+    traceArtifactPreview.value =
+      artifact.mime_type.includes("json")
+        ? JSON.stringify(JSON.parse(text) as unknown, null, 2)
+        : text;
+  } catch (error) {
+    traceArtifactPreview.value = `读取 artifact 失败：${String(error)}`;
+  }
+}
+
+/** 把 trace 状态转换成界面标签。 */
+function traceStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    succeeded: "成功",
+    partial: "部分完成",
+    failed: "失败",
+    canceled: "已取消",
+    complete: "完整",
+    dropped: "已丢失",
+  };
+  return labels[status] ?? status;
+}
+
+/** 把 span 状态转换成界面标签。 */
+function traceSpanStatusLabel(span: TraceSpan): string {
+  return span.status === "ok"
+    ? "成功"
+    : `错误${span.error_code ? `：${span.error_code}` : ""}`;
+}
+
+/** 把 trace 模式转换成界面标签。 */
+function traceModeLabel(mode: TraceMode): string {
+  const labels: Record<TraceMode, string> = {
+    off: "关闭",
+    metadata: "元数据",
+    full: "完整内容",
+  };
+  return labels[mode];
+}
+
+/** 按 span 父关系计算诊断时间线的缩进层级。 */
+const diagnosticsSpanRows = computed(() => {
+  if (!selectedTrace.value) {
+    return [];
+  }
+  const byId = new Map(
+    selectedTrace.value.spans.map((span) => [span.span_id, span]),
+  );
+  const depth = (span: TraceSpan): number => {
+    let current = span;
+    let value = 0;
+    const seen = new Set<string>();
+    while (current.parent_span_id && !seen.has(current.span_id)) {
+      seen.add(current.span_id);
+      const parent = byId.get(current.parent_span_id);
+      if (!parent) {
+        break;
+      }
+      value += 1;
+      current = parent;
+    }
+    return value;
+  };
+  return selectedTrace.value.spans.map((span) => ({
+    span,
+    depth: depth(span),
+  }));
+});
+
+/** metadata 模式只显示非 omitted artifact；正文省略项合并成汇总。 */
+const visibleTraceArtifacts = computed(() =>
+  (selectedTrace.value?.manifest.artifacts ?? []).filter(
+    (artifact) => artifact.state !== "omitted",
+  ),
+);
+
+/** 当前 trace 中被记录模式省略的正文 artifact 数量。 */
+const omittedTraceArtifactCount = computed(
+  () =>
+    (selectedTrace.value?.manifest.artifacts ?? []).filter(
+      (artifact) => artifact.state === "omitted",
+    ).length,
+);
 
 /** 把部分成功任务显示为独立语义，避免被“已完成”掩盖。 */
 function taskDisplayStatus(task: BackgroundTaskRecord): string {
@@ -2097,6 +2475,9 @@ async function connect(): Promise<void> {
     if (activeDocumentId.value) {
       await loadDocumentDetail(activeDocumentId.value);
     }
+    if (activeSection.value === "diagnostics") {
+      await loadTraceDiagnostics(readTraceIdFromHash());
+    }
   } catch (error) {
     managerStatus.value = "failed";
     message.value = `无法读取 Tauri 后端状态：${String(error)}`;
@@ -2233,6 +2614,7 @@ function resetChatState(): void {
   pendingChatEvents.length = 0;
   chatRunId.value = "";
   chatTraceId.value = "";
+  chatTraceAvailable.value = false;
   chatSnapshotId.value = "";
   chatStatus.value = "idle";
   chatActivity.value = "等待提问";
@@ -2503,6 +2885,7 @@ async function askAgentQuestion(): Promise<void> {
     return;
   }
   resetChatState();
+  chatTraceAvailable.value = runtimeSettingsForm.value.trace_mode !== "off";
   chatStatus.value = "starting";
   chatActivity.value = "正在启动回答";
   try {
@@ -2784,7 +3167,14 @@ onBeforeUnmount(() => {
             />
             <div>
               <strong>{{ chatActivity }}</strong>
-              <small v-if="chatTraceId">运行 {{ chatTraceId.slice(-8) }}</small>
+              <button
+                v-if="chatTraceId && chatTraceAvailable"
+                type="button"
+                class="chat-trace-link"
+                @click="openTraceDiagnostics(chatTraceId)"
+              >
+                查看运行 {{ chatTraceId.slice(-8) }}
+              </button>
             </div>
           </div>
           <dl class="chat-token-meter">
@@ -2895,6 +3285,186 @@ onBeforeUnmount(() => {
           </p>
         </section>
       </section>
+    </section>
+
+    <section v-if="activeSection === 'diagnostics'" class="diagnostics-page">
+      <div class="section-heading diagnostics-page-heading">
+        <div>
+          <p class="eyebrow">LOCAL TRACE VIEWER</p>
+          <h2>运行诊断</h2>
+          <p class="settings-description">
+            直接读取本机 trace 文件，不依赖导入、外部服务或 OTLP。
+          </p>
+        </div>
+        <div class="diagnostics-heading-actions">
+          <button
+            type="button"
+            class="secondary-button"
+            :disabled="diagnosticsLoading"
+            @click="loadTraceDiagnostics(selectedTraceId || null)"
+          >
+            {{ diagnosticsLoading ? "刷新中…" : "刷新" }}
+          </button>
+          <button
+            type="button"
+            class="secondary-button"
+            @click="selectSection('settings')"
+          >
+            返回设置
+          </button>
+        </div>
+      </div>
+      <p v-if="diagnosticsError" class="error-box">{{ diagnosticsError }}</p>
+
+      <div class="diagnostics-workspace">
+        <aside class="trace-list-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">RECENT RUNS</p>
+              <h3>最近运行</h3>
+            </div>
+            <span>{{ diagnosticsTraces.length }} 条</span>
+          </div>
+          <div v-if="!diagnosticsLoading && diagnosticsTraces.length === 0" class="empty-state">
+            还没有可查看的 trace。
+          </div>
+          <button
+            v-for="trace in diagnosticsTraces"
+            :key="trace.trace_id"
+            type="button"
+            class="trace-list-item"
+            :class="{ active: selectedTraceId === trace.trace_id }"
+            @click="openTraceDiagnostics(trace.trace_id)"
+          >
+            <span class="trace-list-topline">
+              <strong>{{ trace.question_preview || `运行 ${trace.trace_id.slice(-8)}` }}</strong>
+              <span class="task-status-pill" :class="`task-${trace.status}`">
+                {{ traceStatusLabel(trace.status) }}
+              </span>
+            </span>
+            <small>
+              {{ taskTimeLabel(trace.started_at) }} ·
+              {{ traceModeLabel(trace.mode) }} ·
+              {{ trace.duration_ms }} ms ·
+              {{ trace.input_tokens + trace.output_tokens }} token
+            </small>
+            <span class="trace-list-health" :class="`trace-health-${trace.trace_status}`">
+              trace {{ traceStatusLabel(trace.trace_status) }} ·
+              {{ trace.replay_scope }}
+            </span>
+          </button>
+        </aside>
+
+        <article v-if="selectedTrace" class="trace-detail-panel">
+          <div class="trace-detail-header">
+            <div>
+              <p class="eyebrow">TRACE {{ selectedTrace.manifest.trace_id.slice(-8) }}</p>
+              <h3>{{ selectedTrace.manifest.question_preview || "未保存问题正文" }}</h3>
+            </div>
+            <span
+              class="trace-health-badge"
+              :class="`trace-health-${selectedTrace.manifest.trace_status}`"
+            >
+              {{ traceStatusLabel(selectedTrace.manifest.trace_status) }}
+            </span>
+          </div>
+
+          <dl class="trace-summary-grid">
+            <div><dt>最终状态</dt><dd>{{ traceStatusLabel(selectedTrace.manifest.status) }}</dd></div>
+            <div><dt>终止原因</dt><dd>{{ selectedTrace.manifest.termination_reason }}</dd></div>
+            <div><dt>耗时</dt><dd>{{ selectedTrace.manifest.duration_ms }} ms</dd></div>
+            <div><dt>轮次 / 工具 / 模型</dt><dd>{{ selectedTrace.manifest.agent_turns }} / {{ selectedTrace.manifest.tool_calls }} / {{ selectedTrace.manifest.model_calls }}</dd></div>
+            <div><dt>输入 token</dt><dd>{{ selectedTrace.manifest.input_tokens }}</dd></div>
+            <div><dt>输出 token</dt><dd>{{ selectedTrace.manifest.output_tokens }}</dd></div>
+            <div><dt>模式</dt><dd>{{ traceModeLabel(selectedTrace.manifest.mode) }}</dd></div>
+            <div><dt>可重放范围</dt><dd>{{ selectedTrace.manifest.replay_scope }}</dd></div>
+          </dl>
+
+          <details class="trace-metadata-block">
+            <summary>版本与运行配置</summary>
+            <pre>{{ JSON.stringify(selectedTrace.manifest.versions, null, 2) }}</pre>
+            <pre>{{ JSON.stringify(selectedTrace.manifest.budget, null, 2) }}</pre>
+          </details>
+
+          <section class="trace-timeline">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">SPAN TIMELINE</p>
+                <h3>调用树</h3>
+              </div>
+              <span>{{ selectedTrace.spans.length }} 个 span</span>
+            </div>
+            <article
+              v-for="row in diagnosticsSpanRows"
+              :key="row.span.span_id"
+              class="trace-span-card"
+              :class="{
+                selected: selectedTraceSpanId === row.span.span_id,
+                'trace-span-error': row.span.status === 'error',
+              }"
+              :style="{ marginLeft: `${row.depth * 18}px` }"
+              @click="selectedTraceSpanId = row.span.span_id"
+            >
+              <div class="trace-span-topline">
+                <span class="trace-span-kind">{{ row.span.kind }}</span>
+                <strong>{{ row.span.name }}</strong>
+                <span>{{ traceSpanStatusLabel(row.span) }}</span>
+              </div>
+              <small>
+                {{ taskTimeLabel(row.span.started_at) }} ·
+                {{ String(row.span.attributes["app.duration_ms"] ?? "—") }} ms
+              </small>
+              <div v-if="selectedTraceSpanId === row.span.span_id" class="trace-span-detail">
+                <pre>{{ JSON.stringify(row.span.attributes, null, 2) }}</pre>
+                <div v-if="row.span.events.length" class="trace-span-events">
+                  <strong>span events</strong>
+                  <pre>{{ JSON.stringify(row.span.events, null, 2) }}</pre>
+                </div>
+              </div>
+            </article>
+          </section>
+
+          <section v-if="selectedTrace.manifest.artifacts.length" class="trace-artifacts">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">ARTIFACTS</p>
+                <h3>运行内容</h3>
+              </div>
+              <span>{{ visibleTraceArtifacts.length }} 个可查看</span>
+            </div>
+            <p v-if="omittedTraceArtifactCount" class="trace-artifacts-omitted">
+              {{ traceModeLabel(selectedTrace.manifest.mode) }}模式已省略
+              {{ omittedTraceArtifactCount }} 个正文 artifact，仅保留内容 hash。
+            </p>
+            <button
+              v-for="artifact in visibleTraceArtifacts"
+              :key="artifact.artifact_id"
+              type="button"
+              class="trace-artifact-row"
+              @click="openTraceArtifact(selectedTrace.manifest.trace_id, artifact)"
+            >
+              <span>
+                <strong>{{ artifact.kind }}</strong>
+                <small>{{ artifact.mime_type }} · {{ artifact.size_bytes }} bytes</small>
+              </span>
+              <span class="trace-artifact-state">{{ artifact.state }}</span>
+            </button>
+            <div v-if="traceArtifactPreview" class="trace-artifact-preview">
+              <div class="panel-heading">
+                <h3>{{ traceArtifactTitle }}</h3>
+                <button type="button" class="inline-link" @click="traceArtifactPreview = ''">
+                  关闭
+                </button>
+              </div>
+              <pre>{{ traceArtifactPreview }}</pre>
+            </div>
+          </section>
+        </article>
+
+        <div v-else class="trace-detail-placeholder">
+          从左侧选择一次运行，查看轮次、模型、工具、预算和来源现场。
+        </div>
+      </div>
     </section>
 
     <section v-if="activeSection === 'settings'" class="settings-card">
@@ -3210,6 +3780,55 @@ onBeforeUnmount(() => {
       </div>
       <p v-if="runtimeSettingsMessage" class="settings-message">{{ runtimeSettingsMessage }}</p>
       <p v-if="runtimeSettingsError" class="error-box">{{ runtimeSettingsError }}</p>
+    </section>
+
+    <section v-if="activeSection === 'settings'" class="settings-card diagnostics-settings-card">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">LOCAL DIAGNOSTICS</p>
+          <h2>运行诊断</h2>
+        </div>
+        <span class="settings-pill configured">
+          {{ traceModeLabel(runtimeSettingsForm.trace_mode) }}
+        </span>
+      </div>
+      <p class="settings-description">
+        保存每次问答的运行现场，便于解释检索、模型、预算和取消行为。该设置只影响之后的问答。
+      </p>
+      <label class="settings-field diagnostics-mode-field">
+        <span>Trace 记录模式</span>
+        <select v-model="runtimeSettingsForm.trace_mode">
+          <option value="off">关闭：不生成 trace</option>
+          <option value="metadata">元数据：保留状态、token、hash 和耗时</option>
+          <option value="full">完整内容：额外保留提示词、工具结果和回答正文</option>
+        </select>
+        <small>
+          开发环境推荐“完整内容”；分发环境默认“元数据”。正文只保存在本机。
+        </small>
+      </label>
+      <div class="settings-actions">
+        <button
+          type="button"
+          class="primary-button"
+          :disabled="diagnosticsTraceModeBusy"
+          @click="saveDiagnosticsTraceMode"
+        >
+          {{ diagnosticsTraceModeBusy ? "保存中…" : "保存记录模式" }}
+        </button>
+        <button
+          type="button"
+          class="secondary-button"
+          @click="openTraceDiagnostics()"
+        >
+          打开运行诊断
+        </button>
+      </div>
+      <p v-if="diagnosticsTraceModeMessage" class="settings-message">
+        {{ diagnosticsTraceModeMessage }}
+      </p>
+      <p v-if="diagnosticsTraceModeError" class="error-box">
+        {{ diagnosticsTraceModeError }}
+      </p>
     </section>
 
     <section v-if="activeSection === 'settings'" class="reset-card">
