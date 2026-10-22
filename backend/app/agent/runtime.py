@@ -32,6 +32,7 @@ from app.providers.chat import (
     ChatProviderError,
 )
 from app.providers.embeddings import EmbeddingProvider
+from app.retrieval.hybrid import DEFAULT_HYBRID_RETRIEVAL_PROFILE, HybridRetrievalProfile
 from app.retrieval.service import RetrievalFailure, RetrievalReadService, RetrievalSnapshotReader
 
 AGENT_LOOP_VERSION = "react-langgraph-v1"
@@ -46,6 +47,7 @@ class AgentRunConfig:
     max_context_tokens: int = 100_000
     max_request_tokens: int = 400_000
     finalization_reserve_tokens: int = 4_000
+    max_output_tokens: int = 8_192
 
     def __post_init__(self) -> None:
         if self.max_tool_calls < 0:
@@ -56,6 +58,8 @@ class AgentRunConfig:
             raise ValueError("max_request_tokens must be at least max_context_tokens")
         if not 0 <= self.finalization_reserve_tokens < self.max_request_tokens:
             raise ValueError("finalization reserve must be within request budget")
+        if self.max_output_tokens <= 0:
+            raise ValueError("max_output_tokens must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +125,7 @@ class AgentRuntime:
         config: AgentRunConfig | None = None,
         prompt_bundle: PromptBundle | None = None,
         token_counter: ObservationTokenCounter | None = None,
+        retrieval_profile: HybridRetrievalProfile = DEFAULT_HYBRID_RETRIEVAL_PROFILE,
     ) -> None:
         self._data_root = data_root.resolve()
         self._chat_provider = chat_provider
@@ -128,6 +133,7 @@ class AgentRuntime:
         self._config = config or AgentRunConfig()
         self._prompt_bundle = prompt_bundle or release_prompt_bundle()
         self._token_counter = token_counter or ConservativeObservationTokenCounter()
+        self._retrieval_profile = retrieval_profile
 
     async def run(self, question: str) -> AgentRunResult:
         """在当前活动快照上执行一次单轮 Agent 请求。"""
@@ -139,7 +145,11 @@ class AgentRuntime:
             reader = RetrievalReadService(self._data_root).bind_current()
         except RetrievalFailure as error:
             return self._failed_before_run(error.code)
-        adapter = RetrievalToolAdapter(reader, self._embedding_provider)
+        adapter = RetrievalToolAdapter(
+            reader,
+            self._embedding_provider,
+            search_profile=self._retrieval_profile,
+        )
         execution = _AgentGraphExecution(
             question=normalized_question,
             reader=reader,
@@ -700,7 +710,14 @@ class _AgentGraphExecution:
         last_error: ChatProviderError | None = None
         for attempt in range(2):
             try:
-                return await self._chat_provider.complete(messages), None, attempt + 1
+                return (
+                    await self._chat_provider.complete(
+                        messages,
+                        max_output_tokens=self._config.max_output_tokens,
+                    ),
+                    None,
+                    attempt + 1,
+                )
             except ChatProviderError as error:
                 last_error = error
                 if not error.retryable or attempt == 1:

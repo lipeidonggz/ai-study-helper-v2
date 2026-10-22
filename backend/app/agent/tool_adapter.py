@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from app.ingestion.models import DocumentLanguage
 from app.providers.embeddings import EmbeddingProvider
 from app.retrieval.errors import RetrievalFailure
+from app.retrieval.hybrid import DEFAULT_HYBRID_RETRIEVAL_PROFILE, HybridRetrievalProfile
 from app.retrieval.service import RetrievalSnapshotReader
 
 TOOL_CONTRACT_VERSION = "retrieval-tools-v1"
@@ -207,9 +208,12 @@ class RetrievalToolAdapter:
         self,
         reader: RetrievalSnapshotReader,
         embedding_provider: EmbeddingProvider,
+        *,
+        search_profile: HybridRetrievalProfile = DEFAULT_HYBRID_RETRIEVAL_PROFILE,
     ) -> None:
         self._reader = reader
         self._embedding_provider = embedding_provider
+        self._search_profile = search_profile
         self._descriptors = {descriptor.name: descriptor for descriptor in tool_descriptors()}
 
     @property
@@ -259,6 +263,7 @@ class RetrievalToolAdapter:
                     parsed.query,
                     provider=self._embedding_provider,
                     doc_ids=parsed.doc_ids,
+                    profile=self._search_profile,
                 )
                 diagnostics = {
                     "search_profile": asdict(execution.profile),

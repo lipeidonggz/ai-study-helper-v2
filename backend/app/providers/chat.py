@@ -103,6 +103,7 @@ class FakeChatProvider:
             thinking_enabled=DEFAULT_THINKING_ENABLED,
         )
         self.requests: list[tuple[ChatMessage, ...]] = []
+        self.max_output_requests: list[int | None] = []
 
     @property
     def profile(self) -> ChatProviderProfile:
@@ -125,6 +126,7 @@ class FakeChatProvider:
                 retryable=False,
             )
         self.requests.append(tuple(messages))
+        self.max_output_requests.append(max_output_tokens)
         content = self._responses.pop(0)
         input_tokens = sum(max(1, len(message.content) // 4) for message in messages)
         return ChatCompletionResult(

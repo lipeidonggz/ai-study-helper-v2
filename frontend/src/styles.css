@@ -456,6 +456,143 @@ input {
   line-height: 1.55;
 }
 
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.settings-grid-primary {
+  margin-bottom: 18px;
+}
+
+.settings-field {
+  display: grid;
+  gap: 7px;
+}
+
+.settings-field > span {
+  color: #294532;
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+.settings-field input {
+  width: 100%;
+  border: 1px solid #bdc9bd;
+  border-radius: 11px;
+  padding: 11px 13px;
+  color: #21382a;
+  background: #fbfcfa;
+}
+
+.settings-field input[aria-invalid="true"] {
+  border-color: #bd3d35;
+  background: #fff8f7;
+  box-shadow: 0 0 0 3px rgba(189, 61, 53, 0.1);
+}
+
+.settings-field small {
+  color: #738077;
+  font-size: 0.74rem;
+  line-height: 1.5;
+}
+
+.settings-field .settings-field-error {
+  color: #a52f28;
+  font-weight: 650;
+}
+
+.settings-advanced {
+  border: 1px solid rgba(37, 71, 50, 0.13);
+  border-radius: 13px;
+  padding: 13px 15px;
+  background: #f7f9f5;
+}
+
+.settings-advanced summary {
+  color: #31533c;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.settings-advanced > p {
+  margin: 10px 0 14px;
+  color: #6c7b70;
+  font-size: 0.78rem;
+  line-height: 1.55;
+}
+
+.settings-managed {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 16px;
+  border-radius: 13px;
+  padding: 13px 15px;
+  color: #58685d;
+  background: #edf2eb;
+  font-size: 0.75rem;
+}
+
+.settings-managed > div {
+  display: grid;
+  flex: 1 1 240px;
+  gap: 3px;
+}
+
+.settings-managed strong {
+  color: #304d39;
+}
+
+.settings-managed small {
+  color: #76847a;
+}
+
+.settings-managed span {
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: #fff;
+}
+
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.settings-actions .primary-button,
+.settings-actions .secondary-button {
+  margin-top: 0;
+}
+
+.settings-saved-at {
+  color: #78867c;
+  font-size: 0.74rem;
+}
+
+.runtime-settings-card {
+  background:
+    linear-gradient(145deg, rgba(247, 251, 245, 0.94), rgba(255, 255, 255, 0.78));
+}
+
+@media (max-width: 860px) {
+  .settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-form {
+    flex-wrap: wrap;
+  }
+
+  .settings-form input {
+    flex-basis: 100%;
+  }
+}
+
 .task-card {
   margin-top: 34px;
   padding: 24px 28px;
