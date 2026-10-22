@@ -1,6 +1,6 @@
 # 015 · GitHub 后台交付与失败可见性
 
-- 状态：待确认
+- 状态：已完成
 - 开始日期：2026-10-22
 - 关联设计：[ADR 0007 人-AI 协同控制模型](../../decisions/0007-human-ai-collaboration-control-model.md)
 - 前置切片：[014 本地时间显示与 UTC 时间戳契约](./014-local-time-timestamp-contract.md)
@@ -98,7 +98,7 @@
 
 ### 人工验收
 
-- [ ] 待通过 015 自身 PR 验证 auto-merge 与后台状态更新。
+- [x] PR #11 的 required checks 全部通过，GitHub auto-merge 成功，watcher 状态更新为 `merged`。
 
 ## 反向解释
 
