@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 from app.ingestion.errors import IngestFailure
 from app.providers.chat import (
+    DEEPSEEK_MODEL_ID,
     ChatMessage,
     ChatProvider,
     ChatProviderError,
@@ -63,6 +64,7 @@ class ModelSettingsService:
             embedding_dimension=(row.dimension if row is not None else QWEN_EMBEDDING_DIMENSION),
             embedding_last_test=last_test,
             chat_configured=bool(self._credentials.get(CHAT_API_KEY_USERNAME)),
+            chat_model_id=DEEPSEEK_MODEL_ID,
         )
 
     def set_embedding_key(self, api_key: str) -> ModelSettingsResponse:

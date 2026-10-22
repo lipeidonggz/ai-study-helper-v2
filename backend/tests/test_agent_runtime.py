@@ -472,6 +472,154 @@ def test_protected_agent_api_runs_with_injected_providers(tmp_path: Path) -> Non
     assert result["observation_token_counter_version"] == "chat-budget-conservative-v1"
 
 
+def test_agent_api_uses_saved_runtime_settings(tmp_path: Path) -> None:
+    embedding_provider = _prepare_snapshot(tmp_path)
+    chat_provider = FakeChatProvider(
+        [
+            'Thought: 检索。\nAction: search_blocks[{"query":"MCP"}]',
+            "Thought: 完成。\nAction: Finish[设置已生效]",
+        ]
+    )
+    app = create_app(
+        TOKEN,
+        data_root=tmp_path,
+        credential_store=_MemoryCredentials(),
+        embedding_provider_factory=lambda: embedding_provider,
+        chat_provider_factory=lambda _key: chat_provider,
+    )
+
+    async def run() -> dict:
+        transport = httpx.ASGITransport(app=app)
+        headers = {"x-launch-token": TOKEN}
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            saved = await client.put(
+                "/api/settings/runtime",
+                headers=headers,
+                json={
+                    "top_k": 3,
+                    "max_output_tokens": 4096,
+                    "max_context_tokens": 80_000,
+                    "max_request_tokens": 300_000,
+                    "max_tool_calls": 2,
+                },
+            )
+            saved.raise_for_status()
+            response = await client.post(
+                "/api/agent/run",
+                headers=headers,
+                json={"question": "验证设置注入"},
+            )
+            response.raise_for_status()
+            return response.json()
+
+    result = asyncio.run(run())
+
+    assert result["status"] == "succeeded"
+    tool_event = next(event for event in result["events"] if event["event_type"] == "tool_call")
+    assert tool_event["payload"]["diagnostics"]["search_profile"]["top_k"] == 3
+    assert chat_provider.max_output_requests == [4096, 4096]
+
+
+def test_runtime_settings_do_not_change_an_inflight_request(tmp_path: Path) -> None:
+    embedding_provider = _prepare_snapshot(tmp_path)
+
+    class BlockingChatProvider(FakeChatProvider):
+        started: asyncio.Event
+        release: asyncio.Event
+
+        async def complete(self, messages, *, max_output_tokens=None):
+            from app.providers.chat import ChatCompletionResult
+
+            self.requests.append(tuple(messages))
+            self.max_output_requests.append(max_output_tokens)
+            self.started.set()
+            await self.release.wait()
+            content = self._responses.pop(0)
+            return ChatCompletionResult(
+                content=content,
+                request_id=f"blocking-{len(self.requests)}",
+                actual_model_id=self.profile.model_id,
+                finish_reason="stop",
+                input_tokens=20,
+                output_tokens=5,
+            )
+
+    chat_provider = BlockingChatProvider(
+        [
+            "Thought: 第一请求。\nAction: Finish[旧配置]",
+            "Thought: 第二请求。\nAction: Finish[新配置]",
+        ]
+    )
+    chat_provider.started = asyncio.Event()
+    chat_provider.release = asyncio.Event()
+    app = create_app(
+        TOKEN,
+        data_root=tmp_path,
+        credential_store=_MemoryCredentials(),
+        embedding_provider_factory=lambda: embedding_provider,
+        chat_provider_factory=lambda _key: chat_provider,
+    )
+
+    async def run() -> tuple[dict, dict]:
+        transport = httpx.ASGITransport(app=app)
+        headers = {"x-launch-token": TOKEN}
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            saved = await client.put(
+                "/api/settings/runtime",
+                headers=headers,
+                json={
+                    "top_k": 5,
+                    "max_output_tokens": 4096,
+                    "max_context_tokens": 100_000,
+                    "max_request_tokens": 400_000,
+                    "max_tool_calls": 8,
+                },
+            )
+            saved.raise_for_status()
+            first_request = asyncio.create_task(
+                client.post(
+                    "/api/agent/run",
+                    headers=headers,
+                    json={"question": "正在运行的请求"},
+                )
+            )
+            await asyncio.wait_for(chat_provider.started.wait(), timeout=3)
+            updated = await client.put(
+                "/api/settings/runtime",
+                headers=headers,
+                json={
+                    "top_k": 5,
+                    "max_output_tokens": 6144,
+                    "max_context_tokens": 100_000,
+                    "max_request_tokens": 400_000,
+                    "max_tool_calls": 8,
+                },
+            )
+            updated.raise_for_status()
+            chat_provider.release.set()
+            first = await first_request
+            first.raise_for_status()
+            second = await client.post(
+                "/api/agent/run",
+                headers=headers,
+                json={"question": "下一个请求"},
+            )
+            second.raise_for_status()
+            return first.json(), second.json()
+
+    first, second = asyncio.run(run())
+
+    assert first["answer"] == "旧配置"
+    assert second["answer"] == "新配置"
+    assert chat_provider.max_output_requests == [4096, 6144]
+
+
 def test_agent_api_runtime_failure_returns_structured_http_200(tmp_path: Path) -> None:
     embedding_provider = _prepare_snapshot(tmp_path)
 

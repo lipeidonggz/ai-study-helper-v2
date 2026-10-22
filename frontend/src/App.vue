@@ -4,6 +4,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 
+import { API_TIMEOUT_MS, fetchWithTimeout } from "./api";
+
 /** Python sidecar 的 UI 生命周期状态。 */
 type ManagerStatus =
   | "starting"
@@ -141,7 +143,35 @@ interface ModelSettingsResponse {
     tested_at: string;
   } | null;
   chat_configured: boolean;
+  chat_model_id: string;
 }
+
+/** 对话模型连通性测试结果。 */
+interface ChatProviderTestResult {
+  status: "success" | "failed";
+  model_id: string;
+  request_id: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  message: string | null;
+  tested_at: string;
+}
+
+/** 用户可调的检索与 Agent 运行参数。 */
+interface RuntimeSettingsResponse {
+  top_k: number;
+  max_output_tokens: number;
+  max_context_tokens: number;
+  max_request_tokens: number;
+  max_tool_calls: number;
+  updated_at: string | null;
+}
+
+/** 运行设置表单中各字段的即时校验错误。 */
+type RuntimeSettingsFieldErrors = Record<
+  "top_k" | "max_output_tokens" | "max_context_tokens" | "max_request_tokens" | "max_tool_calls",
+  string
+>;
 
 /** 后台任务的可查询生命周期状态。 */
 type BackgroundTaskStatus =
@@ -305,10 +335,32 @@ const ingesting = ref(false);
 const saving = ref(false);
 const modelSettings = ref<ModelSettingsResponse | null>(null);
 const embeddingKey = ref("");
-const settingsBusy = ref(false);
+const chatKey = ref("");
+const runtimeSettings = ref<RuntimeSettingsResponse | null>(null);
+const runtimeSettingsForm = ref<RuntimeSettingsResponse>({
+  top_k: 5,
+  max_output_tokens: 8192,
+  max_context_tokens: 100000,
+  max_request_tokens: 400000,
+  max_tool_calls: 8,
+  updated_at: null,
+});
+const runtimeSettingsFieldErrors = computed(() =>
+  validateRuntimeSettings(runtimeSettingsForm.value),
+);
+const runtimeSettingsHasErrors = computed(() =>
+  Object.values(runtimeSettingsFieldErrors.value).some(Boolean),
+);
+const embeddingSettingsBusy = ref(false);
+const chatSettingsBusy = ref(false);
+const runtimeSettingsBusy = ref(false);
 const settingsLoading = ref(true);
 const settingsError = ref("");
 const settingsMessage = ref("");
+const chatSettingsError = ref("");
+const chatSettingsMessage = ref("");
+const runtimeSettingsError = ref("");
+const runtimeSettingsMessage = ref("");
 const taskUrl = ref("");
 const taskSources = ref<BackgroundSource[]>([]);
 const backgroundTask = ref<BackgroundTaskRecord | null>(null);
@@ -336,6 +388,7 @@ const documentDetailTab = ref<"content" | "versions" | "technical">("content");
 let unlisten: UnlistenFn | undefined;
 let healthTimer: number | undefined;
 let taskTimer: number | undefined;
+let taskRefreshInFlight = false;
 let disposed = false;
 
 /** 从 URL hash 解析当前工作区；未知值回退到知识库。 */
@@ -571,6 +624,11 @@ function settingsErrorMessage(code: string, detail: string): string {
     embedding_authentication_failed: "Key 无效或没有 embedding 权限。",
     embedding_rate_limited: "请求被限流，请稍后再测试。",
     embedding_upstream_unavailable: "暂时无法连接 embedding 服务，请检查网络后重试。",
+    chat_api_key_missing: "请先保存对话 API Key，再进行连通性测试。",
+    chat_authentication_failed: "对话 Key 无效或没有模型权限。",
+    chat_rate_limited: "对话模型请求被限流，请稍后再测试。",
+    chat_upstream_unavailable: "暂时无法连接对话模型，请检查网络后重试。",
+    chat_request_rejected: "对话模型拒绝了测试请求，请检查 Key 和账户状态。",
   };
   return labels[code]
     ? `${labels[code]}（错误码：${code}）`
@@ -599,10 +657,14 @@ async function loadModelSettings(maxAttempts = 3): Promise<void> {
   let lastError: unknown;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
-      const response = await fetch(`${connection.value.baseUrl}/api/settings/models`, {
-        headers: { "x-launch-token": connection.value.token },
-        cache: "no-store",
-      });
+      const response = await fetchWithTimeout(
+        `${connection.value.baseUrl}/api/settings/models`,
+        {
+          headers: { "x-launch-token": connection.value.token },
+          cache: "no-store",
+        },
+        API_TIMEOUT_MS.quick,
+      );
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
@@ -625,21 +687,25 @@ async function loadModelSettings(maxAttempts = 3): Promise<void> {
 
 /** 安全保存 embedding Key，成功后清空输入框。 */
 async function saveEmbeddingKey(): Promise<void> {
-  if (!connection.value || !embeddingKey.value.trim() || settingsBusy.value) {
+  if (!connection.value || !embeddingKey.value.trim() || embeddingSettingsBusy.value) {
     return;
   }
-  settingsBusy.value = true;
+  embeddingSettingsBusy.value = true;
   settingsError.value = "";
   settingsMessage.value = "";
   try {
-    const response = await fetch(`${connection.value.baseUrl}/api/settings/embedding-key`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-launch-token": connection.value.token,
+    const response = await fetchWithTimeout(
+      `${connection.value.baseUrl}/api/settings/embedding-key`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-launch-token": connection.value.token,
+        },
+        body: JSON.stringify({ api_key: embeddingKey.value.trim() }),
       },
-      body: JSON.stringify({ api_key: embeddingKey.value.trim() }),
-    });
+      API_TIMEOUT_MS.quick,
+    );
     const body = (await response.json()) as ModelSettingsResponse | ApiErrorBody;
     if (!response.ok) {
       const failure = body as ApiErrorBody;
@@ -656,25 +722,26 @@ async function saveEmbeddingKey(): Promise<void> {
   } catch (error) {
     settingsError.value = String(error);
   } finally {
-    settingsBusy.value = false;
+    embeddingSettingsBusy.value = false;
   }
 }
 
 /** 使用已保存 Key 做一次真实的短文本 embedding 检查。 */
 async function testEmbeddingKey(): Promise<void> {
-  if (!connection.value || settingsBusy.value) {
+  if (!connection.value || embeddingSettingsBusy.value) {
     return;
   }
-  settingsBusy.value = true;
+  embeddingSettingsBusy.value = true;
   settingsError.value = "";
   settingsMessage.value = "";
   try {
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `${connection.value.baseUrl}/api/settings/embedding-key/test`,
       {
         method: "POST",
         headers: { "x-launch-token": connection.value.token },
       },
+      API_TIMEOUT_MS.providerTest,
     );
     const body = (await response.json()) as
       | ModelSettingsResponse["embedding_last_test"]
@@ -697,25 +764,26 @@ async function testEmbeddingKey(): Promise<void> {
   } catch (error) {
     settingsError.value = String(error);
   } finally {
-    settingsBusy.value = false;
+    embeddingSettingsBusy.value = false;
   }
 }
 
 /** 删除已保存 Key，并清除旧连通性结果。 */
 async function deleteEmbeddingKey(): Promise<void> {
-  if (!connection.value || settingsBusy.value) {
+  if (!connection.value || embeddingSettingsBusy.value) {
     return;
   }
-  settingsBusy.value = true;
+  embeddingSettingsBusy.value = true;
   settingsError.value = "";
   settingsMessage.value = "";
   try {
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `${connection.value.baseUrl}/api/settings/embedding-key/delete`,
       {
         method: "POST",
         headers: { "x-launch-token": connection.value.token },
       },
+      API_TIMEOUT_MS.quick,
     );
     const body = (await response.json()) as ModelSettingsResponse | ApiErrorBody;
     if (!response.ok) {
@@ -732,7 +800,124 @@ async function deleteEmbeddingKey(): Promise<void> {
   } catch (error) {
     settingsError.value = String(error);
   } finally {
-    settingsBusy.value = false;
+    embeddingSettingsBusy.value = false;
+  }
+}
+
+/** 安全保存独立的对话模型 Key。 */
+async function saveChatKey(): Promise<void> {
+  if (!connection.value || !chatKey.value.trim() || chatSettingsBusy.value) {
+    return;
+  }
+  chatSettingsBusy.value = true;
+  chatSettingsError.value = "";
+  chatSettingsMessage.value = "";
+  try {
+    const response = await fetchWithTimeout(
+      `${connection.value.baseUrl}/api/settings/chat-key`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-launch-token": connection.value.token,
+        },
+        body: JSON.stringify({ api_key: chatKey.value.trim() }),
+      },
+      API_TIMEOUT_MS.quick,
+    );
+    const body = (await response.json()) as ModelSettingsResponse | ApiErrorBody;
+    if (!response.ok) {
+      const failure = body as ApiErrorBody;
+      throw new Error(
+        settingsErrorMessage(
+          failure.error?.code ?? "request_failed",
+          failure.error?.message ?? failure.detail ?? `HTTP ${response.status}`,
+        ),
+      );
+    }
+    modelSettings.value = body as ModelSettingsResponse;
+    chatKey.value = "";
+    chatSettingsMessage.value = "对话 Key 已保存到 Windows Credential Manager。";
+  } catch (error) {
+    chatSettingsError.value = String(error);
+  } finally {
+    chatSettingsBusy.value = false;
+  }
+}
+
+/** 使用已保存的对话 Key 做一次最小真实补全检查。 */
+async function testChatKey(): Promise<void> {
+  if (!connection.value || chatSettingsBusy.value) {
+    return;
+  }
+  chatSettingsBusy.value = true;
+  chatSettingsError.value = "";
+  chatSettingsMessage.value = "";
+  try {
+    const response = await fetchWithTimeout(
+      `${connection.value.baseUrl}/api/settings/chat-key/test`,
+      {
+        method: "POST",
+        headers: { "x-launch-token": connection.value.token },
+      },
+      API_TIMEOUT_MS.providerTest,
+    );
+    const body = (await response.json()) as ChatProviderTestResult | ApiErrorBody;
+    if (!response.ok) {
+      const failure = body as ApiErrorBody;
+      throw new Error(
+        settingsErrorMessage(
+          failure.error?.code ?? "request_failed",
+          failure.error?.message ?? failure.detail ?? `HTTP ${response.status}`,
+        ),
+      );
+    }
+    const result = body as ChatProviderTestResult;
+    await loadModelSettings();
+    chatSettingsMessage.value =
+      result.status === "success"
+        ? `对话连接成功：${result.model_id}。`
+        : `对话连接失败：${result.message ?? "未知错误"}`;
+  } catch (error) {
+    chatSettingsError.value = String(error);
+  } finally {
+    chatSettingsBusy.value = false;
+  }
+}
+
+/** 删除已保存的对话 Key。 */
+async function deleteChatKey(): Promise<void> {
+  if (!connection.value || chatSettingsBusy.value) {
+    return;
+  }
+  chatSettingsBusy.value = true;
+  chatSettingsError.value = "";
+  chatSettingsMessage.value = "";
+  try {
+    const response = await fetchWithTimeout(
+      `${connection.value.baseUrl}/api/settings/chat-key/delete`,
+      {
+        method: "POST",
+        headers: { "x-launch-token": connection.value.token },
+      },
+      API_TIMEOUT_MS.quick,
+    );
+    const body = (await response.json()) as ModelSettingsResponse | ApiErrorBody;
+    if (!response.ok) {
+      const failure = body as ApiErrorBody;
+      throw new Error(
+        settingsErrorMessage(
+          failure.error?.code ?? "request_failed",
+          failure.error?.message ?? failure.detail ?? `HTTP ${response.status}`,
+        ),
+      );
+    }
+    modelSettings.value = body as ModelSettingsResponse;
+    chatSettingsMessage.value = "对话 Key 已删除。";
+  } catch (error) {
+    chatSettingsError.value = String(error);
+  } finally {
+    chatSettingsBusy.value = false;
   }
 }
 
@@ -763,14 +948,18 @@ async function resetWorkspace(): Promise<void> {
   resetError.value = "";
   resetMessage.value = "";
   try {
-    const response = await fetch(`${connection.value.baseUrl}/api/workspace/reset`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-launch-token": connection.value.token,
+    const response = await fetchWithTimeout(
+      `${connection.value.baseUrl}/api/workspace/reset`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-launch-token": connection.value.token,
+        },
+        body: JSON.stringify({ confirmation: resetConfirmation.value.trim() }),
       },
-      body: JSON.stringify({ confirmation: resetConfirmation.value.trim() }),
-    });
+      API_TIMEOUT_MS.maintenance,
+    );
     const body = (await response.json()) as ResetWorkspaceResponse | ApiErrorBody;
     if (!response.ok) {
       const failure = body as ApiErrorBody;
@@ -824,6 +1013,170 @@ function taskStatusLabel(status: BackgroundTaskStatus): string {
   return labels[status];
 }
 
+/** 把后端运行设置复制到可编辑表单。 */
+function applyRuntimeSettings(settings: RuntimeSettingsResponse): void {
+  runtimeSettings.value = settings;
+  runtimeSettingsForm.value = { ...settings };
+}
+
+/** 读取检索与 Agent 运行参数。 */
+async function loadRuntimeSettings(maxAttempts = 3): Promise<void> {
+  if (!connection.value) {
+    return;
+  }
+  let lastError: unknown;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      const response = await fetchWithTimeout(
+        `${connection.value.baseUrl}/api/settings/runtime`,
+        {
+          headers: { "x-launch-token": connection.value.token },
+          cache: "no-store",
+        },
+        API_TIMEOUT_MS.quick,
+      );
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      applyRuntimeSettings((await response.json()) as RuntimeSettingsResponse);
+      runtimeSettingsError.value = "";
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxAttempts - 1) {
+        await new Promise((resolve) =>
+          window.setTimeout(resolve, 250 * (attempt + 1)),
+        );
+      }
+    }
+  }
+  runtimeSettingsError.value = `读取运行设置失败：${String(lastError)}`;
+}
+
+/** 生成运行参数各字段的校验错误，并同步检查字段之间的预算关系。 */
+function validateRuntimeSettings(value: RuntimeSettingsResponse): RuntimeSettingsFieldErrors {
+  const errors: RuntimeSettingsFieldErrors = {
+    top_k: "",
+    max_output_tokens: "",
+    max_context_tokens: "",
+    max_request_tokens: "",
+    max_tool_calls: "",
+  };
+  if (!Number.isInteger(value.top_k) || value.top_k < 3 || value.top_k > 10) {
+    errors.top_k = "请输入 3–10 之间的整数。";
+  }
+  if (
+    !Number.isInteger(value.max_output_tokens) ||
+    value.max_output_tokens < 2048 ||
+    value.max_output_tokens > 384000
+  ) {
+    errors.max_output_tokens = "请输入 2,048–384,000 之间的整数。";
+  }
+  if (
+    !Number.isInteger(value.max_context_tokens) ||
+    value.max_context_tokens < 10000 ||
+    value.max_context_tokens > 1000000
+  ) {
+    errors.max_context_tokens = "请输入 10,000–1,000,000 之间的整数。";
+  }
+  if (
+    !Number.isInteger(value.max_request_tokens) ||
+    value.max_request_tokens < 10000
+  ) {
+    errors.max_request_tokens = "请输入不小于 10,000 的整数。";
+  } else if (
+    Number.isInteger(value.max_context_tokens) &&
+    value.max_request_tokens < value.max_context_tokens
+  ) {
+    errors.max_request_tokens = "请求累计预算不能小于单次上下文预算。";
+  }
+  if (
+    !Number.isInteger(value.max_tool_calls) ||
+    value.max_tool_calls < 1 ||
+    value.max_tool_calls > 20
+  ) {
+    errors.max_tool_calls = "请输入 1–20 之间的整数。";
+  }
+  if (
+    !errors.max_context_tokens &&
+    !errors.max_output_tokens &&
+    value.max_context_tokens + value.max_output_tokens > 1000000
+  ) {
+    errors.max_output_tokens = "上下文预算与输出预算合计不能超过 1,000,000。";
+  }
+  return errors;
+}
+
+/** 清除上次保存或请求错误，让字段即时校验成为唯一当前反馈。 */
+function clearRuntimeSettingsFeedback(): void {
+  runtimeSettingsError.value = "";
+  runtimeSettingsMessage.value = "";
+}
+
+/** 保存下一次问答使用的检索与 Agent 参数。 */
+async function saveRuntimeSettings(): Promise<void> {
+  if (!connection.value || runtimeSettingsBusy.value) {
+    return;
+  }
+  const firstValidationError = Object.values(runtimeSettingsFieldErrors.value).find(Boolean);
+  if (firstValidationError) {
+    runtimeSettingsError.value = firstValidationError;
+    runtimeSettingsMessage.value = "";
+    return;
+  }
+  runtimeSettingsBusy.value = true;
+  runtimeSettingsError.value = "";
+  runtimeSettingsMessage.value = "";
+  try {
+    const payload = {
+      top_k: runtimeSettingsForm.value.top_k,
+      max_output_tokens: runtimeSettingsForm.value.max_output_tokens,
+      max_context_tokens: runtimeSettingsForm.value.max_context_tokens,
+      max_request_tokens: runtimeSettingsForm.value.max_request_tokens,
+      max_tool_calls: runtimeSettingsForm.value.max_tool_calls,
+    };
+    const response = await fetchWithTimeout(
+      `${connection.value.baseUrl}/api/settings/runtime`,
+      {
+        method: "PUT",
+        headers: {
+          "content-type": "application/json",
+          "x-launch-token": connection.value.token,
+        },
+        body: JSON.stringify(payload),
+      },
+      API_TIMEOUT_MS.quick,
+    );
+    const body = (await response.json()) as RuntimeSettingsResponse | ApiErrorBody;
+    if (!response.ok) {
+      const failure = body as ApiErrorBody;
+      throw new Error(
+        failure.error?.message ?? failure.detail ?? `HTTP ${response.status}`,
+      );
+    }
+    applyRuntimeSettings(body as RuntimeSettingsResponse);
+    runtimeSettingsMessage.value = "运行设置已保存，将从下一次问答开始生效。";
+  } catch (error) {
+    runtimeSettingsError.value = String(error);
+  } finally {
+    runtimeSettingsBusy.value = false;
+  }
+}
+
+/** 把表单恢复为推荐默认值，用户仍需点击保存。 */
+function restoreRuntimeDefaults(): void {
+  runtimeSettingsForm.value = {
+    top_k: 5,
+    max_output_tokens: 8192,
+    max_context_tokens: 100000,
+    max_request_tokens: 400000,
+    max_tool_calls: 8,
+    updated_at: null,
+  };
+  runtimeSettingsError.value = "";
+  runtimeSettingsMessage.value = "已恢复推荐值，点击“保存运行设置”后生效。";
+}
+
 /** 把部分成功任务显示为独立语义，避免被“已完成”掩盖。 */
 function taskDisplayStatus(task: BackgroundTaskRecord): string {
   return task.status === "succeeded" && task.failed_sources > 0
@@ -869,12 +1222,13 @@ async function loadDocumentDetail(docId: string): Promise<void> {
   documentDetailLoading.value = true;
   documentDetailError.value = "";
   try {
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `${connection.value.baseUrl}/api/collections/current/documents/${encodeURIComponent(docId)}`,
       {
         headers: { "x-launch-token": connection.value.token },
         cache: "no-store",
       },
+      API_TIMEOUT_MS.quick,
     );
     const body = (await response.json()) as DocumentDetailResponse | ApiErrorBody;
     if (!response.ok) {
@@ -943,10 +1297,14 @@ async function loadCurrentCollection(): Promise<void> {
     return;
   }
   try {
-    const response = await fetch(`${connection.value.baseUrl}/api/collections/current`, {
-      headers: { "x-launch-token": connection.value.token },
-      cache: "no-store",
-    });
+    const response = await fetchWithTimeout(
+      `${connection.value.baseUrl}/api/collections/current`,
+      {
+        headers: { "x-launch-token": connection.value.token },
+        cache: "no-store",
+      },
+      API_TIMEOUT_MS.quick,
+    );
     if (response.ok) {
       currentCollection.value = (await response.json()) as CurrentCollectionResponse | null;
     }
@@ -963,10 +1321,14 @@ async function loadTaskHistory(): Promise<void> {
   }
   historyBusy.value = true;
   try {
-    const response = await fetch(`${connection.value.baseUrl}/api/tasks?limit=20`, {
-      headers: { "x-launch-token": connection.value.token },
-      cache: "no-store",
-    });
+    const response = await fetchWithTimeout(
+      `${connection.value.baseUrl}/api/tasks?limit=20`,
+      {
+        headers: { "x-launch-token": connection.value.token },
+        cache: "no-store",
+      },
+      API_TIMEOUT_MS.quick,
+    );
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
@@ -1076,14 +1438,18 @@ async function startBackgroundTask(): Promise<void> {
   taskBusy.value = true;
   taskError.value = "";
   try {
-    const response = await fetch(`${connection.value.baseUrl}/api/tasks/ingest`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-launch-token": connection.value.token,
+    const response = await fetchWithTimeout(
+      `${connection.value.baseUrl}/api/tasks/ingest`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-launch-token": connection.value.token,
+        },
+        body: JSON.stringify({ sources: taskSources.value }),
       },
-      body: JSON.stringify({ sources: taskSources.value }),
-    });
+      API_TIMEOUT_MS.quick,
+    );
     const body = (await response.json()) as BackgroundTaskRecord | ApiErrorBody;
     if (!response.ok) {
       const failure = body as ApiErrorBody;
@@ -1146,10 +1512,14 @@ async function loadActiveTasks(selectFallback = true): Promise<void> {
   if (!connection.value) {
     return;
   }
-  const response = await fetch(`${connection.value.baseUrl}/api/tasks/active`, {
-    headers: { "x-launch-token": connection.value.token },
-    cache: "no-store",
-  });
+  const response = await fetchWithTimeout(
+    `${connection.value.baseUrl}/api/tasks/active`,
+    {
+      headers: { "x-launch-token": connection.value.token },
+      cache: "no-store",
+    },
+    API_TIMEOUT_MS.quick,
+  );
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
   }
@@ -1194,17 +1564,19 @@ function adoptBackgroundTask(task: BackgroundTaskRecord): void {
 
 /** 轮询当前任务状态，完成或失败后自动停止。 */
 async function refreshBackgroundTask(): Promise<void> {
-  if (!connection.value || !backgroundTask.value) {
+  if (!connection.value || !backgroundTask.value || taskRefreshInFlight) {
     return;
   }
+  taskRefreshInFlight = true;
   try {
     const previousStatus = backgroundTask.value.status;
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `${connection.value.baseUrl}/api/tasks/${backgroundTask.value.task_id}`,
       {
         headers: { "x-launch-token": connection.value.token },
         cache: "no-store",
       },
+      API_TIMEOUT_MS.quick,
     );
     if (!response.ok) {
       return;
@@ -1246,6 +1618,8 @@ async function refreshBackgroundTask(): Promise<void> {
     }
   } catch {
     // 下一轮健康检查和轮询会继续尝试，不把瞬时网络错误变成任务失败。
+  } finally {
+    taskRefreshInFlight = false;
   }
 }
 
@@ -1291,12 +1665,13 @@ async function controlBackgroundTask(action: "pause" | "resume" | "cancel"): Pro
   taskBusy.value = true;
   taskError.value = "";
   try {
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `${connection.value.baseUrl}/api/tasks/${backgroundTask.value.task_id}/${action}`,
       {
         method: "POST",
         headers: { "x-launch-token": connection.value.token },
       },
+      API_TIMEOUT_MS.quick,
     );
     const body = (await response.json()) as BackgroundTaskRecord | ApiErrorBody;
     if (!response.ok) {
@@ -1326,12 +1701,13 @@ async function controlHistoryTask(
   taskError.value = "";
   historyError.value = "";
   try {
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `${connection.value.baseUrl}/api/tasks/${task.task_id}/${action}`,
       {
         method: "POST",
         headers: { "x-launch-token": connection.value.token },
       },
+      API_TIMEOUT_MS.quick,
     );
     const body = (await response.json()) as BackgroundTaskRecord | ApiErrorBody;
     if (!response.ok) {
@@ -1418,12 +1794,13 @@ async function controlQueueTask(
   taskBusy.value = true;
   taskError.value = "";
   try {
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `${connection.value.baseUrl}/api/tasks/${task.task_id}/${action}`,
       {
         method: "POST",
         headers: { "x-launch-token": connection.value.token },
       },
+      API_TIMEOUT_MS.quick,
     );
     const body = (await response.json()) as BackgroundTaskRecord | ApiErrorBody;
     if (!response.ok) {
@@ -1451,12 +1828,16 @@ async function checkRuntime(): Promise<void> {
   }
 
   try {
-    const response = await fetch(`${connection.value.baseUrl}/api/runtime`, {
-      headers: {
-        "x-launch-token": connection.value.token,
+    const response = await fetchWithTimeout(
+      `${connection.value.baseUrl}/api/runtime`,
+      {
+        headers: {
+          "x-launch-token": connection.value.token,
+        },
+        cache: "no-store",
       },
-      cache: "no-store",
-    });
+      API_TIMEOUT_MS.quick,
+    );
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
@@ -1465,6 +1846,7 @@ async function checkRuntime(): Promise<void> {
       message.value = "Tauri 已连接本地 Python sidecar。";
       if (!modelSettings.value && !settingsLoading.value) {
         void loadModelSettings(2);
+        void loadRuntimeSettings(2);
       }
     }
   } catch (error) {
@@ -1483,6 +1865,7 @@ async function connect(): Promise<void> {
     applyStatus(status);
     await checkRuntime();
     await loadModelSettings();
+    await loadRuntimeSettings();
     await loadCurrentCollection();
     try {
       await loadActiveTasks();
@@ -1537,17 +1920,21 @@ async function ingest(): Promise<void> {
   singleIngestTask.value = null;
   saveError.value = "";
   try {
-    const response = await fetch(`${connection.value.baseUrl}/api/ingest/preview`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-launch-token": connection.value.token,
+    const response = await fetchWithTimeout(
+      `${connection.value.baseUrl}/api/ingest/preview`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-launch-token": connection.value.token,
+        },
+        body: JSON.stringify({
+          source_kind: sourceKind.value,
+          source_value: sourceValue.value,
+        }),
       },
-      body: JSON.stringify({
-        source_kind: sourceKind.value,
-        source_value: sourceValue.value,
-      }),
-    });
+      API_TIMEOUT_MS.sourcePreview,
+    );
     const body = (await response.json()) as PreviewResponse | ApiErrorBody;
     if (!response.ok) {
       const failure = body as ApiErrorBody;
@@ -1572,14 +1959,18 @@ async function saveDocument(): Promise<void> {
   saving.value = true;
   saveError.value = "";
   try {
-    const response = await fetch(`${connection.value.baseUrl}/api/tasks/ingest/preview`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-launch-token": connection.value.token,
+    const response = await fetchWithTimeout(
+      `${connection.value.baseUrl}/api/tasks/ingest/preview`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-launch-token": connection.value.token,
+        },
+        body: JSON.stringify({ job_id: preview.value.job_id }),
       },
-      body: JSON.stringify({ job_id: preview.value.job_id }),
-    });
+      API_TIMEOUT_MS.quick,
+    );
     const body = (await response.json()) as BackgroundTaskRecord | ApiErrorBody;
     if (!response.ok) {
       const failure = body as ApiErrorBody;
@@ -1690,9 +2081,9 @@ onBeforeUnmount(() => {
           <strong>设置</strong>
           <small>
             {{
-              modelSettings?.embedding_configured
-                ? "embedding 已配置"
-                : "需要配置 embedding"
+              modelSettings?.embedding_configured && modelSettings?.chat_configured
+                ? "模型与问答已配置"
+                : "需要配置模型 Key"
             }}
           </small>
         </span>
@@ -1735,7 +2126,7 @@ onBeforeUnmount(() => {
         <button
           type="button"
           class="primary-button"
-          :disabled="settingsBusy || !embeddingKey.trim()"
+          :disabled="embeddingSettingsBusy || !embeddingKey.trim()"
           @click="saveEmbeddingKey"
         >
           保存 Key
@@ -1743,16 +2134,16 @@ onBeforeUnmount(() => {
         <button
           type="button"
           class="secondary-button settings-test-button"
-          :disabled="settingsBusy || !modelSettings?.embedding_configured"
+          :disabled="embeddingSettingsBusy || !modelSettings?.embedding_configured"
           @click="testEmbeddingKey"
         >
-          {{ settingsBusy ? "检查中…" : "测试连接" }}
+          {{ embeddingSettingsBusy ? "检查中…" : "测试连接" }}
         </button>
         <button
           v-if="modelSettings?.embedding_configured"
           type="button"
           class="danger-button"
-          :disabled="settingsBusy"
+          :disabled="embeddingSettingsBusy"
           @click="deleteEmbeddingKey"
         >
           删除 Key
@@ -1767,6 +2158,251 @@ onBeforeUnmount(() => {
       </div>
       <p v-if="settingsMessage" class="settings-message">{{ settingsMessage }}</p>
       <p v-if="settingsError" class="error-box">{{ settingsError }}</p>
+    </section>
+
+    <section v-if="activeSection === 'settings'" class="settings-card">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">CHAT MODEL</p>
+          <h2>连接问答模型</h2>
+        </div>
+        <span
+          class="settings-pill"
+          :class="{
+            configured: modelSettings?.chat_configured,
+            loading: settingsLoading,
+          }"
+        >
+          {{
+            settingsLoading
+              ? "读取中"
+              : modelSettings?.chat_configured
+                ? "已配置"
+                : "未配置"
+          }}
+        </span>
+      </div>
+      <p class="settings-description">
+        对话 Key 与 embedding Key 独立保存。它只发送问答上下文，不用于文档向量化。
+      </p>
+      <div class="settings-form">
+        <input
+          v-model="chatKey"
+          type="password"
+          autocomplete="off"
+          placeholder="输入新的 DeepSeek API Key"
+          @keyup.enter="saveChatKey"
+        />
+        <button
+          type="button"
+          class="primary-button"
+          :disabled="chatSettingsBusy || !chatKey.trim()"
+          @click="saveChatKey"
+        >
+          保存 Key
+        </button>
+        <button
+          type="button"
+          class="secondary-button settings-test-button"
+          :disabled="chatSettingsBusy || !modelSettings?.chat_configured"
+          @click="testChatKey"
+        >
+          {{ chatSettingsBusy ? "检查中…" : "测试连接" }}
+        </button>
+        <button
+          v-if="modelSettings?.chat_configured"
+          type="button"
+          class="danger-button"
+          :disabled="chatSettingsBusy"
+          @click="deleteChatKey"
+        >
+          删除 Key
+        </button>
+      </div>
+      <div v-if="modelSettings" class="settings-meta">
+        <span>模型：{{ modelSettings.chat_model_id }}</span>
+        <span>调用方式：OpenAI-compatible API</span>
+      </div>
+      <p v-if="chatSettingsMessage" class="settings-message">{{ chatSettingsMessage }}</p>
+      <p v-if="chatSettingsError" class="error-box">{{ chatSettingsError }}</p>
+    </section>
+
+    <section
+      v-if="activeSection === 'settings'"
+      class="settings-card runtime-settings-card"
+      @input="clearRuntimeSettingsFeedback"
+    >
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">ANSWER & RETRIEVAL</p>
+          <h2>问答与检索参数</h2>
+        </div>
+        <span class="settings-pill configured">下一次问答生效</span>
+      </div>
+      <p class="settings-description">
+        默认值适合大多数知识库。所有字段必须填写整数；上下文预算与最大输出合计不能超过
+        1,000,000。
+      </p>
+
+      <div class="settings-grid settings-grid-primary">
+        <label class="settings-field">
+          <span>每次检索返回片段数</span>
+          <input
+            id="runtime-top-k"
+            v-model.number="runtimeSettingsForm.top_k"
+            type="number"
+            min="3"
+            max="10"
+            step="1"
+            :aria-invalid="Boolean(runtimeSettingsFieldErrors.top_k)"
+            aria-describedby="runtime-top-k-range runtime-top-k-error"
+          />
+          <small id="runtime-top-k-range">
+            允许 3–10，推荐 5。增加可能提升覆盖，也会增加延迟、成本和无关内容。
+          </small>
+          <small
+            v-if="runtimeSettingsFieldErrors.top_k"
+            id="runtime-top-k-error"
+            class="settings-field-error"
+            aria-live="polite"
+          >
+            {{ runtimeSettingsFieldErrors.top_k }}
+          </small>
+        </label>
+        <label class="settings-field">
+          <span>单次回答最大输出 token</span>
+          <input
+            id="runtime-max-output"
+            v-model.number="runtimeSettingsForm.max_output_tokens"
+            type="number"
+            min="2048"
+            max="384000"
+            step="1024"
+            :aria-invalid="Boolean(runtimeSettingsFieldErrors.max_output_tokens)"
+            aria-describedby="runtime-max-output-range runtime-max-output-error"
+          />
+          <small id="runtime-max-output-range">
+            允许 2,048–384,000，推荐 8,192。过大会增加费用和等待时间。
+          </small>
+          <small
+            v-if="runtimeSettingsFieldErrors.max_output_tokens"
+            id="runtime-max-output-error"
+            class="settings-field-error"
+            aria-live="polite"
+          >
+            {{ runtimeSettingsFieldErrors.max_output_tokens }}
+          </small>
+        </label>
+      </div>
+
+      <details class="settings-advanced">
+        <summary>高级预算与工具限制</summary>
+        <p>
+          这些是保护性上限。调整前请确认理解上下文成本；保存后只影响下一次新问答。
+        </p>
+        <div class="settings-grid">
+          <label class="settings-field">
+            <span>单次上下文预算</span>
+            <input
+              id="runtime-max-context"
+              v-model.number="runtimeSettingsForm.max_context_tokens"
+              type="number"
+              min="10000"
+              max="1000000"
+              step="10000"
+              :aria-invalid="Boolean(runtimeSettingsFieldErrors.max_context_tokens)"
+              aria-describedby="runtime-max-context-range runtime-max-context-error"
+            />
+            <small id="runtime-max-context-range">
+              允许 10,000–1,000,000 的整数，推荐 100,000。
+            </small>
+            <small
+              v-if="runtimeSettingsFieldErrors.max_context_tokens"
+              id="runtime-max-context-error"
+              class="settings-field-error"
+              aria-live="polite"
+            >
+              {{ runtimeSettingsFieldErrors.max_context_tokens }}
+            </small>
+          </label>
+          <label class="settings-field">
+            <span>请求累计预算</span>
+            <input
+              id="runtime-max-request"
+              v-model.number="runtimeSettingsForm.max_request_tokens"
+              type="number"
+              min="10000"
+              step="10000"
+              :aria-invalid="Boolean(runtimeSettingsFieldErrors.max_request_tokens)"
+              aria-describedby="runtime-max-request-range runtime-max-request-error"
+            />
+            <small id="runtime-max-request-range">
+              允许 10,000 以上，推荐 400,000；不能小于单次上下文预算。
+            </small>
+            <small
+              v-if="runtimeSettingsFieldErrors.max_request_tokens"
+              id="runtime-max-request-error"
+              class="settings-field-error"
+              aria-live="polite"
+            >
+              {{ runtimeSettingsFieldErrors.max_request_tokens }}
+            </small>
+          </label>
+          <label class="settings-field">
+            <span>最大工具调用数</span>
+            <input
+              id="runtime-max-tool-calls"
+              v-model.number="runtimeSettingsForm.max_tool_calls"
+              type="number"
+              min="1"
+              max="20"
+              step="1"
+              :aria-invalid="Boolean(runtimeSettingsFieldErrors.max_tool_calls)"
+              aria-describedby="runtime-max-tool-calls-range runtime-max-tool-calls-error"
+            />
+            <small id="runtime-max-tool-calls-range">
+              允许 1–20 的整数，推荐 8。达到上限后停止检索并生成部分回答。
+            </small>
+            <small
+              v-if="runtimeSettingsFieldErrors.max_tool_calls"
+              id="runtime-max-tool-calls-error"
+              class="settings-field-error"
+              aria-live="polite"
+            >
+              {{ runtimeSettingsFieldErrors.max_tool_calls }}
+            </small>
+          </label>
+        </div>
+      </details>
+
+      <div class="settings-managed">
+        <div>
+          <strong>系统管理参数</strong>
+          <small>这些实现常数影响检索语义，暂不开放普通设置。</small>
+        </div>
+        <span>混合检索：dense + FTS</span>
+        <span>候选深度：20</span>
+        <span>RRF k：60</span>
+      </div>
+
+      <div class="settings-actions">
+        <button
+          type="button"
+          class="primary-button"
+          :disabled="runtimeSettingsBusy || runtimeSettingsHasErrors"
+          @click="saveRuntimeSettings"
+        >
+          {{ runtimeSettingsBusy ? "保存中…" : "保存运行设置" }}
+        </button>
+        <button type="button" class="secondary-button" :disabled="runtimeSettingsBusy" @click="restoreRuntimeDefaults">
+          恢复推荐值
+        </button>
+        <span v-if="runtimeSettings?.updated_at" class="settings-saved-at">
+          最近保存：{{ taskTimeLabel(runtimeSettings.updated_at) }}
+        </span>
+      </div>
+      <p v-if="runtimeSettingsMessage" class="settings-message">{{ runtimeSettingsMessage }}</p>
+      <p v-if="runtimeSettingsError" class="error-box">{{ runtimeSettingsError }}</p>
     </section>
 
     <section v-if="activeSection === 'settings'" class="reset-card">

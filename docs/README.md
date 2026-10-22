@@ -80,6 +80,8 @@
 - [016 · 检索确定性读取层（已完成）](development/slices/016-retrieval-read-layer.md)
 - [017 · 混合检索 search_blocks（已完成）](development/slices/017-hybrid-search.md)
 - [018 · Agent Runtime 主循环（已完成）](development/slices/018-agent-runtime-core.md)
+- [019 · Agent 与检索统一设置页（已完成）](development/slices/019-agent-settings.md)
+- [019 · Agent 与检索统一设置页人工验收清单（已完成）](development/manual-tests/019-agent-settings.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库

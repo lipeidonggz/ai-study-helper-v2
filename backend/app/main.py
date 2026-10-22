@@ -7,6 +7,7 @@ import secrets
 import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 
 import uvicorn
@@ -17,7 +18,7 @@ from pydantic import BaseModel
 
 from app import __version__
 from app.agent.models import AgentRunEvent, AgentRunRequest, AgentRunResponse
-from app.agent.runtime import AgentRuntime
+from app.agent.runtime import AgentRunConfig, AgentRuntime
 from app.collections.models import (
     CurrentCollectionResponse,
     PublishCollectionRequest,
@@ -40,13 +41,17 @@ from app.ingestion.service import IngestionService
 from app.ingestion.source import UrlFetcher
 from app.providers.chat import ChatProvider, DeepSeekChatProvider
 from app.providers.embeddings import DashScopeEmbeddingProvider, EmbeddingProvider
+from app.retrieval.hybrid import DEFAULT_HYBRID_RETRIEVAL_PROFILE
 from app.settings.models import (
     ChatProviderTestResult,
     ModelSettingsResponse,
     ProviderTestResult,
+    RuntimeSettingsPayload,
+    RuntimeSettingsResponse,
     SetChatKeyRequest,
     SetEmbeddingKeyRequest,
 )
+from app.settings.runtime_service import RuntimeSettingsService
 from app.settings.service import ModelSettingsService
 from app.storage.credentials import (
     CHAT_API_KEY_USERNAME,
@@ -146,6 +151,11 @@ def create_app(
         if resolved_data_root is not None and task_service is not None
         else None
     )
+    runtime_settings_service = (
+        RuntimeSettingsService(StorageDatabase(resolved_data_root))
+        if resolved_data_root is not None
+        else None
+    )
     document_detail_service = (
         DocumentDetailService(resolved_data_root, collection_service, task_service)
         if resolved_data_root is not None
@@ -177,7 +187,7 @@ def create_app(
         CORSMiddleware,
         allow_origins=ALLOWED_ORIGINS,
         allow_credentials=False,
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "PUT"],
         allow_headers=["content-type", "x-launch-token"],
     )
 
@@ -366,6 +376,40 @@ def create_app(
             )
         return model_settings_service.status()
 
+    @app.get(
+        "/api/settings/runtime",
+        response_model=RuntimeSettingsResponse,
+        dependencies=protected,
+    )
+    async def get_runtime_settings() -> RuntimeSettingsResponse:
+        """返回检索与 Agent 的可调运行参数。"""
+
+        if runtime_settings_service is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return runtime_settings_service.get()
+
+    @app.put(
+        "/api/settings/runtime",
+        response_model=RuntimeSettingsResponse,
+        dependencies=protected,
+    )
+    async def save_runtime_settings(
+        request: RuntimeSettingsPayload,
+    ) -> RuntimeSettingsResponse:
+        """校验并原子保存下一次问答使用的运行参数。"""
+
+        if runtime_settings_service is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return runtime_settings_service.save(request)
+
     @app.post(
         "/api/settings/embedding-key",
         response_model=ModelSettingsResponse,
@@ -494,6 +538,11 @@ def create_app(
                 "configure a chat API key before asking questions",
                 409,
             )
+        runtime_settings = (
+            runtime_settings_service.get()
+            if runtime_settings_service is not None
+            else RuntimeSettingsResponse()
+        )
         embedding_provider = (
             embedding_provider_factory()
             if embedding_provider_factory is not None
@@ -508,6 +557,16 @@ def create_app(
             resolved_data_root,
             chat_provider=chat_provider,
             embedding_provider=embedding_provider,
+            config=AgentRunConfig(
+                max_tool_calls=runtime_settings.max_tool_calls,
+                max_context_tokens=runtime_settings.max_context_tokens,
+                max_request_tokens=runtime_settings.max_request_tokens,
+                max_output_tokens=runtime_settings.max_output_tokens,
+            ),
+            retrieval_profile=replace(
+                DEFAULT_HYBRID_RETRIEVAL_PROFILE,
+                top_k=runtime_settings.top_k,
+            ),
         )
         result = await runtime.run(request.question)
         return AgentRunResponse(
