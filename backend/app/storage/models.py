@@ -12,6 +12,18 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def utc_iso(value: datetime) -> str:
+    """把持久化时间输出为带明确 UTC offset 的 ISO 字符串。
+
+    SQLite 不保存时区信息，SQLAlchemy 读回 ``DateTime(timezone=True)`` 时可能得到
+    不带 ``tzinfo`` 的 ``datetime``。系统写入时间始终使用 UTC，因此在存储边界按 UTC
+    补齐缺失时区，避免浏览器把 UTC 数值误判为用户本地时间。
+    """
+
+    normalized = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return normalized.astimezone(UTC).isoformat()
+
+
 class Base(DeclarativeBase):
     """SQLAlchemy 主数据库声明基类。"""
 

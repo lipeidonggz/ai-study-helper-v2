@@ -15,7 +15,7 @@ from app.documents.models import (
 from app.ingestion.errors import IngestFailure
 from app.ingestion.models import DocumentLanguage
 from app.storage.database import StorageDatabase
-from app.storage.models import DocumentVersionRow
+from app.storage.models import DocumentVersionRow, utc_iso
 from app.tasks.service import BackgroundTaskService
 
 
@@ -66,7 +66,7 @@ class DocumentDetailService:
                 language=cast(DocumentLanguage, row.language),
                 extractor_name=row.extractor_name,
                 extractor_version=row.extractor_version,
-                created_at=row.created_at.isoformat(),
+                created_at=utc_iso(row.created_at),
                 is_active=row.doc_version == persisted.version.doc_version,
             )
             for row in version_rows

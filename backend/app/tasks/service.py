@@ -19,7 +19,7 @@ from app.ingestion.models import (
 )
 from app.ingestion.service import IngestionService
 from app.storage.database import StorageDatabase
-from app.storage.models import utc_now
+from app.storage.models import utc_iso, utc_now
 from app.storage.task_models import IngestionTaskRow
 from app.tasks.models import (
     BackgroundIngestRequest,
@@ -613,9 +613,9 @@ class BackgroundTaskService:
             error_code=row.error_code,
             error_message=row.error_message,
             retryable=row.retryable,
-            created_at=row.created_at.isoformat(),
-            started_at=row.started_at.isoformat() if row.started_at else None,
-            finished_at=row.finished_at.isoformat() if row.finished_at else None,
+            created_at=utc_iso(row.created_at),
+            started_at=utc_iso(row.started_at) if row.started_at else None,
+            finished_at=utc_iso(row.finished_at) if row.finished_at else None,
         )
 
 

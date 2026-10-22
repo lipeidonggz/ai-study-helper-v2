@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import sqlite3
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -19,6 +20,12 @@ from app.providers.embeddings import FakeEmbeddingProvider
 from app.storage.database import StorageDatabase
 
 TOKEN = "collection-test-token"
+
+
+def _assert_utc_timestamp(value: str) -> None:
+    parsed = datetime.fromisoformat(value)
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset() == timedelta(0)
 
 
 def _html(title: str, body: str) -> bytes:
@@ -150,6 +157,9 @@ def test_publish_builds_self_contained_snapshot_and_pointer(tmp_path: Path) -> N
     assert pointer["snapshot_id"] == manifest["snapshot_id"]
     assert pointer["generation"] == 1
     assert record["result"] == "committed"
+    _assert_utc_timestamp(pointer["published_at"])
+    _assert_utc_timestamp(record["started_at"])
+    _assert_utc_timestamp(record["finished_at"])
 
     snapshot_root = tmp_path / "collections" / manifest["snapshot_id"]
     assert (snapshot_root / "manifest.json").is_file()
@@ -190,6 +200,7 @@ def test_publish_builds_self_contained_snapshot_and_pointer(tmp_path: Path) -> N
     assert current_status == 200
     assert current["pointer"]["snapshot_id"] == pointer["snapshot_id"]
     assert current["manifest"]["manifest_hash"] == manifest["manifest_hash"]
+    _assert_utc_timestamp(current["pointer"]["published_at"])
 
 
 def test_second_publish_increments_generation_and_keeps_previous(tmp_path: Path) -> None:

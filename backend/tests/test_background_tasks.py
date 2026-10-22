@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -14,6 +15,12 @@ from app.storage.task_models import IngestionTaskRow
 from app.tasks.service import BackgroundTaskService
 
 TOKEN = "background-task-test-token"
+
+
+def _assert_utc_timestamp(value: str) -> None:
+    parsed = datetime.fromisoformat(value)
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset() == timedelta(0)
 
 
 def _html(title: str) -> bytes:
@@ -112,6 +119,7 @@ def test_background_task_runs_pipeline_to_published_snapshot(tmp_path: Path) -> 
     assert task["failed_sources"] == 0
     assert task["snapshot_id"] is not None
     assert current["pointer"]["snapshot_id"] == task["snapshot_id"]
+    _assert_utc_timestamp(current["pointer"]["published_at"])
 
 
 def test_background_task_keeps_partial_success_when_one_source_fails(tmp_path: Path) -> None:
@@ -210,6 +218,9 @@ def test_successive_background_tasks_keep_both_batches_in_active_collection(
         second_task["task_id"],
         first_task["task_id"],
     ]
+    for task in history["history"]:
+        for field in ("created_at", "started_at", "finished_at"):
+            _assert_utc_timestamp(task[field])
 
     async def read_history_after_restart() -> list[dict]:
         app = create_app(

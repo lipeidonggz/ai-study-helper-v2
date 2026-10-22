@@ -73,6 +73,8 @@
 - [012 · 入库任务运行与恢复人工验收清单（已完成）](development/manual-tests/012-ingestion-task-runtime.md)
 - [013 · 入库工作台交互优化（已完成）](development/slices/013-ingestion-workbench-ux.md)
 - [013 · 入库工作台交互优化人工验收清单（已完成）](development/manual-tests/013-ingestion-workbench-ux.md)
+- [014 · 本地时间显示与 UTC 时间戳契约（已完成）](development/slices/014-local-time-timestamp-contract.md)
+- [014 · 本地时间显示人工验收清单（已完成）](development/manual-tests/014-local-time-timestamp-contract.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库
