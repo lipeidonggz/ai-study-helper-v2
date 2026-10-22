@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from app.ingestion.models import DocumentLanguage
@@ -104,3 +106,10 @@ class ScanTermResult(BaseModel):
     term: str
     matches: list[ScanMatch]
     count: int = Field(ge=0)
+
+
+class SearchBlocksResult(BaseModel):
+    """混合检索返回的 Top-N 候选块。"""
+
+    blocks: list[RetrievalBlock]
+    empty_reason: Literal["no_match", "scope_empty", "collection_empty"] | None = None

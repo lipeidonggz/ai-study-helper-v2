@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import math
 import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -15,7 +18,18 @@ from app.ingestion.models import (
     SectionRecord,
     SectionStats,
 )
+from app.providers.embeddings import (
+    EmbeddingProvider,
+    EmbeddingProviderError,
+    EmbeddingQueryResult,
+)
 from app.retrieval.errors import RetrievalFailure
+from app.retrieval.hybrid import (
+    DEFAULT_HYBRID_RETRIEVAL_PROFILE,
+    FusedCandidate,
+    HybridRetrievalProfile,
+    search_snapshot_index,
+)
 from app.retrieval.models import (
     GetOutlineResult,
     ListBlocksResult,
@@ -28,6 +42,7 @@ from app.retrieval.models import (
     RetrievalOutlineSection,
     ScanMatch,
     ScanTermResult,
+    SearchBlocksResult,
 )
 
 SCAN_SNIPPET_CONTEXT_CHARS = 80
@@ -73,6 +88,19 @@ class RetrievalReadService:
             current=current,
             snapshot_root=self._collections_root / current.manifest.snapshot_id,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class HybridSearchExecution:
+    """一次混合检索的 Agent payload 与内部诊断快照。"""
+
+    result: SearchBlocksResult
+    profile: HybridRetrievalProfile
+    query_request_id: str
+    query_input_tokens: int
+    dense_block_ids: tuple[str, ...]
+    keyword_block_ids: tuple[str, ...]
+    fused_candidates: tuple[FusedCandidate, ...]
 
 
 class RetrievalSnapshotReader:
@@ -272,6 +300,148 @@ class RetrievalSnapshotReader:
         matches = [match for _, match in matches_with_index]
         return ScanTermResult(term=normalized_term, matches=matches, count=len(matches))
 
+    async def search_blocks(
+        self,
+        query: str,
+        *,
+        provider: EmbeddingProvider,
+        doc_ids: list[str] | None = None,
+    ) -> SearchBlocksResult:
+        """执行固定快照上的 dense＋FTS 混合检索并返回 Top-5 块全文。"""
+
+        execution = await self.execute_search_blocks(
+            query,
+            provider=provider,
+            doc_ids=doc_ids,
+        )
+        return execution.result
+
+    async def execute_search_blocks(
+        self,
+        query: str,
+        *,
+        provider: EmbeddingProvider,
+        doc_ids: list[str] | None = None,
+        profile: HybridRetrievalProfile = DEFAULT_HYBRID_RETRIEVAL_PROFILE,
+    ) -> HybridSearchExecution:
+        """执行混合检索，并返回仅供后续 trace 使用的内部排名信息。"""
+
+        normalized_query = _required_non_empty(query, "query")
+        versions = self._current.manifest.versions
+        if versions is None:
+            raise RetrievalFailure(
+                "collection_unavailable",
+                "active collection has no embedding profile",
+            )
+        expected_profile = versions.embedding_profile
+        if (
+            provider.profile.provider != expected_profile.provider
+            or provider.profile.model_id != expected_profile.model_id
+            or provider.profile.dimension != expected_profile.dimension
+        ):
+            raise RetrievalFailure(
+                "collection_unavailable",
+                "query embedding provider does not match the active collection",
+            )
+
+        selected_ids = self._search_scope(doc_ids)
+        if not self._current.manifest.documents:
+            empty = SearchBlocksResult(blocks=[], empty_reason="collection_empty")
+            return HybridSearchExecution(
+                result=empty,
+                profile=profile,
+                query_request_id="",
+                query_input_tokens=0,
+                dense_block_ids=(),
+                keyword_block_ids=(),
+                fused_candidates=(),
+            )
+        if not any(self._documents_by_id[doc_id].block_count > 0 for doc_id in selected_ids):
+            empty = SearchBlocksResult(blocks=[], empty_reason="scope_empty")
+            return HybridSearchExecution(
+                result=empty,
+                profile=profile,
+                query_request_id="",
+                query_input_tokens=0,
+                dense_block_ids=(),
+                keyword_block_ids=(),
+                fused_candidates=(),
+            )
+
+        query_result = await _embed_query_with_retry(provider, normalized_query)
+        _validate_query_vector(query_result.vector, expected_profile.dimension)
+        expected_index_ref = f"collections/{self.snapshot_id}/index/lance"
+        if self._current.manifest.index_ref != expected_index_ref:
+            raise RetrievalFailure(
+                "snapshot_integrity_error",
+                "active collection index reference does not match snapshot",
+            )
+        candidates = search_snapshot_index(
+            self._snapshot_root,
+            query_vector=query_result.vector,
+            query=normalized_query,
+            doc_ids=selected_ids,
+            profile=profile,
+        )
+        if not candidates.fused:
+            return HybridSearchExecution(
+                result=SearchBlocksResult(blocks=[], empty_reason="no_match"),
+                profile=profile,
+                query_request_id=query_result.request_id,
+                query_input_tokens=query_result.input_tokens,
+                dense_block_ids=tuple(str(row["block_id"]) for row in candidates.dense_rows),
+                keyword_block_ids=tuple(str(row["block_id"]) for row in candidates.keyword_rows),
+                fused_candidates=(),
+            )
+
+        blocks: list[RetrievalBlock] = []
+        for candidate in candidates.fused[: profile.top_k]:
+            persisted = self._load_document(candidate.doc_id)
+            block = next(
+                (
+                    item
+                    for item in persisted.block_set.blocks
+                    if item.block_id == candidate.block_id
+                ),
+                None,
+            )
+            if block is None:
+                raise RetrievalFailure(
+                    "snapshot_integrity_error",
+                    f"index candidate is missing from document: {candidate.block_id}",
+                )
+            blocks.append(
+                RetrievalBlock(
+                    block_id=block.block_id,
+                    doc_id=candidate.doc_id,
+                    doc_title=persisted.document.title,
+                    source_label=persisted.document.source_label,
+                    section_path=block.section_path,
+                    text=block.text,
+                )
+            )
+        return HybridSearchExecution(
+            result=SearchBlocksResult(blocks=blocks),
+            profile=profile,
+            query_request_id=query_result.request_id,
+            query_input_tokens=query_result.input_tokens,
+            dense_block_ids=tuple(str(row["block_id"]) for row in candidates.dense_rows),
+            keyword_block_ids=tuple(str(row["block_id"]) for row in candidates.keyword_rows),
+            fused_candidates=candidates.fused,
+        )
+
+    def _search_scope(self, doc_ids: list[str] | None) -> tuple[str, ...]:
+        if doc_ids is None:
+            return tuple(document.doc_id for document in self._current.manifest.documents)
+        unique_ids = _deduplicate_non_empty(doc_ids, "doc_ids")
+        missing_ids = [doc_id for doc_id in unique_ids if doc_id not in self._documents_by_id]
+        if missing_ids:
+            raise RetrievalFailure(
+                "scope_not_found",
+                f"documents do not exist in the fixed snapshot: {', '.join(missing_ids)}",
+            )
+        return tuple(unique_ids)
+
     def _load_document(self, doc_id: str) -> IngestDocumentResponse:
         cached = self._document_cache.get(doc_id)
         if cached is not None:
@@ -421,6 +591,37 @@ def _deduplicate_non_empty(values: list[str], field_name: str) -> list[str]:
 
 def _fold_for_scan(value: str) -> str:
     return unicodedata.normalize("NFC", value).translate(_ASCII_FOLD_TABLE)
+
+
+async def _embed_query_with_retry(
+    provider: EmbeddingProvider,
+    query: str,
+) -> EmbeddingQueryResult:
+    for attempt in range(2):
+        try:
+            return await provider.embed_query(query)
+        except EmbeddingProviderError as error:
+            if not error.retryable or attempt == 1:
+                raise RetrievalFailure(
+                    "upstream_unavailable",
+                    error.message,
+                    retryable=error.retryable,
+                ) from error
+            delay = error.retry_after_seconds
+            await asyncio.sleep(0.25 if delay is None else min(delay, 5.0))
+    raise AssertionError("query embedding retry loop must return or raise")
+
+
+def _validate_query_vector(vector: list[float], dimension: int) -> None:
+    if (
+        len(vector) != dimension
+        or not all(math.isfinite(value) for value in vector)
+        or not any(value != 0 for value in vector)
+    ):
+        raise RetrievalFailure(
+            "upstream_unavailable",
+            "query embedding returned an invalid dense vector",
+        )
 
 
 def _snippet(text: str, start: int, end: int) -> str:
