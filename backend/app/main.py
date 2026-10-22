@@ -16,6 +16,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app import __version__
+from app.agent.models import AgentRunEvent, AgentRunRequest, AgentRunResponse
+from app.agent.runtime import AgentRuntime
 from app.collections.models import (
     CurrentCollectionResponse,
     PublishCollectionRequest,
@@ -36,14 +38,22 @@ from app.ingestion.models import (
 )
 from app.ingestion.service import IngestionService
 from app.ingestion.source import UrlFetcher
-from app.providers.embeddings import EmbeddingProvider
+from app.providers.chat import ChatProvider, DeepSeekChatProvider
+from app.providers.embeddings import DashScopeEmbeddingProvider, EmbeddingProvider
 from app.settings.models import (
+    ChatProviderTestResult,
     ModelSettingsResponse,
     ProviderTestResult,
+    SetChatKeyRequest,
     SetEmbeddingKeyRequest,
 )
 from app.settings.service import ModelSettingsService
-from app.storage.credentials import CredentialStore, WindowsCredentialStore
+from app.storage.credentials import (
+    CHAT_API_KEY_USERNAME,
+    EMBEDDING_API_KEY_USERNAME,
+    CredentialStore,
+    WindowsCredentialStore,
+)
 from app.storage.database import StorageDatabase
 from app.tasks.models import (
     BackgroundIngestRequest,
@@ -87,6 +97,7 @@ def create_app(
     embedding_provider_factory: Callable[[], EmbeddingProvider] | None = None,
     credential_store: CredentialStore | None = None,
     embedding_test_provider_factory: Callable[[str], EmbeddingProvider] | None = None,
+    chat_provider_factory: Callable[[str], ChatProvider] | None = None,
 ) -> FastAPI:
     """创建只监听本机、使用启动令牌保护写接口的 FastAPI 应用。"""
 
@@ -114,6 +125,7 @@ def create_app(
             StorageDatabase(resolved_data_root),
             resolved_credentials,
             embedding_test_provider_factory=embedding_test_provider_factory,
+            chat_provider_factory=chat_provider_factory,
         )
         if resolved_data_root is not None
         else None
@@ -403,6 +415,121 @@ def create_app(
                 503,
             )
         return await model_settings_service.test_embedding()
+
+    @app.post(
+        "/api/settings/chat-key",
+        response_model=ModelSettingsResponse,
+        dependencies=protected,
+    )
+    async def set_chat_key(
+        request: SetChatKeyRequest,
+    ) -> ModelSettingsResponse:
+        """安全保存独立对话 Key；响应不回传 Key。"""
+
+        if model_settings_service is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return model_settings_service.set_chat_key(request.api_key)
+
+    @app.post(
+        "/api/settings/chat-key/delete",
+        response_model=ModelSettingsResponse,
+        dependencies=protected,
+    )
+    async def delete_chat_key() -> ModelSettingsResponse:
+        """删除独立对话 Key。"""
+
+        if model_settings_service is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return model_settings_service.delete_chat_key()
+
+    @app.post(
+        "/api/settings/chat-key/test",
+        response_model=ChatProviderTestResult,
+        dependencies=protected,
+    )
+    async def test_chat_key() -> ChatProviderTestResult:
+        """使用已保存对话 Key 做一次最小真实补全检查。"""
+
+        if model_settings_service is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return await model_settings_service.test_chat()
+
+    @app.post(
+        "/api/agent/run",
+        response_model=AgentRunResponse,
+        dependencies=protected,
+    )
+    async def run_agent(request: AgentRunRequest) -> AgentRunResponse:
+        """执行一次非流式 Agent 单轮问答。"""
+
+        if resolved_data_root is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        embedding_key = resolved_credentials.get(EMBEDDING_API_KEY_USERNAME)
+        if not embedding_key:
+            raise IngestFailure(
+                "embedding_api_key_missing",
+                "configure an embedding API key before asking questions",
+                409,
+            )
+        chat_key = resolved_credentials.get(CHAT_API_KEY_USERNAME)
+        if not chat_key:
+            raise IngestFailure(
+                "chat_api_key_missing",
+                "configure a chat API key before asking questions",
+                409,
+            )
+        embedding_provider = (
+            embedding_provider_factory()
+            if embedding_provider_factory is not None
+            else DashScopeEmbeddingProvider(embedding_key)
+        )
+        chat_provider = (
+            chat_provider_factory(chat_key)
+            if chat_provider_factory is not None
+            else DeepSeekChatProvider(chat_key)
+        )
+        runtime = AgentRuntime(
+            resolved_data_root,
+            chat_provider=chat_provider,
+            embedding_provider=embedding_provider,
+        )
+        result = await runtime.run(request.question)
+        return AgentRunResponse(
+            status=result.status,
+            answer=result.answer,
+            answer_completeness=result.answer_completeness,
+            limitations=list(result.limitations),
+            termination_reason=result.termination_reason,
+            snapshot_id=result.snapshot_id,
+            prompt_bundle_version=result.prompt_bundle_version,
+            prompt_template_hash=result.prompt_template_hash,
+            observation_token_counter_version=result.observation_token_counter_version,
+            agent_turns=result.agent_turns,
+            tool_calls=result.tool_calls,
+            model_calls=result.model_calls,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            events=[
+                AgentRunEvent(event_type=event.event_type, payload=event.payload)
+                for event in result.events
+            ],
+        )
 
     @app.post(
         "/api/workspace/reset",

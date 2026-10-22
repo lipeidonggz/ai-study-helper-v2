@@ -9,7 +9,11 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from app.collections.models import CurrentCollectionResponse, SnapshotDocument
+from app.collections.models import (
+    CandidateSnapshotManifest,
+    CurrentCollectionResponse,
+    SnapshotDocument,
+)
 from app.collections.service import CollectionSnapshotService
 from app.ingestion.errors import IngestFailure
 from app.ingestion.models import (
@@ -135,6 +139,12 @@ class RetrievalSnapshotReader:
         """返回固定快照的完整性。"""
 
         return self._current.manifest.completeness
+
+    @property
+    def manifest(self) -> CandidateSnapshotManifest:
+        """返回 reader 固定的快照 manifest。"""
+
+        return self._current.manifest
 
     def list_documents(
         self,

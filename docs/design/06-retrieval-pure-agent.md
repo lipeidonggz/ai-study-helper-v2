@@ -113,7 +113,7 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 
 ### T1 list_documents
 
-**工具说明（给模型）**：列出知识库中的文档，可按来源、语言、标题片段筛选。当用户所指文档不明确，或需要先了解知识库有哪些文档时调用。来源和标题支持用户常用别名，但别名只用于定位，不改变文档的规范身份。
+**工具说明（给模型）**：列出知识库中的文档，可按来源、语言、标题片段筛选。当用户所指文档不明确，或需要先了解知识库有哪些文档时调用。来源支持用户常用别名，标题筛选只匹配规范标题；别名只用于定位，不改变文档的规范身份。
 
 **输入**：可选 `source?: string`／`lang?: "zh"｜"en"`／`title_contains?: string`<br> **调用示例**：`{"source":"OpenAI","lang":"en","title_contains":"Harness"}`<br> **输出**：`documents[]`（doc_id／title／source_label／aliases／lang／节数／块数）＋`total`<br> **返回示例**：`{"documents":[{"doc_id":"doc_o2","title":"Harness engineering","source_label":"OpenAI","aliases":["OpenAI Harness"],"lang":"en","sections":9,"blocks":24}],"total":1}`<br> **约束**：`source` 对规范 `source_label` 或别名做大小写不敏感匹配；`title_contains` 只匹配规范标题子串（大小写不敏感），不匹配正文；结果按 `source_label → title → doc_id` 升序，零结果不能推断"内容里没有"；**【质量属性·可靠性】**空库返回 `documents: []` 与 `total: 0`。
 

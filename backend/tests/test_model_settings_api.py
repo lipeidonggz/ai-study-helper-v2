@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 
 from app.main import create_app
+from app.providers.chat import FakeChatProvider
 from app.providers.embeddings import FakeEmbeddingProvider
 
 TOKEN = "model-settings-test-token"
@@ -34,6 +35,7 @@ def _app(tmp_path: Path, credentials: _MemoryCredentials):
         credential_store=credentials,
         embedding_provider_factory=FakeEmbeddingProvider,
         embedding_test_provider_factory=lambda _key: FakeEmbeddingProvider(),
+        chat_provider_factory=lambda _key: FakeChatProvider(["OK"]),
     )
 
 
@@ -110,3 +112,61 @@ def test_testing_without_key_returns_stable_error(tmp_path: Path) -> None:
     status_code, body = asyncio.run(run())
     assert status_code == 409
     assert body["error"]["code"] == "embedding_api_key_missing"
+
+
+def test_settings_save_test_and_delete_chat_key(tmp_path: Path) -> None:
+    credentials = _MemoryCredentials()
+    app = _app(tmp_path, credentials)
+
+    async def run() -> tuple[dict, dict, dict, dict]:
+        transport = httpx.ASGITransport(app=app)
+        headers = {"x-launch-token": TOKEN}
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            saved = await client.post(
+                "/api/settings/chat-key",
+                headers=headers,
+                json={"api_key": "chat-test-key"},
+            )
+            saved.raise_for_status()
+            tested = await client.post("/api/settings/chat-key/test", headers=headers)
+            tested.raise_for_status()
+            deleted = await client.post("/api/settings/chat-key/delete", headers=headers)
+            deleted.raise_for_status()
+            status = await client.get("/api/settings/models", headers=headers)
+            status.raise_for_status()
+            return saved.json(), tested.json(), deleted.json(), status.json()
+
+    saved, tested, deleted, status = asyncio.run(run())
+
+    assert saved["chat_configured"] is True
+    assert "chat-test-key" not in json.dumps(saved)
+    assert tested["status"] == "success"
+    assert tested["model_id"] == "fake-agent-chat"
+    assert deleted["chat_configured"] is False
+    assert status["chat_configured"] is False
+    assert credentials.values == {}
+
+
+def test_testing_chat_without_key_returns_stable_error(tmp_path: Path) -> None:
+    credentials = _MemoryCredentials()
+    app = _app(tmp_path, credentials)
+
+    async def run() -> tuple[int, dict]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            response = await client.post(
+                "/api/settings/chat-key/test",
+                headers={"x-launch-token": TOKEN},
+            )
+            return response.status_code, response.json()
+
+    status_code, body = asyncio.run(run())
+
+    assert status_code == 409
+    assert body["error"]["code"] == "chat_api_key_missing"

@@ -5,6 +5,12 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 from app.ingestion.errors import IngestFailure
+from app.providers.chat import (
+    ChatMessage,
+    ChatProvider,
+    ChatProviderError,
+    DeepSeekChatProvider,
+)
 from app.providers.embeddings import (
     QWEN_EMBEDDING_DIMENSION,
     QWEN_EMBEDDING_MODEL_ID,
@@ -12,7 +18,11 @@ from app.providers.embeddings import (
     EmbeddingProvider,
     EmbeddingProviderError,
 )
-from app.settings.models import ModelSettingsResponse, ProviderTestResult
+from app.settings.models import (
+    ChatProviderTestResult,
+    ModelSettingsResponse,
+    ProviderTestResult,
+)
 from app.storage.credentials import (
     CHAT_API_KEY_USERNAME,
     EMBEDDING_API_KEY_USERNAME,
@@ -31,11 +41,15 @@ class ModelSettingsService:
         credential_store: CredentialStore,
         *,
         embedding_test_provider_factory: Callable[[str], EmbeddingProvider] | None = None,
+        chat_provider_factory: Callable[[str], ChatProvider] | None = None,
     ) -> None:
         self._database = database
         self._credentials = credential_store
         self._provider_factory = embedding_test_provider_factory or (
             lambda key: DashScopeEmbeddingProvider(key)
+        )
+        self._chat_provider_factory = chat_provider_factory or (
+            lambda key: DeepSeekChatProvider(key)
         )
 
     def status(self) -> ModelSettingsResponse:
@@ -63,6 +77,18 @@ class ModelSettingsService:
 
         self._credentials.delete(EMBEDDING_API_KEY_USERNAME)
         self._clear_last_test()
+        return self.status()
+
+    def set_chat_key(self, api_key: str) -> ModelSettingsResponse:
+        """写入独立对话 Key；响应不回传 Key。"""
+
+        self._credentials.set(CHAT_API_KEY_USERNAME, api_key)
+        return self.status()
+
+    def delete_chat_key(self) -> ModelSettingsResponse:
+        """删除独立对话 Key。"""
+
+        self._credentials.delete(CHAT_API_KEY_USERNAME)
         return self.status()
 
     async def test_embedding(self) -> ProviderTestResult:
@@ -108,6 +134,52 @@ class ModelSettingsService:
             dimension=provider.profile.dimension,
             request_id=result.request_id,
             input_tokens=result.input_tokens,
+            message=None,
+            tested_at=tested_at,
+        )
+
+    async def test_chat(self) -> ChatProviderTestResult:
+        """使用已保存对话 Key 发起一次最小真实补全检查。"""
+
+        api_key = self._credentials.get(CHAT_API_KEY_USERNAME)
+        if not api_key:
+            raise IngestFailure(
+                "chat_api_key_missing",
+                "configure a chat API key before testing connectivity",
+                409,
+            )
+        provider = self._chat_provider_factory(api_key)
+        tested_at = datetime.now(UTC).isoformat()
+        try:
+            result = await provider.complete(
+                [
+                    ChatMessage(
+                        role="user",
+                        content="这是连通性测试。只回复 OK，不要输出其他内容。",
+                    )
+                ],
+                max_output_tokens=256,
+            )
+        except ChatProviderError as error:
+            return ChatProviderTestResult(
+                status="failed",
+                model_id=provider.profile.model_id,
+                message=error.message,
+                tested_at=tested_at,
+            )
+        except Exception as error:
+            return ChatProviderTestResult(
+                status="failed",
+                model_id=provider.profile.model_id,
+                message=f"chat test failed: {type(error).__name__}",
+                tested_at=tested_at,
+            )
+        return ChatProviderTestResult(
+            status="success",
+            model_id=result.actual_model_id,
+            request_id=result.request_id or None,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
             message=None,
             tested_at=tested_at,
         )
