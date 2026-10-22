@@ -27,7 +27,7 @@ input {
 .shell {
   width: min(920px, calc(100% - 48px));
   margin: 0 auto;
-  padding: 72px 0;
+  padding: 34px 0 64px;
 }
 
 .hero {
@@ -172,7 +172,7 @@ input {
 @media (max-width: 720px) {
   .shell {
     width: min(100% - 28px, 920px);
-    padding: 42px 0;
+    padding: 28px 0 48px;
   }
 
   .status-card,
@@ -196,15 +196,17 @@ input {
 
 .hero {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
   max-width: none;
   gap: 32px;
 }
 
 .hero h1 {
-  margin-bottom: 0;
-  font-size: clamp(2.8rem, 6vw, 5rem);
+  margin: 9px 0 0;
+  font-size: clamp(1.8rem, 3.4vw, 2.8rem);
+  letter-spacing: -0.035em;
+  line-height: 1.08;
 }
 
 .backend-chip {
@@ -236,7 +238,7 @@ input {
 .main-nav {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  margin-top: 36px;
+  margin-top: 20px;
   overflow: hidden;
   border: 1px solid rgba(37, 71, 50, 0.16);
   border-radius: 18px;
@@ -482,15 +484,61 @@ input {
   background: #dcefe1;
 }
 
+.task-partial {
+  color: #8a5e11;
+  background: #fff0cb;
+}
+
+.task-queued {
+  color: #526257;
+  background: #e5ece3;
+}
+
 .task-failed,
 .task-canceled {
   color: #8d3030;
   background: #fff0f0;
 }
 
+.task-workspace {
+  display: grid;
+  grid-template-columns: minmax(300px, 0.42fr) minmax(0, 0.58fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.task-composer,
+.task-monitor {
+  min-width: 0;
+  border: 1px solid rgba(37, 71, 50, 0.11);
+  border-radius: 14px;
+  padding: 16px;
+  background: rgba(247, 250, 246, 0.72);
+}
+
+.panel-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.panel-heading h3 {
+  margin: 4px 0 0;
+  color: #24402d;
+  font-size: 1.05rem;
+}
+
+.panel-heading > span {
+  color: #758277;
+  font-size: 0.74rem;
+}
+
 .task-source-actions {
   display: flex;
-  align-items: center;
+  align-items: stretch;
+  flex-direction: column;
   gap: 10px;
 }
 
@@ -591,8 +639,87 @@ input {
   margin-top: 18px;
 }
 
+.active-task-queue {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.active-task-queue-item {
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  color: inherit;
+  background: #f1f5ef;
+}
+
+.active-task-queue-item:hover,
+.active-task-queue-item.selected {
+  border-color: #9fbaa5;
+  background: #e7f0e4;
+}
+
+.queue-task-select {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: 0;
+  padding: 10px 12px;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.queue-position {
+  display: grid;
+  min-width: 32px;
+  height: 24px;
+  place-items: center;
+  border-radius: 999px;
+  padding: 0 6px;
+  color: #3d6b4b;
+  background: #d9e8d8;
+  font-family: Consolas, monospace;
+  font-size: 0.66rem;
+  font-weight: 700;
+}
+
+.queue-task-main {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.queue-task-main small {
+  overflow: hidden;
+  color: #728076;
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-task-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  border-top: 1px solid rgba(37, 71, 50, 0.09);
+  padding: 8px 12px;
+}
+
+.queue-task-actions .secondary-button,
+.queue-task-actions .danger-button {
+  margin-top: 0;
+  padding: 6px 10px;
+  font-size: 0.74rem;
+}
+
 .task-progress {
-  margin-top: 20px;
+  margin-top: 16px;
   border-top: 1px solid rgba(37, 71, 50, 0.12);
   padding-top: 18px;
 }
@@ -627,6 +754,20 @@ input {
   border-radius: inherit;
   background: #3d8155;
   transition: width 250ms ease;
+}
+
+.task-current-source {
+  margin: 8px 0 0;
+  overflow: hidden;
+  color: #596d5f;
+  font-family: Consolas, monospace;
+  font-size: 0.74rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-progress-track.has-failures span {
+  background: #b07b19;
 }
 
 .task-controls {
@@ -783,6 +924,19 @@ input {
 
 .history-list details {
   margin-top: 10px;
+}
+
+.history-actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.history-actions-row .secondary-button,
+.history-actions-row .danger-button {
+  margin-top: 0;
 }
 
 .history-list summary {
@@ -1509,6 +1663,19 @@ input {
 
   .knowledge-documents small {
     flex: 1 1 auto;
+  }
+
+  .task-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .queue-task-select {
+    grid-template-columns: 38px minmax(0, 1fr);
+  }
+
+  .queue-task-select .task-status-pill {
+    grid-column: 2;
+    justify-self: start;
   }
 
   .empty-state {

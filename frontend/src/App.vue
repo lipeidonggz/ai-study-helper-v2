@@ -312,6 +312,8 @@ const settingsMessage = ref("");
 const taskUrl = ref("");
 const taskSources = ref<BackgroundSource[]>([]);
 const backgroundTask = ref<BackgroundTaskRecord | null>(null);
+const activeTasks = ref<BackgroundTaskRecord[]>([]);
+const selectedTaskId = ref<string | null>(null);
 const currentCollection = ref<CurrentCollectionResponse | null>(null);
 const taskHistory = ref<BackgroundTaskRecord[]>([]);
 const historyBusy = ref(false);
@@ -410,7 +412,7 @@ const canIngest = computed(
     !ingesting.value,
 );
 
-/** 单篇入库要求预览成功、embedding 可用且当前没有活动任务。 */
+/** 单篇入库要求预览成功、embedding 可用且当前没有保存请求。 */
 const canSave = computed(
   () =>
     managerStatus.value === "running" &&
@@ -419,10 +421,6 @@ const canSave = computed(
     modelSettings.value?.embedding_configured === true &&
     (!singleIngestTask.value ||
       ["failed", "canceled", "interrupted"].includes(singleIngestTask.value.status)) &&
-    !(
-      backgroundTask.value &&
-      ["queued", "running", "paused"].includes(backgroundTask.value.status)
-    ) &&
     !saving.value,
 );
 
@@ -432,22 +430,46 @@ const canStartTask = computed(
     managerStatus.value === "running" &&
     modelSettings.value?.embedding_configured === true &&
     taskSources.value.length > 0 &&
-    !taskBusy.value &&
-    (!backgroundTask.value ||
-      ["succeeded", "failed", "canceled"].includes(backgroundTask.value.status)),
+    !taskBusy.value,
 );
 
-/** 后台任务是否正在运行或等待暂停。 */
-const taskIsActive = computed(
+/** 当前展开的任务是否仍可暂停或取消。 */
+const selectedTaskCanControl = computed(
   () =>
     backgroundTask.value !== null &&
-    ["queued", "running", "paused"].includes(backgroundTask.value.status),
+    ["queued", "running", "paused", "interrupted"].includes(backgroundTask.value.status),
 );
 
-/** 只有没有活动任务且确认短语完全匹配时才允许执行全量清空。 */
+/** 是否存在正在执行或等待执行的任务。 */
+const hasExecutableTasks = computed(() =>
+  activeTasks.value.some((task) =>
+    ["queued", "running"].includes(task.status),
+  ),
+);
+
+/** 入库导航中的队列摘要。 */
+const taskQueueSummary = computed(() => {
+  if (activeTasks.value.length === 0) {
+    return "添加新文章";
+  }
+  const running = activeTasks.value.filter((task) => task.status === "running").length;
+  const queued = activeTasks.value.filter((task) => task.status === "queued").length;
+  const interrupted = activeTasks.value.filter(
+    (task) => task.status === "interrupted",
+  ).length;
+  if (running || queued) {
+    return `${running} 运行中 · ${queued} 排队`;
+  }
+  if (interrupted) {
+    return `${interrupted} 个任务已中断`;
+  }
+  return `${activeTasks.value.length} 个任务待处理`;
+});
+
+/** 只有没有 queued／running 任务且确认短语完全匹配时才允许执行全量清空。 */
 const canConfirmReset = computed(
   () =>
-    !taskIsActive.value &&
+    !hasExecutableTasks.value &&
     !resetBusy.value &&
     resetConfirmation.value.trim() === "清空知识库",
 );
@@ -770,6 +792,8 @@ async function resetWorkspace(): Promise<void> {
     documentDetailError.value = "";
     taskHistory.value = [];
     backgroundTask.value = null;
+    activeTasks.value = [];
+    selectedTaskId.value = null;
     taskSources.value = [];
     taskUrl.value = "";
     preview.value = null;
@@ -798,6 +822,32 @@ function taskStatusLabel(status: BackgroundTaskStatus): string {
     interrupted: "已中断",
   };
   return labels[status];
+}
+
+/** 把部分成功任务显示为独立语义，避免被“已完成”掩盖。 */
+function taskDisplayStatus(task: BackgroundTaskRecord): string {
+  return task.status === "succeeded" && task.failed_sources > 0
+    ? "部分入库"
+    : taskStatusLabel(task.status);
+}
+
+/** 为部分成功任务使用独立状态色，其余沿用任务状态色。 */
+function taskStatusClass(task: BackgroundTaskRecord): string {
+  return task.status === "succeeded" && task.failed_sources > 0
+    ? "task-partial"
+    : `task-${task.status}`;
+}
+
+/** 把任务控制失败转换成用户可操作的中文说明。 */
+function taskControlErrorMessage(code: string, detail: string): string {
+  const labels: Record<string, string> = {
+    task_not_found: "任务不存在，可能已经被清理。",
+    task_not_resumable: "任务当前状态不允许恢复。",
+    task_control_invalid: "任务状态已经变化，请刷新操作记录后重试。",
+  };
+  return labels[code]
+    ? `${labels[code]}（错误码：${code}）`
+    : `${detail}（错误码：${code}）`;
 }
 
 /** 把后台阶段转换成用户可读标签。 */
@@ -830,7 +880,10 @@ async function loadDocumentDetail(docId: string): Promise<void> {
     if (!response.ok) {
       const failure = body as ApiErrorBody;
       throw new Error(
-        failure.error?.message ?? failure.detail ?? `HTTP ${response.status}`,
+        taskControlErrorMessage(
+          failure.error?.code ?? "request_failed",
+          failure.error?.message ?? failure.detail ?? `HTTP ${response.status}`,
+        ),
       );
     }
     documentDetail.value = body as DocumentDetailResponse;
@@ -1035,11 +1088,15 @@ async function startBackgroundTask(): Promise<void> {
     if (!response.ok) {
       const failure = body as ApiErrorBody;
       throw new Error(
-        failure.error?.message ?? failure.detail ?? `HTTP ${response.status}`,
+        taskControlErrorMessage(
+          failure.error?.code ?? "request_failed",
+          failure.error?.message ?? failure.detail ?? `HTTP ${response.status}`,
+        ),
       );
     }
-    backgroundTask.value = body as BackgroundTaskRecord;
-    beginTaskPolling();
+    adoptBackgroundTask(body as BackgroundTaskRecord);
+    taskSources.value = [];
+    taskUrl.value = "";
     void loadTaskHistory();
   } catch (error) {
     taskError.value = `启动后台任务失败：${String(error)}`;
@@ -1058,12 +1115,90 @@ function syncSingleIngestTask(): void {
   }
 }
 
+/** 判断任务是否仍属于持久队列。 */
+function isActiveQueueTask(task: BackgroundTaskRecord): boolean {
+  return ["queued", "running", "paused", "interrupted"].includes(task.status);
+}
+
+/** 在活动任务列表中新增或替换同 ID 记录。 */
+function upsertActiveTask(task: BackgroundTaskRecord): void {
+  const index = activeTasks.value.findIndex((item) => item.task_id === task.task_id);
+  if (!isActiveQueueTask(task)) {
+    if (index >= 0) {
+      activeTasks.value.splice(index, 1);
+    }
+    return;
+  }
+  if (index >= 0) {
+    activeTasks.value.splice(index, 1, task);
+  } else {
+    activeTasks.value.push(task);
+  }
+}
+
+/** 选中队列中的一个任务，展示其详细进度和控制按钮。 */
+function selectActiveTask(task: BackgroundTaskRecord): void {
+  adoptBackgroundTask(task);
+}
+
+/** 读取持久任务队列；首次加载时优先选择 running，其次 queued。 */
+async function loadActiveTasks(selectFallback = true): Promise<void> {
+  if (!connection.value) {
+    return;
+  }
+  const response = await fetch(`${connection.value.baseUrl}/api/tasks/active`, {
+    headers: { "x-launch-token": connection.value.token },
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  const tasks = (await response.json()) as BackgroundTaskRecord[];
+  activeTasks.value = tasks;
+  if (selectedTaskId.value) {
+    const selected = tasks.find((task) => task.task_id === selectedTaskId.value);
+    if (selected) {
+      backgroundTask.value = selected;
+      syncSingleIngestTask();
+      return;
+    }
+  }
+  if (!selectFallback || tasks.length === 0) {
+    return;
+  }
+  const preferred =
+    tasks.find((task) => task.status === "running") ??
+    tasks.find((task) => task.status === "queued") ??
+    tasks[0];
+  adoptBackgroundTask(preferred);
+}
+
+/** 将任务设为当前观察对象，并只对仍可能变化的非终态继续轮询。 */
+function adoptBackgroundTask(task: BackgroundTaskRecord): void {
+  backgroundTask.value = task;
+  selectedTaskId.value = task.task_id;
+  upsertActiveTask(task);
+  syncSingleIngestTask();
+  if (
+    ["queued", "running"].includes(task.status) ||
+    activeTasks.value.some((item) => ["queued", "running"].includes(item.status))
+  ) {
+    beginTaskPolling();
+    return;
+  }
+  if (taskTimer !== undefined) {
+    window.clearInterval(taskTimer);
+    taskTimer = undefined;
+  }
+}
+
 /** 轮询当前任务状态，完成或失败后自动停止。 */
 async function refreshBackgroundTask(): Promise<void> {
   if (!connection.value || !backgroundTask.value) {
     return;
   }
   try {
+    const previousStatus = backgroundTask.value.status;
     const response = await fetch(
       `${connection.value.baseUrl}/api/tasks/${backgroundTask.value.task_id}`,
       {
@@ -1074,23 +1209,39 @@ async function refreshBackgroundTask(): Promise<void> {
     if (!response.ok) {
       return;
     }
-    backgroundTask.value = (await response.json()) as BackgroundTaskRecord;
+    const nextTask = (await response.json()) as BackgroundTaskRecord;
+    backgroundTask.value = nextTask;
+    upsertActiveTask(nextTask);
     syncSingleIngestTask();
-    if (["succeeded", "failed", "canceled"].includes(backgroundTask.value.status)) {
-      if (taskTimer !== undefined) {
-        window.clearInterval(taskTimer);
-        taskTimer = undefined;
-      }
-      if (backgroundTask.value.status === "succeeded") {
+    try {
+      await loadActiveTasks(false);
+    } catch {
+      // 队列摘要的瞬时读取失败不覆盖已经成功读取的单任务状态。
+    }
+    const becameTerminal =
+      !["succeeded", "failed", "canceled"].includes(previousStatus) &&
+      ["succeeded", "failed", "canceled"].includes(nextTask.status);
+    if (becameTerminal) {
+      await loadTaskHistory();
+      if (nextTask.status === "succeeded") {
         await Promise.all([
           loadCurrentCollection(),
-          loadTaskHistory(),
           ...(activeDocumentId.value
             ? [loadDocumentDetail(activeDocumentId.value)]
             : []),
         ]);
-      } else {
-        await loadTaskHistory();
+      }
+    }
+    const mustContinuePolling = activeTasks.value.some((task) =>
+      ["queued", "running"].includes(task.status),
+    );
+    if (
+      !mustContinuePolling &&
+      ["succeeded", "failed", "canceled"].includes(nextTask.status)
+    ) {
+      if (taskTimer !== undefined) {
+        window.clearInterval(taskTimer);
+        taskTimer = undefined;
       }
     }
   } catch {
@@ -1154,9 +1305,138 @@ async function controlBackgroundTask(action: "pause" | "resume" | "cancel"): Pro
         failure.error?.message ?? failure.detail ?? `HTTP ${response.status}`,
       );
     }
-    backgroundTask.value = body as BackgroundTaskRecord;
-    syncSingleIngestTask();
-    beginTaskPolling();
+    adoptBackgroundTask(body as BackgroundTaskRecord);
+    await loadTaskHistory();
+  } catch (error) {
+    taskError.value = `任务控制失败：${String(error)}`;
+  } finally {
+    taskBusy.value = false;
+  }
+}
+
+/** 从操作记录恢复或取消指定任务，并把恢复任务设为当前观察对象。 */
+async function controlHistoryTask(
+  task: BackgroundTaskRecord,
+  action: "resume" | "cancel",
+): Promise<void> {
+  if (!connection.value || taskBusy.value) {
+    return;
+  }
+  taskBusy.value = true;
+  taskError.value = "";
+  historyError.value = "";
+  try {
+    const response = await fetch(
+      `${connection.value.baseUrl}/api/tasks/${task.task_id}/${action}`,
+      {
+        method: "POST",
+        headers: { "x-launch-token": connection.value.token },
+      },
+    );
+    const body = (await response.json()) as BackgroundTaskRecord | ApiErrorBody;
+    if (!response.ok) {
+      const failure = body as ApiErrorBody;
+      throw new Error(
+        taskControlErrorMessage(
+          failure.error?.code ?? "request_failed",
+          failure.error?.message ?? failure.detail ?? `HTTP ${response.status}`,
+        ),
+      );
+    }
+    adoptBackgroundTask(body as BackgroundTaskRecord);
+    await loadTaskHistory();
+    if (action === "resume") {
+      ingestMode.value = "batch";
+      selectSection("ingest");
+    }
+  } catch (error) {
+    const message = `任务控制失败：${String(error)}`;
+    taskError.value = message;
+    historyError.value = message;
+  } finally {
+    taskBusy.value = false;
+  }
+}
+
+/** 判断历史任务是否允许恢复。 */
+function taskCanResume(task: BackgroundTaskRecord): boolean {
+  return ["paused", "interrupted"].includes(task.status);
+}
+
+/** 判断任务是否允许暂停；queued 任务只需取消，不需要暂停。 */
+function taskCanPause(task: BackgroundTaskRecord): boolean {
+  return task.status === "running";
+}
+
+/** 判断历史任务是否允许取消。 */
+function taskCanCancel(task: BackgroundTaskRecord): boolean {
+  return ["queued", "running", "paused", "interrupted"].includes(task.status);
+}
+
+/** 返回任务在 queued 队列中的真实位置；非排队任务返回 null。 */
+function taskQueuePosition(task: BackgroundTaskRecord): number | null {
+  if (task.status !== "queued") {
+    return null;
+  }
+  const queuedTasks = activeTasks.value.filter((item) => item.status === "queued");
+  const index = queuedTasks.findIndex((item) => item.task_id === task.task_id);
+  return index >= 0 ? index + 1 : null;
+}
+
+/** 返回当前任务正在处理的来源名，避免长时间阶段只显示一个比例。 */
+function currentTaskSourceLabel(task: BackgroundTaskRecord): string {
+  if (task.status !== "running" || task.next_source_index >= task.sources.length) {
+    return "";
+  }
+  return task.sources[task.next_source_index].source_value;
+}
+
+/** 计算任务从开始到现在的本地耗时，不预测无依据的剩余时间。 */
+function taskElapsedLabel(task: BackgroundTaskRecord): string {
+  if (!task.started_at) {
+    return "";
+  }
+  const startedAt = new Date(task.started_at).getTime();
+  const endedAt = task.finished_at ? new Date(task.finished_at).getTime() : Date.now();
+  if (Number.isNaN(startedAt) || Number.isNaN(endedAt) || endedAt < startedAt) {
+    return "";
+  }
+  const totalSeconds = Math.floor((endedAt - startedAt) / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+/** 从任务队列直接执行暂停、恢复或取消，并选中该任务显示详情。 */
+async function controlQueueTask(
+  task: BackgroundTaskRecord,
+  action: "pause" | "resume" | "cancel",
+): Promise<void> {
+  if (!connection.value || taskBusy.value) {
+    return;
+  }
+  taskBusy.value = true;
+  taskError.value = "";
+  try {
+    const response = await fetch(
+      `${connection.value.baseUrl}/api/tasks/${task.task_id}/${action}`,
+      {
+        method: "POST",
+        headers: { "x-launch-token": connection.value.token },
+      },
+    );
+    const body = (await response.json()) as BackgroundTaskRecord | ApiErrorBody;
+    if (!response.ok) {
+      const failure = body as ApiErrorBody;
+      throw new Error(
+        taskControlErrorMessage(
+          failure.error?.code ?? "request_failed",
+          failure.error?.message ?? failure.detail ?? `HTTP ${response.status}`,
+        ),
+      );
+    }
+    adoptBackgroundTask(body as BackgroundTaskRecord);
+    await loadTaskHistory();
   } catch (error) {
     taskError.value = `任务控制失败：${String(error)}`;
   } finally {
@@ -1204,6 +1484,11 @@ async function connect(): Promise<void> {
     await checkRuntime();
     await loadModelSettings();
     await loadCurrentCollection();
+    try {
+      await loadActiveTasks();
+    } catch (error) {
+      taskError.value = `读取任务队列失败：${String(error)}`;
+    }
     await loadTaskHistory();
     if (activeDocumentId.value) {
       await loadDocumentDetail(activeDocumentId.value);
@@ -1303,8 +1588,7 @@ async function saveDocument(): Promise<void> {
       throw new Error(ingestErrorMessage(code, detail));
     }
     singleIngestTask.value = body as BackgroundTaskRecord;
-    backgroundTask.value = body as BackgroundTaskRecord;
-    beginTaskPolling();
+    adoptBackgroundTask(body as BackgroundTaskRecord);
     await loadTaskHistory();
     ingestMode.value = "batch";
   } catch (error) {
@@ -1347,7 +1631,7 @@ onBeforeUnmount(() => {
     <header class="hero">
       <div>
         <p class="eyebrow">AI STUDY HELPER V2</p>
-        <h1>从文档出发，<br />把问题学明白。</h1>
+        <h1>从文档出发，把问题学明白。</h1>
       </div>
       <div class="backend-chip">
         <span class="status-dot" :class="stateClass" aria-hidden="true"></span>
@@ -1380,7 +1664,7 @@ onBeforeUnmount(() => {
         <span class="nav-index">02</span>
         <span>
           <strong>入库</strong>
-          <small>{{ taskIsActive ? "任务进行中" : "添加新文章" }}</small>
+          <small>{{ taskQueueSummary }}</small>
         </span>
       </button>
       <button
@@ -1496,14 +1780,14 @@ onBeforeUnmount(() => {
         清空文章、文档版本、入库任务、操作记录、collection 快照、索引、job artifacts
         和数据库备份。embedding Key、模型设置和应用配置会保留。
       </p>
-      <p v-if="taskIsActive" class="reset-warning">
+      <p v-if="hasExecutableTasks" class="reset-warning">
         当前有后台入库任务，请先等待任务结束或取消任务后再清空。
       </p>
       <button
         v-if="!resetDialogOpen"
         type="button"
         class="danger-button reset-open-button"
-        :disabled="taskIsActive"
+        :disabled="hasExecutableTasks"
         @click="openResetDialog"
       >
         清空知识库
@@ -1571,116 +1855,228 @@ onBeforeUnmount(() => {
           <p class="eyebrow">BACKGROUND INGESTION</p>
           <h2>批量入库工作台</h2>
         </div>
-        <span v-if="backgroundTask" class="task-status-pill" :class="`task-${backgroundTask.status}`">
-          {{ taskStatusLabel(backgroundTask.status) }}
+        <span v-if="activeTasks.length" class="task-status-pill task-queued">
+          {{ taskQueueSummary }}
         </span>
       </div>
       <p class="settings-description">
-        将多个来源加入队列，后台会依次执行解析、保存、embedding、建索引，并在完成后自动发布 collection。
+        每个批次加入持久任务队列，后台按顺序执行解析、保存、embedding、建索引和 collection 发布。
       </p>
 
-      <div class="task-source-actions">
-        <button type="button" class="secondary-button" @click="addTaskFiles">
-          添加 HTML 文件
-        </button>
-        <div class="task-url-row">
-          <input
-            v-model="taskUrl"
-            type="url"
-            placeholder="添加公开网页 URL"
-            @keyup.enter="addTaskUrl"
-          />
-          <button type="button" class="secondary-button" @click="addTaskUrl">
-            添加 URL
-          </button>
-        </div>
-      </div>
+      <div class="task-workspace">
+        <section class="task-composer">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">NEW BATCH</p>
+              <h3>新建批次</h3>
+            </div>
+            <span>{{ taskSources.length }} 个来源</span>
+          </div>
 
-      <ol v-if="taskSources.length" class="task-source-list">
-        <li v-for="(source, index) in taskSources" :key="`${source.source_kind}-${source.source_value}`">
-          <span class="source-kind">{{ source.source_kind === "file" ? "文件" : "URL" }}</span>
-          <span class="task-source-value">{{ source.source_value }}</span>
-          <button type="button" class="remove-source" @click="removeTaskSource(index)">
-            移除
-          </button>
-        </li>
-      </ol>
-      <p v-else class="empty-queue">还没有待入库来源。</p>
+          <div class="task-source-actions">
+            <button type="button" class="secondary-button" @click="addTaskFiles">
+              添加 HTML 文件
+            </button>
+            <div class="task-url-row">
+              <input
+                v-model="taskUrl"
+                type="url"
+                placeholder="添加公开网页 URL"
+                @keyup.enter="addTaskUrl"
+              />
+              <button type="button" class="secondary-button" @click="addTaskUrl">
+                添加 URL
+              </button>
+            </div>
+          </div>
 
-      <div class="task-actions">
-        <button
-          type="button"
-          class="primary-button"
-          :disabled="!canStartTask"
-          @click="startBackgroundTask"
-        >
-          {{ taskBusy && !taskIsActive ? "正在启动…" : "开始后台入库" }}
-        </button>
-        <span v-if="!modelSettings?.embedding_configured" class="task-hint">
-          请先配置 embedding Key。
-          <button type="button" class="inline-link" @click="selectSection('settings')">
-            去设置
-          </button>
-        </span>
-      </div>
-      <p v-if="taskError" class="error-box">{{ taskError }}</p>
+          <ol v-if="taskSources.length" class="task-source-list">
+            <li
+              v-for="(source, index) in taskSources"
+              :key="`${source.source_kind}-${source.source_value}`"
+            >
+              <span class="source-kind">{{ source.source_kind === "file" ? "文件" : "URL" }}</span>
+              <span class="task-source-value">{{ source.source_value }}</span>
+              <button type="button" class="remove-source" @click="removeTaskSource(index)">
+                移除
+              </button>
+            </li>
+          </ol>
+          <p v-else class="empty-queue">还没有待入库来源。</p>
 
-      <div v-if="backgroundTask" class="task-progress">
-        <div class="task-progress-head">
-          <strong>{{ taskStageLabel(backgroundTask.stage) }}</strong>
-          <span>
-            {{ backgroundTask.completed_sources }} / {{ backgroundTask.total_sources }}
-            {{ backgroundTask.failed_sources ? `· ${backgroundTask.failed_sources} 个失败` : "" }}
-          </span>
-        </div>
-        <div class="task-progress-track">
-          <span
-            :style="{
-              width: `${backgroundTask.total_sources
-                ? (backgroundTask.completed_sources / backgroundTask.total_sources) * 100
-                : 0}%`,
-            }"
-          ></span>
-        </div>
-        <div class="task-controls">
-          <button
-            v-if="['queued', 'running'].includes(backgroundTask.status)"
-            type="button"
-            class="secondary-button"
-            :disabled="taskBusy"
-            @click="pauseBackgroundTask"
-          >
-            暂停
-          </button>
-          <button
-            v-if="['paused', 'interrupted'].includes(backgroundTask.status)"
-            type="button"
-            class="primary-button"
-            :disabled="taskBusy"
-            @click="resumeBackgroundTask"
-          >
-            恢复
-          </button>
-          <button
-            v-if="taskIsActive"
-            type="button"
-            class="danger-button"
-            :disabled="taskBusy"
-            @click="cancelBackgroundTask"
-          >
-            取消
-          </button>
-          <span v-if="backgroundTask.snapshot_id" class="task-snapshot">
-            已发布：{{ backgroundTask.snapshot_id }}
-          </span>
-        </div>
-        <ul v-if="backgroundTask.failures.length" class="task-failures">
-          <li v-for="failure in backgroundTask.failures" :key="failure.source_index">
-            来源 {{ failure.source_index + 1 }}：{{
-              ingestErrorMessage(failure.code, failure.message)
-            }}
-          </li>
-        </ul>
+          <div class="task-actions">
+            <button
+              type="button"
+              class="primary-button"
+              :disabled="!canStartTask"
+              @click="startBackgroundTask"
+            >
+              {{ taskBusy ? "正在加入…" : "加入任务队列" }}
+            </button>
+            <span v-if="!modelSettings?.embedding_configured" class="task-hint">
+              请先配置 embedding Key。
+              <button type="button" class="inline-link" @click="selectSection('settings')">
+                去设置
+              </button>
+            </span>
+          </div>
+          <p v-if="taskError" class="error-box">{{ taskError }}</p>
+        </section>
+
+        <section class="task-monitor">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">TASK QUEUE</p>
+              <h3>任务队列</h3>
+            </div>
+            <span>{{ activeTasks.length }} 个非终态任务</span>
+          </div>
+
+          <p v-if="!activeTasks.length && !backgroundTask" class="empty-queue">
+            新提交的批次会显示在这里。
+          </p>
+
+          <ol v-if="activeTasks.length" class="active-task-queue">
+            <li v-for="task in activeTasks" :key="task.task_id">
+              <div
+                class="active-task-queue-item"
+                :class="{ selected: selectedTaskId === task.task_id }"
+              >
+                <button
+                  type="button"
+                  class="queue-task-select"
+                  @click="selectActiveTask(task)"
+                >
+                  <span class="queue-position">
+                    {{
+                      task.status === "queued"
+                        ? `Q${taskQueuePosition(task) ?? "-"}`
+                        : task.status === "running"
+                          ? "运行"
+                          : task.status === "paused"
+                            ? "暂停"
+                            : "中断"
+                    }}
+                  </span>
+                  <span class="queue-task-main">
+                    <strong>
+                      {{
+                        currentTaskSourceLabel(task) ||
+                        `${task.total_sources} 个来源`
+                      }}
+                    </strong>
+                    <small>
+                      {{ taskStageLabel(task.stage) }} ·
+                      已完成 {{ task.completed_sources }} / {{ task.total_sources }}
+                      <template v-if="taskElapsedLabel(task)">
+                        · 已用 {{ taskElapsedLabel(task) }}
+                      </template>
+                    </small>
+                  </span>
+                  <span class="task-status-pill" :class="taskStatusClass(task)">
+                    {{ taskDisplayStatus(task) }}
+                  </span>
+                </button>
+                <div class="queue-task-actions">
+                  <button
+                    v-if="taskCanPause(task)"
+                    type="button"
+                    class="secondary-button"
+                    :disabled="taskBusy"
+                    @click="controlQueueTask(task, 'pause')"
+                  >
+                    暂停
+                  </button>
+                  <button
+                    v-if="taskCanResume(task)"
+                    type="button"
+                    class="secondary-button"
+                    :disabled="taskBusy"
+                    @click="controlQueueTask(task, 'resume')"
+                  >
+                    恢复
+                  </button>
+                  <button
+                    v-if="taskCanCancel(task)"
+                    type="button"
+                    class="danger-button"
+                    :disabled="taskBusy"
+                    @click="controlQueueTask(task, 'cancel')"
+                  >
+                    取消
+                  </button>
+                </div>
+              </div>
+            </li>
+          </ol>
+
+          <div v-if="backgroundTask" class="task-progress">
+            <div class="task-progress-head">
+              <strong>{{ taskDisplayStatus(backgroundTask) }}</strong>
+              <span>
+                {{ backgroundTask.completed_sources }} / {{ backgroundTask.total_sources }}
+                {{ backgroundTask.failed_sources ? `· ${backgroundTask.failed_sources} 个失败` : "" }}
+              </span>
+            </div>
+            <p v-if="currentTaskSourceLabel(backgroundTask)" class="task-current-source">
+              正在处理：{{ currentTaskSourceLabel(backgroundTask) }}
+              <template v-if="taskElapsedLabel(backgroundTask)">
+                · 已用 {{ taskElapsedLabel(backgroundTask) }}
+              </template>
+            </p>
+            <div
+              class="task-progress-track"
+              :class="{ 'has-failures': backgroundTask.failed_sources > 0 }"
+            >
+              <span
+                :style="{
+                  width: `${backgroundTask.total_sources
+                    ? (backgroundTask.completed_sources / backgroundTask.total_sources) * 100
+                    : 0}%`,
+                }"
+              ></span>
+            </div>
+            <div class="task-controls">
+              <button
+                v-if="backgroundTask.status === 'running'"
+                type="button"
+                class="secondary-button"
+                :disabled="taskBusy"
+                @click="pauseBackgroundTask"
+              >
+                暂停
+              </button>
+              <button
+                v-if="['paused', 'interrupted'].includes(backgroundTask.status)"
+                type="button"
+                class="primary-button"
+                :disabled="taskBusy"
+                @click="resumeBackgroundTask"
+              >
+                恢复
+              </button>
+              <button
+                v-if="selectedTaskCanControl"
+                type="button"
+                class="danger-button"
+                :disabled="taskBusy"
+                @click="cancelBackgroundTask"
+              >
+                取消
+              </button>
+              <span v-if="backgroundTask.snapshot_id" class="task-snapshot">
+                已发布：{{ backgroundTask.snapshot_id }}
+              </span>
+            </div>
+            <ul v-if="backgroundTask.failures.length" class="task-failures">
+              <li v-for="failure in backgroundTask.failures" :key="failure.source_index">
+                来源 {{ failure.source_index + 1 }}：{{
+                  ingestErrorMessage(failure.code, failure.message)
+                }}
+              </li>
+            </ul>
+          </div>
+        </section>
       </div>
 
       <div v-if="currentCollection" class="collection-summary">
@@ -1983,13 +2379,33 @@ onBeforeUnmount(() => {
                 <template v-if="task.failed_sources"> · 失败 {{ task.failed_sources }} 个</template>
               </span>
             </div>
-            <span class="task-status-pill" :class="`task-${task.status}`">
-              {{
-                task.failed_sources && task.status === "succeeded"
-                  ? "部分入库"
-                  : taskStatusLabel(task.status)
-              }}
+            <span class="task-status-pill" :class="taskStatusClass(task)">
+              {{ taskDisplayStatus(task) }}
             </span>
+          </div>
+          <div
+            v-if="taskCanResume(task) || taskCanCancel(task)"
+            class="history-actions-row"
+          >
+            <button
+              v-if="taskCanResume(task)"
+              type="button"
+              class="secondary-button"
+              :disabled="taskBusy"
+              @click="controlHistoryTask(task, 'resume')"
+            >
+              恢复
+            </button>
+            <button
+              v-if="taskCanCancel(task)"
+              type="button"
+              class="danger-button"
+              :disabled="taskBusy"
+              @click="controlHistoryTask(task, 'cancel')"
+            >
+              取消
+            </button>
+            <span class="task-snapshot">{{ taskStageLabel(task.stage) }}</span>
           </div>
           <details>
             <summary>查看来源和处理结果</summary>

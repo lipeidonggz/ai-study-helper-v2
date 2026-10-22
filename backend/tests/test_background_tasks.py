@@ -32,6 +32,23 @@ class _SlowProvider(FakeEmbeddingProvider):
         return await super().embed_documents(texts)
 
 
+class _TrackingProvider(FakeEmbeddingProvider):
+    active_calls = 0
+    max_active_calls = 0
+
+    async def embed_documents(self, texts: list[str]) -> EmbeddingBatchResult:
+        type(self).active_calls += 1
+        type(self).max_active_calls = max(
+            type(self).max_active_calls,
+            type(self).active_calls,
+        )
+        try:
+            await asyncio.sleep(0.2)
+            return await super().embed_documents(texts)
+        finally:
+            type(self).active_calls -= 1
+
+
 async def _wait_for_terminal(
     client: httpx.AsyncClient,
     headers: dict[str, str],
@@ -217,6 +234,82 @@ def test_successive_background_tasks_keep_both_batches_in_active_collection(
         second_task["task_id"],
         first_task["task_id"],
     ]
+
+
+def test_concurrent_submissions_are_executed_by_one_serial_worker(
+    tmp_path: Path,
+) -> None:
+    first_path = tmp_path / "serial-first.html"
+    second_path = tmp_path / "serial-second.html"
+    first_path.write_bytes(_html("Serial first"))
+    second_path.write_bytes(_html("Serial second"))
+    _TrackingProvider.active_calls = 0
+    _TrackingProvider.max_active_calls = 0
+
+    async def run() -> tuple[dict, dict, list[set[str]]]:
+        app = create_app(
+            TOKEN,
+            data_root=tmp_path,
+            embedding_provider_factory=_TrackingProvider,
+        )
+        transport = httpx.ASGITransport(app=app)
+        headers = {"x-launch-token": TOKEN}
+        observed_running: list[set[str]] = []
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            tasks: list[dict] = []
+            for path in (first_path, second_path):
+                created = await client.post(
+                    "/api/tasks/ingest",
+                    headers=headers,
+                    json={"sources": [{"source_kind": "file", "source_value": str(path)}]},
+                )
+                created.raise_for_status()
+                tasks.append(created.json())
+
+            first_task_id = tasks[0]["task_id"]
+            second_task_id = tasks[1]["task_id"]
+            assert tasks[1]["status"] == "queued"
+            active = await client.get("/api/tasks/active", headers=headers)
+            active.raise_for_status()
+            assert {task["task_id"] for task in active.json()} == {
+                first_task_id,
+                second_task_id,
+            }
+            while True:
+                listed = await client.get("/api/tasks?limit=20", headers=headers)
+                listed.raise_for_status()
+                history = listed.json()
+                running_ids = {task["task_id"] for task in history if task["status"] == "running"}
+                observed_running.append(running_ids)
+                statuses = {task["task_id"]: task["status"] for task in history}
+                if statuses.get(first_task_id) == "queued":
+                    await asyncio.sleep(0.02)
+                    continue
+                if statuses.get(second_task_id) == "running":
+                    break
+                if statuses.get(first_task_id) in {"succeeded", "failed"} and statuses.get(
+                    second_task_id
+                ) in {"succeeded", "failed"}:
+                    break
+                await asyncio.sleep(0.02)
+
+            first = await _wait_for_terminal(client, headers, first_task_id)
+            second = await _wait_for_terminal(client, headers, second_task_id)
+            active_after = await client.get("/api/tasks/active", headers=headers)
+            active_after.raise_for_status()
+            assert active_after.json() == []
+            return first, second, observed_running
+
+    first, second, observed_running = asyncio.run(run())
+
+    assert first["status"] == "succeeded"
+    assert second["status"] == "succeeded"
+    assert first["started_at"] <= second["started_at"]
+    assert _TrackingProvider.max_active_calls == 1
+    assert all(len(running_ids) <= 1 for running_ids in observed_running)
 
 
 def test_preview_job_can_be_published_through_task_history(tmp_path: Path) -> None:

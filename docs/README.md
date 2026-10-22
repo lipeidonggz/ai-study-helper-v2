@@ -69,6 +69,10 @@
 - [010 · 入库工作台人工验收清单（待补充）](development/manual-tests/010-ingestion-workbench.md)
 - [011 · 文档详情页（已完成）](development/slices/011-document-detail.md)
 - [011 · 文档详情页人工验收清单（待验收）](development/manual-tests/011-document-detail.md)
+- [012 · 入库任务串行执行与中断恢复（已完成）](development/slices/012-ingestion-task-runtime.md)
+- [012 · 入库任务运行与恢复人工验收清单（已完成）](development/manual-tests/012-ingestion-task-runtime.md)
+- [013 · 入库工作台交互优化（已完成）](development/slices/013-ingestion-workbench-ux.md)
+- [013 · 入库工作台交互优化人工验收清单（已完成）](development/manual-tests/013-ingestion-workbench-ux.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库
