@@ -75,6 +75,7 @@
 - [013 · 入库工作台交互优化人工验收清单（已完成）](development/manual-tests/013-ingestion-workbench-ux.md)
 - [014 · 本地时间显示与 UTC 时间戳契约（已完成）](development/slices/014-local-time-timestamp-contract.md)
 - [014 · 本地时间显示人工验收清单（已完成）](development/manual-tests/014-local-time-timestamp-contract.md)
+- [015 · GitHub 后台交付与失败可见性（待确认）](development/slices/015-background-delivery.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库

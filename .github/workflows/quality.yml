@@ -2,6 +2,8 @@ name: 质量检查
 
 on:
   push:
+    branches:
+      - main
   pull_request:
 
 jobs:
@@ -42,5 +44,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
       - run: pnpm install --frozen-lockfile
       - run: pnpm --dir desktop check
