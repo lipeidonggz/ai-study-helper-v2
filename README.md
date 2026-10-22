@@ -58,6 +58,17 @@ corepack pnpm check
 corepack pnpm backend:test
 ```
 
+创建 PR 后可在后台观察 required checks 并开启 auto-merge：
+
+```powershell
+backend\.venv\Scripts\python.exe scripts\watch_github_delivery.py `
+  --pr <PR编号> `
+  --enable-auto-merge
+```
+
+结果原子写入 `backend/.runtime/delivery-status.json`。退出码：
+`0=已合并`、`1=失败`、`2=超时`。watcher 不保存 GitHub token。
+
 sidecar 开发日志写入 `backend/.runtime/sidecar.log`，Vite 日志写入 `frontend/.runtime/`；两个运行目录都不进入版本控制。
 
 构建 PyInstaller sidecar 与 release 桌面二进制：
