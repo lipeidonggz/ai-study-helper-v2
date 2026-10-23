@@ -49,6 +49,15 @@ class _AttemptOutcome:
     model_calls: int
 
 
+@dataclass(slots=True)
+class _RunningAttempt:
+    """执行中的 attempt 预算与所属 case。"""
+
+    reservation: _BudgetReservation
+    attempt_id: str
+    case_revision_id: str
+
+
 class _RunBudget:
     """在并发 attempt 间原子预留 token 与模型请求额度。"""
 
@@ -198,7 +207,7 @@ class EvaluationRunner:
         # Runtime 对每次模型调用最多做两次供应商尝试；预留上限必须覆盖
         # 工具轮次、最终回答和这些确定性重试，否则并发会突破请求硬预算。
         per_attempt_requests = 2 * (settings.max_tool_calls + 1)
-        running: dict[asyncio.Task[_AttemptOutcome], _BudgetReservation] = {}
+        running: dict[asyncio.Task[_AttemptOutcome], _RunningAttempt] = {}
         consecutive_upstream_failures = 0
         self._repository.set_run_status(run_id, "running", started=True)
 
@@ -211,8 +220,13 @@ class EvaluationRunner:
                         running.clear()
                     self._repository.set_run_status(run_id, "canceled")
                     return
-                deficits = self._case_deficits(plan, current)
-                if not deficits:
+                running_case_counts = Counter(item.case_revision_id for item in running.values())
+                deficits = self._case_deficits(
+                    plan,
+                    current,
+                    running_case_counts,
+                )
+                if not deficits and not running:
                     self._repository.set_run_status(
                         run_id,
                         "sealed_complete",
@@ -249,7 +263,14 @@ class EvaluationRunner:
 
                 while len(running) < concurrency and not self._pause_requested:
                     current = self._repository.get_run(run_id)
-                    deficits = self._case_deficits(plan, current)
+                    running_case_counts = Counter(
+                        item.case_revision_id for item in running.values()
+                    )
+                    deficits = self._case_deficits(
+                        plan,
+                        current,
+                        running_case_counts,
+                    )
                     if not deficits:
                         break
                     if current.totals["attempts"] >= max_attempts:
@@ -288,7 +309,11 @@ class EvaluationRunner:
                         ),
                         name=f"evaluation-attempt-{attempt_id}",
                     )
-                    running[task] = reservation
+                    running[task] = _RunningAttempt(
+                        reservation=reservation,
+                        attempt_id=attempt_id,
+                        case_revision_id=case.case_revision_id,
+                    )
 
                 if not running:
                     continue
@@ -297,7 +322,8 @@ class EvaluationRunner:
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 for completed in done:
-                    reservation = running.pop(completed)
+                    running_attempt = running.pop(completed)
+                    reservation = running_attempt.reservation
                     try:
                         outcome = completed.result()
                     except Exception:
@@ -379,6 +405,24 @@ class EvaluationRunner:
                 ),
                 timeout=timeout_seconds,
             )
+        except asyncio.CancelledError:
+            self._repository.finish_attempt(
+                attempt_id,
+                execution_status="outcome_unknown",
+                trace_id=None,
+                trace_status="missing",
+                outcome_class="unknown",
+                termination_reason="evaluation_attempt_cancelled",
+                error_code="evaluation_attempt_cancelled",
+                answer=None,
+                input_tokens=0,
+                output_tokens=0,
+                model_calls=0,
+                tool_calls=0,
+                first_token_at=first_token_at,
+                usage={"error_type": "CancelledError"},
+            )
+            raise
         except Exception as error:
             error_code = _error_code(error)
             self._repository.finish_attempt(
@@ -443,13 +487,22 @@ class EvaluationRunner:
         )
 
     @staticmethod
-    def _case_deficits(plan: ExecutionPlanView, run: RunView) -> list[PlanCaseView]:
+    def _case_deficits(
+        plan: ExecutionPlanView,
+        run: RunView,
+        running_case_counts: Counter[str],
+    ) -> list[PlanCaseView]:
         valid_counts = Counter(
             attempt.case_revision_id
             for attempt in run.attempts
             if is_product_sample(attempt.outcome_class)
         )
-        return [case for case in plan.cases if valid_counts[case.case_revision_id] < case.n]
+        return [
+            case
+            for case in plan.cases
+            if valid_counts[case.case_revision_id] + running_case_counts[case.case_revision_id]
+            < case.n
+        ]
 
     @staticmethod
     def _replacement_parent(run: RunView, case: PlanCaseView) -> str | None:

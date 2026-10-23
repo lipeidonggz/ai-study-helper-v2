@@ -30,7 +30,7 @@ def test_evaluation_api_exposes_seeded_suite_without_product_routes(
         ) as client:
             health = await client.get("/api/eval/health")
             assert health.status_code == 200
-            assert health.json()["schema_version"] == 4
+            assert health.json()["schema_version"] == 5
             assert (await client.get("/api/eval/suites")).status_code == 401
             preflight = await client.options(
                 "/api/eval/cases/c1-001/draft",

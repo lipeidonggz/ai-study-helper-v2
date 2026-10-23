@@ -42,8 +42,12 @@ from app.retrieval.service import RetrievalFailure, RetrievalReadService, Retrie
 from app.tracing.models import TraceMode, TraceStatus
 from app.tracing.store import TraceSession, TraceSpanHandle, TraceStore, new_trace_id
 
-AGENT_LOOP_VERSION = "react-langgraph-v1"
+AGENT_LOOP_VERSION = "react-langgraph-v2"
 HISTORY_ASSISTANT_WRAPPER = "Assistant response:\n"
+PROTOCOL_ERROR_ASSISTANT_PLACEHOLDER = (
+    "[本次模型响应格式错误，原文已由 Harness 省略。"
+    "请重新按协议输出一个 Thought 和一个 Action，不得编造 Observation。]"
+)
 _PARTIAL_ANSWER_NOTICE = "**内容未完**：本次回答因运行预算限制提前结束，以上内容可能不完整。"
 _TRUNCATION_NOTICE_MARKERS = (
     "内容未完",
@@ -1018,8 +1022,12 @@ class _AgentGraphExecution:
                 },
             ),
         )
-        history.append(f"{HISTORY_ASSISTANT_WRAPPER}{result.content}")
         try:
+            if _contains_fabricated_observation(result.content):
+                raise ActionProtocolError(
+                    "model response contains Observation; "
+                    "only Harness may produce Observation after dispatching a tool"
+                )
             action = parse_action(result.content)
         except ActionProtocolError as protocol_error:
             if finalization_mode or result.finish_reason == "length":
@@ -1070,6 +1078,7 @@ class _AgentGraphExecution:
             )
             observation_text = f"Observation:\n{_canonical_json(observation)}"
             observation_tokens = self._token_counter.count(observation_text)
+            history.append(f"{HISTORY_ASSISTANT_WRAPPER}{PROTOCOL_ERROR_ASSISTANT_PLACEHOLDER}")
             history.append(observation_text)
             self._record_event(
                 events,
@@ -1104,6 +1113,7 @@ class _AgentGraphExecution:
                 "limitations": limitations,
                 "current_turn_span": None,
             }
+        history.append(f"{HISTORY_ASSISTANT_WRAPPER}{result.content}")
 
         if isinstance(action, FinishAction):
             if outcome.extractor is not None:
@@ -1884,6 +1894,13 @@ def _render_answer_with_limitations(
     details = "；".join(limitation.message.rstrip("。") for limitation in limitations)
     warning = f"注意：本次回答未完整完成。{details}。以下内容仅基于已经获取并进入上下文的证据。"
     return f"{warning}\n\n{answer}"
+
+
+def _contains_fabricated_observation(content: str) -> bool:
+    """识别模型自行伪造的 Observation 标记。"""
+
+    normalized = content.casefold()
+    return "<observation>" in normalized or "\nobservation:" in normalized
 
 
 def _partial_answer_with_notice(answer: str | None) -> tuple[str, str]:

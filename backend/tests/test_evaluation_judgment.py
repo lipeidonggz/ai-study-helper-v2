@@ -11,7 +11,12 @@ import pytest
 
 from app.evaluation.database import EvaluationDatabase
 from app.evaluation.judgment import EvaluationJudgmentService
-from app.evaluation.models import StartJudgmentRequest
+from app.evaluation.models import (
+    CheckReviewRequest,
+    CitationReviewItem,
+    JudgeOverrideRequest,
+    StartJudgmentRequest,
+)
 from app.evaluation.repository import EvaluationRepository
 from app.evaluation.storage_models import (
     EvalAttemptRow,
@@ -333,6 +338,251 @@ def test_llm_judge_builds_whitelist_input_and_judgments(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_human_override_appends_judgment_and_switches_effective_binding(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        database = EvaluationDatabase(tmp_path / "eval")
+        repository = EvaluationRepository(database)
+        _add_judgeable_run(
+            database,
+            repository,
+            case_id="c1-001",
+            answer="MCP 是外部内容边界。【来源：block_1】",
+            trace_id="b" * 32,
+            run_id="run_human_override",
+        )
+        case = next(item for item in repository.list_case_catalog() if item.case_id == "c1-001")
+        active = next(
+            revision
+            for revision in case.revisions
+            if revision.revision_id == case.active_revision_id
+        )
+        provider = FakeChatProvider(
+            [
+                json.dumps(
+                    {
+                        "verdict": "satisfied" if criterion.rule_type == "R" else "not_violated",
+                        "reason": f"满足 {criterion.title}",
+                    },
+                    ensure_ascii=False,
+                )
+                for criterion in active.criteria
+            ]
+            + [
+                json.dumps(
+                    {
+                        "citations": [
+                            {
+                                "block_id": "block_1",
+                                "verdict": "supported",
+                                "reason": "引用原文支持答案主张。",
+                                "evidence_quotes": ["MCP 沙箱是本文最重要的原文证据。"],
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                )
+            ]
+        )
+        service = EvaluationJudgmentService(
+            database=database,
+            repository=repository,
+            trace_catalog=_FakeTraceCatalog(tmp_path),  # type: ignore[arg-type]
+            credentials=_MemoryCredentials(),
+            chat_provider_factory=lambda _key: provider,
+        )
+        started = await service.start(
+            "run_human_override",
+            StartJudgmentRequest(
+                concurrency=1,
+                token_budget=1_000_000,
+                judge_review_confirmed=True,
+            ),
+        )
+        initial = await _wait_revision(service, started.revision_id)
+        target = next(
+            item
+            for item in initial.judgments
+            if item.criterion_revision_id == "ccr_c1_001_r1_minimal_judge_v2"
+        )
+        original_ids = {item.judgment_id for item in initial.judgments}
+
+        updated = service.override_judgment(
+            initial.revision_id,
+            JudgeOverrideRequest(
+                attempt_id=target.attempt_id,
+                criterion_revision_id=target.criterion_revision_id,
+                verdict="unsatisfied",
+                reason="人工确认该答案没有满足 R1。",
+                reviewer="reviewer-a",
+            ),
+        )
+
+        assert original_ids.issubset({item.judgment_id for item in updated.judgments})
+        effective = next(
+            item
+            for item in updated.effective_bindings
+            if item.criterion_revision_id == target.criterion_revision_id
+        )
+        assert effective.executor == "human"
+        assert effective.normalized_result == "fail"
+        history = [
+            item
+            for item in updated.judgment_bindings
+            if item.criterion_revision_id == target.criterion_revision_id
+        ]
+        assert len(history) == 2
+        assert sum(item.is_effective for item in history) == 1
+        attempt_aggregate = next(
+            item for item in updated.attempt_aggregates if item.attempt_id == target.attempt_id
+        )
+        assert attempt_aggregate.result == "fail"
+
+        final = service.override_judgment(
+            initial.revision_id,
+            JudgeOverrideRequest(
+                attempt_id=target.attempt_id,
+                criterion_revision_id=target.criterion_revision_id,
+                verdict="satisfied",
+                reason="再次复核后确认 R1 实际满足。",
+                reviewer="reviewer-b",
+            ),
+        )
+        final_effective = next(
+            item
+            for item in final.effective_bindings
+            if item.criterion_revision_id == target.criterion_revision_id
+        )
+        assert final_effective.executor == "human"
+        assert final_effective.normalized_result == "pass"
+        final_history = [
+            item
+            for item in final.judgment_bindings
+            if item.criterion_revision_id == target.criterion_revision_id
+        ]
+        assert len(final_history) == 3
+        assert sum(item.is_effective for item in final_history) == 1
+        final_attempt = next(
+            item for item in final.attempt_aggregates if item.attempt_id == target.attempt_id
+        )
+        assert final_attempt.result == "pass"
+
+    asyncio.run(scenario())
+
+
+def test_human_can_review_llm_citation_support_but_not_integrity(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        database = EvaluationDatabase(tmp_path / "eval")
+        repository = EvaluationRepository(database)
+        _add_judgeable_run(
+            database,
+            repository,
+            case_id="c1-001",
+            answer="MCP 是外部内容边界。【来源：block_1】",
+            trace_id="b" * 32,
+            run_id="run_check_review",
+        )
+        case = next(item for item in repository.list_case_catalog() if item.case_id == "c1-001")
+        active = next(
+            revision
+            for revision in case.revisions
+            if revision.revision_id == case.active_revision_id
+        )
+        provider = FakeChatProvider(
+            [
+                json.dumps(
+                    {
+                        "verdict": "satisfied" if criterion.rule_type == "R" else "not_violated",
+                        "reason": f"满足 {criterion.title}",
+                    },
+                    ensure_ascii=False,
+                )
+                for criterion in active.criteria
+            ]
+            + [
+                json.dumps(
+                    {
+                        "citations": [
+                            {
+                                "block_id": "block_1",
+                                "verdict": "supported",
+                                "reason": "引用原文支持答案主张。",
+                                "evidence_quotes": ["MCP 沙箱是本文最重要的原文证据。"],
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                )
+            ]
+        )
+        service = EvaluationJudgmentService(
+            database=database,
+            repository=repository,
+            trace_catalog=_FakeTraceCatalog(tmp_path),  # type: ignore[arg-type]
+            credentials=_MemoryCredentials(),
+            chat_provider_factory=lambda _key: provider,
+        )
+        started = await service.start(
+            "run_check_review",
+            StartJudgmentRequest(
+                concurrency=1,
+                token_budget=1_000_000,
+                judge_review_confirmed=True,
+            ),
+        )
+        initial = await _wait_revision(service, started.revision_id)
+        attempt_id = initial.judgments[0].attempt_id
+        original_support = next(
+            check for check in initial.checks if check.checker_id == "citation_support"
+        )
+
+        reviewed = service.review_llm_check(
+            initial.revision_id,
+            CheckReviewRequest(
+                attempt_id=attempt_id,
+                checker_id="citation_support",
+                citations=[
+                    CitationReviewItem(
+                        block_id="block_1",
+                        verdict="unsupported",
+                        reason="人工确认证据原文没有支持该主张。",
+                    )
+                ],
+                reason="复核引用支持。",
+                reviewer="reviewer-a",
+            ),
+        )
+
+        assert len(reviewed.check_reviews) == 1
+        assert original_support.result == "pass"
+        attempt_aggregate = next(
+            item for item in reviewed.attempt_aggregates if item.attempt_id == attempt_id
+        )
+        assert "citation_support" in attempt_aggregate.check_failures
+        with pytest.raises(ValueError):
+            service.review_llm_check(
+                initial.revision_id,
+                CheckReviewRequest(
+                    attempt_id=attempt_id,
+                    checker_id="citation_integrity",
+                    citations=[
+                        CitationReviewItem(
+                            block_id="block_1",
+                            verdict="supported",
+                            reason="不允许改程序检查。",
+                        )
+                    ],
+                    reason="非法覆盖。",
+                    reviewer="reviewer-a",
+                ),
+            )
+
+    asyncio.run(scenario())
+
+
 def test_failed_product_attempt_without_answer_is_still_judged(
     tmp_path: Path,
 ) -> None:
@@ -389,6 +639,17 @@ def test_failed_product_attempt_without_answer_is_still_judged(
         judge_judgment = next(item for item in revision.judgments if item.executor == "llm_judge")
         assert checker_judgment.normalized_result == "pass"
         assert judge_judgment.normalized_result == "fail"
+        with pytest.raises(ValueError, match="only llm_judge"):
+            service.override_judgment(
+                revision.revision_id,
+                JudgeOverrideRequest(
+                    attempt_id=checker_judgment.attempt_id,
+                    criterion_revision_id=checker_judgment.criterion_revision_id,
+                    verdict="unsatisfied",
+                    reason="不允许人工覆盖 checker。",
+                    reviewer="reviewer-a",
+                ),
+            )
         payload = json.loads(provider.requests[0][1].content)
         assert payload["answer"] == ""
         assert (

@@ -428,6 +428,64 @@ class JudgmentView(BaseModel):
     invocations: list[JudgeInvocationView]
 
 
+class EffectiveJudgmentBindingView(BaseModel):
+    """一条当前生效的 Judgment 绑定。"""
+
+    binding_id: str
+    attempt_id: str
+    criterion_revision_id: str
+    judgment_id: str
+    executor: str
+    verdict: str
+    normalized_result: Literal["pass", "fail", "pending"]
+    is_effective: bool
+    bound_at: str
+
+
+class JudgeOverrideRequest(BaseModel):
+    """人工修正一条 LLM 语义 Judgment。"""
+
+    attempt_id: str
+    criterion_revision_id: str
+    verdict: str = Field(min_length=1, max_length=24)
+    reason: str = Field(min_length=1)
+    reviewer: str = Field(min_length=1, max_length=128)
+
+
+class CitationReviewItem(BaseModel):
+    """人工对一个引用 block 的语义支持结论。"""
+
+    block_id: str = Field(min_length=1)
+    verdict: Literal["supported", "unsupported", "unknown"]
+    reason: str = Field(min_length=1)
+    evidence_quotes: list[str] = Field(default_factory=list)
+
+
+class CheckReviewRequest(BaseModel):
+    """人工修正一个 LLM 型 CheckResult。"""
+
+    attempt_id: str
+    checker_id: str = Field(min_length=1, max_length=96)
+    citations: list[CitationReviewItem] = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    reviewer: str = Field(min_length=1, max_length=128)
+
+
+class CheckReviewView(BaseModel):
+    """一条 append-only human check review。"""
+
+    review_id: str
+    attempt_id: str
+    checker_id: str
+    source_check_result_id: str
+    result: Literal["pass", "fail", "pending"]
+    payload: dict[str, Any]
+    error_code: str | None
+    reason: str
+    reviewer: str
+    created_at: str
+
+
 class CheckResultView(BaseModel):
     """一条通用跨判定项确定性检查结果。"""
 
@@ -439,6 +497,42 @@ class CheckResultView(BaseModel):
     payload: dict[str, Any]
     error_code: str | None
     created_at: str
+
+
+class AttemptAggregateView(BaseModel):
+    """一个 attempt 的生效 criterion 与全局检查聚合。"""
+
+    attempt_id: str
+    case_id: str
+    case_revision_id: str
+    valid_sample: bool
+    result: Literal["pass", "fail", "pending", "excluded"]
+    r_pass: int
+    r_fail: int
+    r_pending: int
+    x_not_violated: int
+    x_violated: int
+    x_pending: int
+    missing_binding_count: int
+    check_failures: list[str] = Field(default_factory=list)
+    check_pending: list[str] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
+
+
+class CaseAggregateView(BaseModel):
+    """一个 case 在冻结 N/K 下的聚合结果。"""
+
+    case_id: str
+    case_revision_id: str
+    n: int
+    k: int
+    valid_samples: int
+    pass_count: int
+    fail_count: int
+    pending_count: int
+    redline_violation_count: int
+    result: Literal["pass", "fail", "pending", "exploratory"]
+    reasons: list[str] = Field(default_factory=list)
 
 
 class EvaluationRevisionView(BaseModel):
@@ -457,7 +551,12 @@ class EvaluationRevisionView(BaseModel):
     started_at: str | None
     finished_at: str | None
     judgments: list[JudgmentView]
+    judgment_bindings: list[EffectiveJudgmentBindingView] = Field(default_factory=list)
+    effective_bindings: list[EffectiveJudgmentBindingView] = Field(default_factory=list)
+    check_reviews: list[CheckReviewView] = Field(default_factory=list)
     checks: list[CheckResultView]
+    attempt_aggregates: list[AttemptAggregateView] = Field(default_factory=list)
+    case_aggregates: list[CaseAggregateView] = Field(default_factory=list)
 
 
 class JudgePromptView(BaseModel):

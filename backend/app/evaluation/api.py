@@ -29,10 +29,12 @@ from app.evaluation.models import (
     CaseCatalogItem,
     CaseDraftView,
     CaseRevisionView,
+    CheckReviewRequest,
     CreateCaseDraftRequest,
     EvaluationHealthResponse,
     EvaluationRevisionView,
     ExecutionPlanView,
+    JudgeOverrideRequest,
     JudgePromptView,
     PreflightRequest,
     PublishCaseDraftRequest,
@@ -520,6 +522,42 @@ def create_eval_app(
         """读取判定进度、Judgment、checker 和 invocation 历史。"""
 
         return judgment_service.get_revision(revision_id)
+
+    @app.post(
+        "/api/eval/evaluations/{revision_id}/overrides",
+        response_model=EvaluationRevisionView,
+        dependencies=protected,
+    )
+    async def override_evaluation_judgment(
+        revision_id: str,
+        request: JudgeOverrideRequest,
+    ) -> EvaluationRevisionView:
+        """追加人工语义判定并切换生效绑定。"""
+
+        try:
+            return judgment_service.override_judgment(revision_id, request)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="evaluation revision not found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.post(
+        "/api/eval/evaluations/{revision_id}/check-reviews",
+        response_model=EvaluationRevisionView,
+        dependencies=protected,
+    )
+    async def review_evaluation_check(
+        revision_id: str,
+        request: CheckReviewRequest,
+    ) -> EvaluationRevisionView:
+        """追加人工引用支持复核并重算聚合。"""
+
+        try:
+            return judgment_service.review_llm_check(revision_id, request)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="evaluation revision not found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
 
     @app.get(
         "/api/eval/traces",
