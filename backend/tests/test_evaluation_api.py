@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from app.evaluation.api import create_eval_app
+from app.tracing.store import TraceStore
 
 TOKEN = "evaluation-api-test-token"
 
@@ -29,7 +30,7 @@ def test_evaluation_api_exposes_seeded_suite_without_product_routes(
         ) as client:
             health = await client.get("/api/eval/health")
             assert health.status_code == 200
-            assert health.json()["schema_version"] == 2
+            assert health.json()["schema_version"] == 4
             assert (await client.get("/api/eval/suites")).status_code == 401
             preflight = await client.options(
                 "/api/eval/cases/c1-001/draft",
@@ -48,9 +49,25 @@ def test_evaluation_api_exposes_seeded_suite_without_product_routes(
             )
             assert suites.status_code == 200
             body = suites.json()
+            assert len(body) == 4
+            body = [
+                suite for suite in body if suite["review_status"] == "active" and not suite["stale"]
+            ]
             assert len(body) == 1
             assert body[0]["case_count"] == 18
-            assert sum(len(case["criteria"]) for case in body[0]["cases"]) == 73
+            assert sum(len(case["criteria"]) for case in body[0]["cases"]) == 69
+            prompt = await client.get(
+                "/api/eval/judge-prompt",
+                headers={"x-launch-token": TOKEN},
+            )
+            assert prompt.status_code == 200
+            assert prompt.json()["version"] == "judge-rubric-v2"
+            citation_prompt = await client.get(
+                "/api/eval/citation-prompt",
+                headers={"x-launch-token": TOKEN},
+            )
+            assert citation_prompt.status_code == 200
+            assert citation_prompt.json()["version"] == "citation-rubric-v2"
 
             assert (await client.get("/health")).status_code == 404
             assert (await client.get("/api/agent/run")).status_code == 404
@@ -105,6 +122,64 @@ def test_invalid_plan_does_not_start_run(tmp_path: Path) -> None:
             )
             assert started.status_code == 409
             assert started.json()["error"]["code"] == "evaluation_state_conflict"
+
+    asyncio.run(run())
+
+
+def test_evaluation_api_reads_trace_artifacts(tmp_path: Path) -> None:
+    eval_root = tmp_path / "eval"
+    store = TraceStore(eval_root)
+    session = store.new_session(
+        mode="full",
+        question="评测 trace artifact 测试",
+        app_version="0.1.0-test",
+        versions={"prompt_bundle_version": "test"},
+        budget={"max_request_tokens": 1000},
+    )
+    session.finish(
+        status="succeeded",
+        termination_reason="finish",
+        answer_completeness="complete",
+        agent_turns=0,
+        tool_calls=0,
+        model_calls=0,
+        retry_count=0,
+        input_tokens=0,
+        output_tokens=0,
+        answer="评测运行答案",
+        limitations=[],
+    )
+    assert store.wait_for_idle(3)
+    store.close()
+
+    async def run() -> None:
+        app = create_eval_app(
+            TOKEN,
+            product_data_root=tmp_path / "product",
+            eval_data_root=eval_root,
+        )
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://eval",
+        ) as client:
+            headers = {"x-launch-token": TOKEN}
+            detail = await client.get(
+                f"/api/eval/traces/{session.trace_id}",
+                headers=headers,
+            )
+            assert detail.status_code == 200
+            answer_artifact = next(
+                artifact
+                for artifact in detail.json()["manifest"]["artifacts"]
+                if artifact["kind"] == "answer"
+            )
+            artifact = await client.get(
+                f"/api/eval/traces/{session.trace_id}/artifacts/{answer_artifact['artifact_id']}",
+                headers=headers,
+            )
+            assert artifact.status_code == 200
+            assert artifact.content.decode("utf-8") == "评测运行答案"
 
     asyncio.run(run())
 
@@ -169,7 +244,7 @@ def test_case_and_suite_authoring_api_flow(tmp_path: Path) -> None:
                     "scope_id": "api-smoke",
                     "case_revision_ids": [
                         reviewed["revision_id"],
-                        "cr_c2_001_r1",
+                        "cr_c2_001_minimal_judge_v2",
                     ],
                     "change_note": "API 验收",
                     "updated_by": "api-test",
@@ -204,6 +279,6 @@ def test_case_and_suite_authoring_api_flow(tmp_path: Path) -> None:
             assert quick_body["cases"][0]["n"] == 1
             assert quick_body["cases"][0]["source_n"] == 10
 
-            assert case["active_revision_id"] == "cr_c1_001_r1"
+            assert case["active_revision_id"] == "cr_c1_001_minimal_judge_v2"
 
     asyncio.run(run())

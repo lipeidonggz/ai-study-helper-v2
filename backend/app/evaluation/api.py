@@ -8,19 +8,32 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from app.agent.factory import AgentExecutionService
 from app.collections.models import CurrentCollectionResponse
 from app.collections.service import CollectionSnapshotService
+from app.evaluation.citation_prompt import (
+    CITATION_SUPPORT_PROMPT_HASH,
+    CITATION_SUPPORT_PROMPT_VERSION,
+    CITATION_SUPPORT_SYSTEM_PROMPT,
+)
 from app.evaluation.database import EVALUATION_SCHEMA_VERSION, EvaluationDatabase
+from app.evaluation.judge_prompt import (
+    JUDGE_PROMPT_HASH,
+    JUDGE_PROMPT_VERSION,
+    JUDGE_SYSTEM_PROMPT,
+)
+from app.evaluation.judgment import EvaluationJudgmentService
 from app.evaluation.models import (
     CaseCatalogItem,
     CaseDraftView,
     CaseRevisionView,
     CreateCaseDraftRequest,
     EvaluationHealthResponse,
+    EvaluationRevisionView,
     ExecutionPlanView,
+    JudgePromptView,
     PreflightRequest,
     PublishCaseDraftRequest,
     PublishSuiteDraftRequest,
@@ -30,6 +43,7 @@ from app.evaluation.models import (
     SaveCaseDraftRequest,
     SaveSuiteDraftRequest,
     StartDraftRequest,
+    StartJudgmentRequest,
     StartRunRequest,
     SuiteDraftView,
     SuiteRevisionView,
@@ -95,12 +109,20 @@ def create_eval_app(
     )
     planner = EvaluationPlanner(repository, collection_service)
     runner = EvaluationRunner(repository, execution_service)
+    judgment_service = EvaluationJudgmentService(
+        database=database,
+        repository=repository,
+        trace_catalog=trace_catalog,
+        credentials=credentials,
+        chat_provider_factory=chat_provider_factory,
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         try:
             yield
         finally:
+            await judgment_service.shutdown()
             await runner.shutdown()
             trace_store.close()
 
@@ -153,6 +175,34 @@ def create_eval_app(
             status="ok",
             service="ai-study-helper-evaluation",
             schema_version=EVALUATION_SCHEMA_VERSION,
+        )
+
+    @app.get(
+        "/api/eval/judge-prompt",
+        response_model=JudgePromptView,
+        dependencies=protected,
+    )
+    async def judge_prompt() -> JudgePromptView:
+        """返回当前判官 prompt 原文，供负责人激活前审阅。"""
+
+        return JudgePromptView(
+            version=JUDGE_PROMPT_VERSION,
+            content_hash=JUDGE_PROMPT_HASH,
+            content=JUDGE_SYSTEM_PROMPT,
+        )
+
+    @app.get(
+        "/api/eval/citation-prompt",
+        response_model=JudgePromptView,
+        dependencies=protected,
+    )
+    async def citation_prompt() -> JudgePromptView:
+        """返回当前引用支持判官 prompt 原文。"""
+
+        return JudgePromptView(
+            version=CITATION_SUPPORT_PROMPT_VERSION,
+            content_hash=CITATION_SUPPORT_PROMPT_HASH,
+            content=CITATION_SUPPORT_SYSTEM_PROMPT,
         )
 
     @app.get(
@@ -435,6 +485,42 @@ def create_eval_app(
 
         return await runner.cancel(run_id)
 
+    @app.post(
+        "/api/eval/runs/{run_id}/judging",
+        response_model=EvaluationRevisionView,
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=protected,
+    )
+    async def start_judgment(
+        run_id: str,
+        request: StartJudgmentRequest,
+    ) -> EvaluationRevisionView:
+        """为一个终态 run 启动 checker／LLM Judge 判定。"""
+
+        return await judgment_service.start(run_id, request)
+
+    @app.get(
+        "/api/eval/runs/{run_id}/evaluations",
+        response_model=list[EvaluationRevisionView],
+        dependencies=protected,
+    )
+    async def list_run_evaluations(run_id: str) -> list[EvaluationRevisionView]:
+        """返回一个 run 的全部判定修订版。"""
+
+        return judgment_service.list_run_revisions(run_id)
+
+    @app.get(
+        "/api/eval/evaluations/{revision_id}",
+        response_model=EvaluationRevisionView,
+        dependencies=protected,
+    )
+    async def get_evaluation_revision(
+        revision_id: str,
+    ) -> EvaluationRevisionView:
+        """读取判定进度、Judgment、checker 和 invocation 历史。"""
+
+        return judgment_service.get_revision(revision_id)
+
     @app.get(
         "/api/eval/traces",
         response_model=list[TraceListItem],
@@ -467,6 +553,43 @@ def create_eval_app(
                 str(error),
                 500,
             ) from error
+
+    @app.get(
+        "/api/eval/traces/{trace_id}/artifacts/{artifact_id}",
+        dependencies=protected,
+    )
+    async def get_trace_artifact(trace_id: str, artifact_id: str) -> FileResponse:
+        """读取评测 trace 中通过 checksum 校验的 artifact。"""
+
+        if trace_catalog is None:
+            raise IngestFailure(
+                "evaluation_data_root_unavailable",
+                "evaluation data root is not configured",
+                503,
+            )
+        try:
+            detail = trace_catalog.load(trace_id)
+            artifact = next(
+                (item for item in detail.manifest.artifacts if item.artifact_id == artifact_id),
+                None,
+            )
+            path = trace_catalog.artifact_path(trace_id, artifact_id)
+        except TraceNotFoundError as error:
+            raise IngestFailure(
+                "evaluation_trace_artifact_not_found",
+                "evaluation trace artifact does not exist or is omitted",
+                404,
+            ) from error
+        except TraceInvalidError as error:
+            raise IngestFailure(
+                "evaluation_trace_artifact_invalid",
+                str(error),
+                500,
+            ) from error
+        return FileResponse(
+            path,
+            media_type=artifact.mime_type if artifact is not None else "application/octet-stream",
+        )
 
     return app
 

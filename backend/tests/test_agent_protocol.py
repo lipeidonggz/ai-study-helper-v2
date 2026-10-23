@@ -63,8 +63,20 @@ def test_release_prompt_bundle_has_stable_version_and_hash() -> None:
     first = release_prompt_bundle()
     second = release_prompt_bundle()
 
-    assert first.version == "chat-v2"
+    assert first.version == "chat-v3"
     assert first.template_hash == second.template_hash
     assert len(first.template_hash) == 64
     assert "GitHub Flavored Markdown" in first.template
     assert "禁止输出原始 HTML" in first.template
+
+
+def test_finalization_prompt_requires_concise_closed_finish() -> None:
+    prompt = release_prompt_bundle().render(
+        tools=[],
+        collection_status={},
+        finalization_mode=True,
+    )
+
+    assert "<finalization_mode>" in prompt
+    assert "工具已禁用" in prompt
+    assert "内容未完" in prompt

@@ -16,6 +16,18 @@ import {
   normalizeChatSourceKey,
   renderChatMarkdown,
 } from "./chat-markdown";
+import TraceDetailViewer from "./TraceDetailViewer.vue";
+import {
+  replayScopeLabel,
+  traceModeLabel,
+  traceStatusLabel,
+} from "./trace";
+import type {
+  TraceArtifact,
+  TraceDetail,
+  TraceListItem,
+  TraceMode,
+} from "./trace";
 
 /** Python sidecar 的 UI 生命周期状态。 */
 type ManagerStatus =
@@ -189,98 +201,6 @@ interface RuntimeSettingsResponse {
   max_tool_calls: number;
   trace_mode: TraceMode;
   updated_at: string | null;
-}
-
-/** 运行时 trace 的记录级别。 */
-type TraceMode = "off" | "metadata" | "full";
-
-/** trace 内按内容寻址的 artifact 引用。 */
-interface TraceArtifact {
-  artifact_id: string;
-  kind: string;
-  mime_type: string;
-  size_bytes: number;
-  content_hash: string;
-  state: "stored" | "omitted" | "missing";
-  relative_path: string | null;
-}
-
-/** 挂在 trace span 上的确定性事件。 */
-interface TraceSpanEvent {
-  name: string;
-  time: string;
-  attributes: Record<string, unknown>;
-}
-
-/** 本地 OTel 风格 trace span。 */
-interface TraceSpan {
-  trace_id: string;
-  span_id: string;
-  parent_span_id: string | null;
-  name: string;
-  kind: "INTERNAL" | "LLM" | "TOOL";
-  start_time_unix_nano: number;
-  end_time_unix_nano: number;
-  started_at: string;
-  ended_at: string;
-  status: "ok" | "error";
-  error_code: string | null;
-  attributes: Record<string, unknown>;
-  events: TraceSpanEvent[];
-}
-
-/** 一次问答 trace 的最终摘要。 */
-interface TraceManifest {
-  schema_version: string;
-  trace_id: string;
-  mode: TraceMode;
-  app_version: string;
-  started_at: string;
-  ended_at: string;
-  duration_ms: number;
-  status: string;
-  termination_reason: string;
-  answer_completeness: "complete" | "partial";
-  question_preview: string | null;
-  question_artifact: TraceArtifact | null;
-  snapshot_id: string | null;
-  snapshot_status: string | null;
-  completeness: string | null;
-  agent_turns: number;
-  tool_calls: number;
-  model_calls: number;
-  retry_count: number;
-  input_tokens: number;
-  output_tokens: number;
-  budget: Record<string, unknown>;
-  versions: Record<string, unknown>;
-  artifacts: TraceArtifact[];
-  trace_status: "complete" | "partial" | "dropped";
-  dropped_events: number;
-  replay_scope: "metadata" | "evidence" | "retrieval";
-  limitations: Array<{ code: string; message: string }>;
-}
-
-/** 诊断列表中的一次 trace 摘要。 */
-interface TraceListItem {
-  trace_id: string;
-  mode: TraceMode;
-  started_at: string;
-  ended_at: string;
-  status: string;
-  termination_reason: string;
-  question_preview: string | null;
-  duration_ms: number;
-  input_tokens: number;
-  output_tokens: number;
-  trace_status: "complete" | "partial" | "dropped";
-  replay_scope: "metadata" | "evidence" | "retrieval";
-}
-
-/** trace 详情接口返回的 manifest 与 span。 */
-interface TraceDetail {
-  manifest: TraceManifest;
-  spans: TraceSpan[];
 }
 
 /** 运行设置表单中各字段的即时校验错误。 */
@@ -545,9 +465,6 @@ const diagnosticsLoading = ref(false);
 const diagnosticsError = ref("");
 const selectedTrace = ref<TraceDetail | null>(null);
 const selectedTraceId = ref("");
-const selectedTraceSpanId = ref("");
-const traceArtifactPreview = ref("");
-const traceArtifactTitle = ref("");
 const diagnosticsTraceModeBusy = ref(false);
 const diagnosticsTraceModeMessage = ref("");
 const diagnosticsTraceModeError = ref("");
@@ -1596,9 +1513,6 @@ async function loadTraceDetail(traceId: string): Promise<void> {
     return;
   }
   selectedTraceId.value = traceId;
-  selectedTraceSpanId.value = "";
-  traceArtifactPreview.value = "";
-  traceArtifactTitle.value = "";
   diagnosticsError.value = "";
   try {
     let body: TraceDetail | ApiErrorBody | null = null;
@@ -1656,115 +1570,37 @@ async function loadTraceDiagnostics(traceId: string | null): Promise<void> {
   }
 }
 
-/** 读取 full trace artifact，并作为纯文本或格式化 JSON 展示。 */
-async function openTraceArtifact(traceId: string, artifact: TraceArtifact): Promise<void> {
+/** 读取 full trace artifact，并返回纯文本或格式化 JSON。 */
+async function loadTraceArtifactContent(
+  traceId: string,
+  artifact: TraceArtifact,
+): Promise<string> {
   if (!connection.value) {
-    return;
+    throw new Error("产品服务尚未连接");
   }
-  traceArtifactTitle.value = artifact.kind;
-  traceArtifactPreview.value = "";
   if (artifact.state !== "stored") {
-    traceArtifactPreview.value =
+    return (
       artifact.state === "omitted"
         ? "当前 trace 模式未保存正文，仅保留内容 hash。"
-        : "artifact 写入失败，正文不可用。";
-    return;
-  }
-  try {
-    const response = await fetchWithTimeout(
-      `${connection.value.baseUrl}/api/traces/${encodeURIComponent(traceId)}/artifacts/${artifact.artifact_id}`,
-      {
-        headers: { "x-launch-token": connection.value.token },
-        cache: "no-store",
-      },
-      API_TIMEOUT_MS.quick,
+        : "artifact 写入失败，正文不可用。"
     );
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    const text = await response.text();
-    traceArtifactPreview.value =
-      artifact.mime_type.includes("json")
-        ? JSON.stringify(JSON.parse(text) as unknown, null, 2)
-        : text;
-  } catch (error) {
-    traceArtifactPreview.value = `读取 artifact 失败：${String(error)}`;
   }
-}
-
-/** 把 trace 状态转换成界面标签。 */
-function traceStatusLabel(status: string): string {
-  const labels: Record<string, string> = {
-    succeeded: "成功",
-    partial: "部分完成",
-    failed: "失败",
-    canceled: "已取消",
-    complete: "完整",
-    dropped: "已丢失",
-  };
-  return labels[status] ?? status;
-}
-
-/** 把 span 状态转换成界面标签。 */
-function traceSpanStatusLabel(span: TraceSpan): string {
-  return span.status === "ok"
-    ? "成功"
-    : `错误${span.error_code ? `：${span.error_code}` : ""}`;
-}
-
-/** 把 trace 模式转换成界面标签。 */
-function traceModeLabel(mode: TraceMode): string {
-  const labels: Record<TraceMode, string> = {
-    off: "关闭",
-    metadata: "元数据",
-    full: "完整内容",
-  };
-  return labels[mode];
-}
-
-/** 按 span 父关系计算诊断时间线的缩进层级。 */
-const diagnosticsSpanRows = computed(() => {
-  if (!selectedTrace.value) {
-    return [];
-  }
-  const byId = new Map(
-    selectedTrace.value.spans.map((span) => [span.span_id, span]),
+  const response = await fetchWithTimeout(
+    `${connection.value.baseUrl}/api/traces/${encodeURIComponent(traceId)}/artifacts/${artifact.artifact_id}`,
+    {
+      headers: { "x-launch-token": connection.value.token },
+      cache: "no-store",
+    },
+    API_TIMEOUT_MS.quick,
   );
-  const depth = (span: TraceSpan): number => {
-    let current = span;
-    let value = 0;
-    const seen = new Set<string>();
-    while (current.parent_span_id && !seen.has(current.span_id)) {
-      seen.add(current.span_id);
-      const parent = byId.get(current.parent_span_id);
-      if (!parent) {
-        break;
-      }
-      value += 1;
-      current = parent;
-    }
-    return value;
-  };
-  return selectedTrace.value.spans.map((span) => ({
-    span,
-    depth: depth(span),
-  }));
-});
-
-/** metadata 模式只显示非 omitted artifact；正文省略项合并成汇总。 */
-const visibleTraceArtifacts = computed(() =>
-  (selectedTrace.value?.manifest.artifacts ?? []).filter(
-    (artifact) => artifact.state !== "omitted",
-  ),
-);
-
-/** 当前 trace 中被记录模式省略的正文 artifact 数量。 */
-const omittedTraceArtifactCount = computed(
-  () =>
-    (selectedTrace.value?.manifest.artifacts ?? []).filter(
-      (artifact) => artifact.state === "omitted",
-    ).length,
-);
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  const text = await response.text();
+  return artifact.mime_type.includes("json")
+    ? JSON.stringify(JSON.parse(text) as unknown, null, 2)
+    : text;
+}
 
 /** 把部分成功任务显示为独立语义，避免被“已完成”掩盖。 */
 function taskDisplayStatus(task: BackgroundTaskRecord): string {
@@ -3385,117 +3221,17 @@ onBeforeUnmount(() => {
               {{ trace.input_tokens + trace.output_tokens }} token
             </small>
             <span class="trace-list-health" :class="`trace-health-${trace.trace_status}`">
-              trace {{ traceStatusLabel(trace.trace_status) }} ·
-              {{ trace.replay_scope }}
+              轨迹{{ traceStatusLabel(trace.trace_status) }} ·
+              {{ replayScopeLabel(trace.replay_scope) }}
             </span>
           </button>
         </aside>
 
-        <article v-if="selectedTrace" class="trace-detail-panel">
-          <div class="trace-detail-header">
-            <div>
-              <p class="eyebrow">TRACE {{ selectedTrace.manifest.trace_id.slice(-8) }}</p>
-              <h3>{{ selectedTrace.manifest.question_preview || "未保存问题正文" }}</h3>
-            </div>
-            <span
-              class="trace-health-badge"
-              :class="`trace-health-${selectedTrace.manifest.trace_status}`"
-            >
-              {{ traceStatusLabel(selectedTrace.manifest.trace_status) }}
-            </span>
-          </div>
-
-          <dl class="trace-summary-grid">
-            <div><dt>最终状态</dt><dd>{{ traceStatusLabel(selectedTrace.manifest.status) }}</dd></div>
-            <div><dt>终止原因</dt><dd>{{ selectedTrace.manifest.termination_reason }}</dd></div>
-            <div><dt>耗时</dt><dd>{{ selectedTrace.manifest.duration_ms }} ms</dd></div>
-            <div><dt>轮次 / 工具 / 模型</dt><dd>{{ selectedTrace.manifest.agent_turns }} / {{ selectedTrace.manifest.tool_calls }} / {{ selectedTrace.manifest.model_calls }}</dd></div>
-            <div><dt>输入 token</dt><dd>{{ selectedTrace.manifest.input_tokens }}</dd></div>
-            <div><dt>输出 token</dt><dd>{{ selectedTrace.manifest.output_tokens }}</dd></div>
-            <div><dt>模式</dt><dd>{{ traceModeLabel(selectedTrace.manifest.mode) }}</dd></div>
-            <div><dt>可重放范围</dt><dd>{{ selectedTrace.manifest.replay_scope }}</dd></div>
-          </dl>
-
-          <details class="trace-metadata-block">
-            <summary>版本与运行配置</summary>
-            <pre>{{ JSON.stringify(selectedTrace.manifest.versions, null, 2) }}</pre>
-            <pre>{{ JSON.stringify(selectedTrace.manifest.budget, null, 2) }}</pre>
-          </details>
-
-          <section class="trace-timeline">
-            <div class="panel-heading">
-              <div>
-                <p class="eyebrow">SPAN TIMELINE</p>
-                <h3>调用树</h3>
-              </div>
-              <span>{{ selectedTrace.spans.length }} 个 span</span>
-            </div>
-            <article
-              v-for="row in diagnosticsSpanRows"
-              :key="row.span.span_id"
-              class="trace-span-card"
-              :class="{
-                selected: selectedTraceSpanId === row.span.span_id,
-                'trace-span-error': row.span.status === 'error',
-              }"
-              :style="{ marginLeft: `${row.depth * 18}px` }"
-              @click="selectedTraceSpanId = row.span.span_id"
-            >
-              <div class="trace-span-topline">
-                <span class="trace-span-kind">{{ row.span.kind }}</span>
-                <strong>{{ row.span.name }}</strong>
-                <span>{{ traceSpanStatusLabel(row.span) }}</span>
-              </div>
-              <small>
-                {{ taskTimeLabel(row.span.started_at) }} ·
-                {{ String(row.span.attributes["app.duration_ms"] ?? "—") }} ms
-              </small>
-              <div v-if="selectedTraceSpanId === row.span.span_id" class="trace-span-detail">
-                <pre>{{ JSON.stringify(row.span.attributes, null, 2) }}</pre>
-                <div v-if="row.span.events.length" class="trace-span-events">
-                  <strong>span events</strong>
-                  <pre>{{ JSON.stringify(row.span.events, null, 2) }}</pre>
-                </div>
-              </div>
-            </article>
-          </section>
-
-          <section v-if="selectedTrace.manifest.artifacts.length" class="trace-artifacts">
-            <div class="panel-heading">
-              <div>
-                <p class="eyebrow">ARTIFACTS</p>
-                <h3>运行内容</h3>
-              </div>
-              <span>{{ visibleTraceArtifacts.length }} 个可查看</span>
-            </div>
-            <p v-if="omittedTraceArtifactCount" class="trace-artifacts-omitted">
-              {{ traceModeLabel(selectedTrace.manifest.mode) }}模式已省略
-              {{ omittedTraceArtifactCount }} 个正文 artifact，仅保留内容 hash。
-            </p>
-            <button
-              v-for="artifact in visibleTraceArtifacts"
-              :key="artifact.artifact_id"
-              type="button"
-              class="trace-artifact-row"
-              @click="openTraceArtifact(selectedTrace.manifest.trace_id, artifact)"
-            >
-              <span>
-                <strong>{{ artifact.kind }}</strong>
-                <small>{{ artifact.mime_type }} · {{ artifact.size_bytes }} bytes</small>
-              </span>
-              <span class="trace-artifact-state">{{ artifact.state }}</span>
-            </button>
-            <div v-if="traceArtifactPreview" class="trace-artifact-preview">
-              <div class="panel-heading">
-                <h3>{{ traceArtifactTitle }}</h3>
-                <button type="button" class="inline-link" @click="traceArtifactPreview = ''">
-                  关闭
-                </button>
-              </div>
-              <pre>{{ traceArtifactPreview }}</pre>
-            </div>
-          </section>
-        </article>
+        <TraceDetailViewer
+          v-if="selectedTrace"
+          :trace="selectedTrace"
+          :load-artifact="loadTraceArtifactContent"
+        />
 
         <div v-else class="trace-detail-placeholder">
           从左侧选择一次运行，查看轮次、模型、工具、预算和来源现场。

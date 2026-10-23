@@ -206,14 +206,14 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 
 **循环**
 
-1. 每轮开始先检查预算：若 `tool_calls` 达到上限，`used_tokens` 已达到 `max_request_tokens` 扣除最终回答预留后的额度，或预计下一次调用的 `context_tokens` 超过 `max_context_tokens`，则停止继续调用工具。上下文超界返回 `context_budget_exceeded`；累计预算不足时优先进入终结轮，连终结轮也放不下则返回 `request_budget_exceeded`。
+1. 每轮开始先检查预算：若 `tool_calls` 达到上限，`used_tokens` 已达到 `max_request_tokens` 扣除最终回答预留后的额度，或预计下一次调用的 `context_tokens` 超过 `max_context_tokens`，则停止继续调用工具。上下文超界进入终结轮；累计预算不足时优先进入终结轮，连终结轮也放不下则返回带“内容未完”声明的部分回答。
 2. 将系统提示词、当前 collection 快照状态、用户问题和当前可用工具交给模型；终结轮不提供工具。
 3. 模型输出一个 Thought 和一个 Action，并累计本轮模型调用消耗的 token。
 4. Harness 解析 Action：
   - **工具调用**：执行该工具并取得完整业务结果；Harness 将其转换为最终 Observation，统一计算 `result_tokens`。若加入当前 History 后仍不超过用户上下文与累计预算，则追加 Observation；否则不追加结果，返回 `context_budget_exceeded` 或 `request_budget_exceeded`。
   - **Finish**：提取最终答案，结束循环。
   - **无法解析**：将协议错误作为 Observation 追加，进入下一轮；预算耗尽时终止。
-5. 预算耗尽时追加明确的状态说明，并要求模型在终结轮输出 `Finish`，说明哪些部分尚未完成。重复上述过程，直到收到 `Finish` 或发生不可恢复的运行错误。
+5. 终结轮向系统提示词注入 `finalization_mode`：禁用工具，要求直接输出短而闭合的 `Finish`，只保留核心要点并声明内容未完。若模型输出被截断在 `Finish[...]` 中间，Harness 保留已经流出的正文、补齐确定性的“内容未完”声明并返回 partial，而不是丢弃正文或记为 failed。预算已经不足、无法再发起终结调用时，也返回同一类确定性部分回答。
 
 **可观测边界**：Agent 循环只通过统一的 `TraceEmitter` 发出请求、轮次、模型、工具和预算事件，**不直接写文件、不等待 trace 落地，也不因 trace 写入失败重试或终止**。有界队列、后台 writer、丢弃与 flush 策略统一归 §9.4.2，避免把存储 I/O 混进 Agent 的决策与控制流。
 
@@ -227,7 +227,7 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 | **瞬时模型错误**：超时、限流 | 同一调用最多自动重试 1 次；仍失败则停止循环并返回明确错误 | 所有实际 token 都累计到 `max_request_tokens` |
 | **上下文／请求预算耗尽** | 不重试；返回 `context_budget_exceeded` 或 `request_budget_exceeded` | 已发生的调用照常计入 |
 | **部分来源失败** | 其他来源继续；最终回答可以包含已成功部分，但必须具名声明缺失来源，不能声称完整 | 按实际调用计 |
-| **终结轮再次失败** | 最多重试 1 次；仍失败则 Harness 返回确定性错误，不伪造最终答案 | 按实际调用计 |
+| **终结轮再次失败或输出被截断** | 最多重试 1 次；仍失败时保留已经流出的正文并追加“内容未完”声明，返回 partial；没有正文时只返回缺口语义，虚构实质性答案 | 按实际调用计 |
 
 **重试规则**：`max_retries_per_operation = 1`。自动重试不增加逻辑上的 `tool_calls`，但每次实际尝试都要进 trace；不存在独立的“重试预算”，所有实际模型 token 仍受 `max_request_tokens` 限制，实际工具尝试仍受上下文预算限制。
 

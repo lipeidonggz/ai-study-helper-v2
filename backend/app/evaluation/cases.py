@@ -13,7 +13,7 @@ from app.evaluation.models import CaseSeed, CriterionSeed
 _CASE_ROW_PATTERN = re.compile(r"^\|\s*`(?P<case_id>c\d+-001|cf-\d+)`")
 _CRITERION_PATTERN = re.compile(
     r"·\s+\*\*(?P<id>[RX]\d+)\s+(?P<title>.*?)\*\*(?:——|\s+)"
-    r"(?P<body>.*?)(?=<br>\s*·\s+\*\*[RX]\d+\s+|$)"
+    r"(?P<body>.*?)(?=<br>\s*(?:\*\*边界\*\*<br>\s*)?·\s+\*\*[RX]\d+\s+|$)"
 )
 _TARGET_TITLES: dict[str, tuple[str, ...]] = {
     "c1-001": ("How we contain Claude",),

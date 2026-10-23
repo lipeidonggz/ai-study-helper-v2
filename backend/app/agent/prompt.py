@@ -7,7 +7,7 @@ from typing import Any
 
 from app.agent.tool_adapter import ToolDescriptor
 
-PROMPT_BUNDLE_VERSION = "chat-v2"
+PROMPT_BUNDLE_VERSION = "chat-v3"
 
 SYSTEM_PROMPT_TEMPLATE = """<role>
 你是“文档学习问答 Agent”，基于用户添加的文档和模型内置知识，回答学习类的知识问题。
@@ -20,6 +20,8 @@ SYSTEM_PROMPT_TEMPLATE = """<role>
 <collection_status>
 {{COLLECTION_STATUS}}
 </collection_status>
+
+{{FINALIZATION_MODE}}
 
 <response_protocol>
 每次响应必须在“工具调用”和“Finish”两种形式中二选一，不得输出其他形式。
@@ -134,6 +136,7 @@ class PromptBundle:
         *,
         tools: list[ToolDescriptor],
         collection_status: dict[str, Any],
+        finalization_mode: bool = False,
     ) -> str:
         """渲染工具说明和当前快照状态。"""
 
@@ -144,14 +147,26 @@ class PromptBundle:
             separators=(",", ":"),
             sort_keys=True,
         )
-        return self.template.replace("{{TOOLS}}", tool_text).replace(
-            "{{COLLECTION_STATUS}}",
-            status_text,
+        finalization_text = (
+            """<finalization_mode>
+工具已禁用。下一轮必须直接输出一个用右方括号闭合的 Finish[...]，不得再调用工具，也不得重试更长的答案。
+只保留已经能完成的核心要点；若无法讲完，先写“内容未完：因运行预算限制，以下内容可能不完整”，再列出已有要点。
+</finalization_mode>"""
+            if finalization_mode
+            else ""
+        )
+        return (
+            self.template.replace("{{TOOLS}}", tool_text)
+            .replace(
+                "{{COLLECTION_STATUS}}",
+                status_text,
+            )
+            .replace("{{FINALIZATION_MODE}}", finalization_text)
         )
 
 
 def release_prompt_bundle() -> PromptBundle:
-    """返回已评审的 v1 发布提示词 bundle。"""
+    """返回当前版本化的 v3 发布提示词 bundle。"""
 
     return PromptBundle(
         version=PROMPT_BUNDLE_VERSION,

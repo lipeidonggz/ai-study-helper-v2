@@ -39,7 +39,8 @@
 | 场景 | 用户看到什么 | 系统保留什么 | 是否可恢复 |
 | --- | --- | --- | --- |
 | 预检失败 | `invalid_plan` 与具体失败项 | 候选 plan、失败原因 | 修复后创建新 plan |
-| Agent attempt 失败 | 无效 attempt 与错误码 | 状态、usage、部分 trace | 是，按策略创建替代 attempt |
+| Agent 行为失败（预算、协议、工具循环等） | 有效样本与错误码 | 状态、usage、answer／部分 trace | 否，进入判定 |
+| 基础设施失败（超时、限流、上游或执行器异常） | 无效 attempt 与错误码 | 状态、usage、部分 trace | 是，按策略创建替代 attempt |
 | trace 缺失 | attempt 仍保留，标记证据不足 | 答案、usage、`trace_id` | 可继续查看，但不能做完整归因 |
 | run 暂停 | 当前 attempt 完成后进入 paused | 已完成 attempt | 可继续 |
 | 用户取消 | 当前 attempt 完成边界后 canceled | 已完成回答与 usage | 可新建 run |
@@ -142,6 +143,7 @@
 - `total_budget_exhausted`：预算不足以预留一个 attempt 时 run 进入 paused，attempt 数保持 0。
 - 进程重启：遗留 running attempt 被标记为 `outcome_unknown`，run 进入 paused，不自动重发。
 - 用例内容修改：SQLite trigger 拒绝原地更新不可变 revision。
+- 023A 验收修正：`failed` 不再整体等于无效 attempt；只有基础设施失败不计有效 N，产品行为失败全部进入判定。
 
 ### 人工验收
 

@@ -73,7 +73,7 @@ ExecutionRun 在未封存时允许因基础设施失败追加替代 attempt；�
 
 **运行策略：**N／K 属于 EvalCaseRevision 的执行属性，新建用例默认 N＝10、K＝9。同一用例至少 K 次满足金标准且红线零违反才通过；任何一次 attempt 出现红线违规，该用例直接失败。
 
-**有效样本口径：**基础设施失败保留 attempt，但不计入有效 N，允许在预算与次数上限内补跑；回答已生成但判官为 pending 时计入 N、不算通过；崩溃或未知结果标记 `abandoned`／`outcome_unknown`，不自动重发。
+**有效样本口径：**只有明确的基础设施失败（例如供应商超时、限流、不可用、执行器异常或进程中断）保留 attempt 但不计入有效 N，允许在预算与次数上限内补跑。Agent 自身行为导致的失败——包括预算耗尽、工具循环、协议错误以及没有生成最终 answer——都计为有效样本并逐 criterion 判定；空答案不能跳过判定，由 criterion 给出 fail／pending。回答已生成但判官为 pending 时计入 N、不算通过；崩溃或未知结果标记 `abandoned`／`outcome_unknown`，不自动重发。
 
 ## 4. 核心对象
 

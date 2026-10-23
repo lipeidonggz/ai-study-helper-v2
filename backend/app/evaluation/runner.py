@@ -13,10 +13,14 @@ from app.evaluation.models import (
     PlanCaseView,
     RunView,
 )
+from app.evaluation.outcomes import (
+    AttemptOutcomeClass,
+    classify_attempt_outcome,
+    is_product_sample,
+)
 from app.evaluation.repository import EvaluationRepository
 from app.settings.models import RuntimeSettingsResponse
 
-VALID_ATTEMPT_STATUSES = {"succeeded", "partial"}
 UPSTREAM_PAUSE_CODES = {
     "chat_rate_limited",
     "chat_upstream_unavailable",
@@ -37,6 +41,7 @@ class _AttemptOutcome:
     """worker 返回给运行编排器的单次 attempt 结果。"""
 
     execution_status: str
+    outcome_class: AttemptOutcomeClass
     error_code: str | None
     termination_reason: str | None
     input_tokens: int
@@ -298,6 +303,7 @@ class EvaluationRunner:
                     except Exception:
                         outcome = _AttemptOutcome(
                             execution_status="failed",
+                            outcome_class="infrastructure",
                             error_code="evaluation_worker_exception",
                             termination_reason=None,
                             input_tokens=0,
@@ -321,7 +327,7 @@ class EvaluationRunner:
                                 if outcome.error_code == "chat_rate_limited"
                                 else "continuous_upstream_failure"
                             )
-                    elif outcome.execution_status in VALID_ATTEMPT_STATUSES:
+                    elif is_product_sample(outcome.outcome_class):
                         consecutive_upstream_failures = 0
         except asyncio.CancelledError:
             raise
@@ -380,6 +386,7 @@ class EvaluationRunner:
                 execution_status="failed",
                 trace_id=None,
                 trace_status="missing",
+                outcome_class="infrastructure",
                 termination_reason=None,
                 error_code=error_code,
                 answer=None,
@@ -392,6 +399,7 @@ class EvaluationRunner:
             )
             return _AttemptOutcome(
                 execution_status="failed",
+                outcome_class="infrastructure",
                 error_code=error_code,
                 termination_reason=None,
                 input_tokens=0,
@@ -401,11 +409,13 @@ class EvaluationRunner:
         execution_status = _execution_status(result)
         trace_status = _trace_status(result)
         error_code = _result_error_code(result)
+        outcome_class = classify_attempt_outcome(execution_status, error_code)
         self._repository.finish_attempt(
             attempt_id,
             execution_status=execution_status,
             trace_id=result.trace_id,
             trace_status=trace_status,
+            outcome_class=outcome_class,
             termination_reason=result.termination_reason,
             error_code=error_code,
             answer=result.answer,
@@ -424,6 +434,7 @@ class EvaluationRunner:
         )
         return _AttemptOutcome(
             execution_status=execution_status,
+            outcome_class=outcome_class,
             error_code=error_code,
             termination_reason=result.termination_reason,
             input_tokens=result.input_tokens,
@@ -436,7 +447,7 @@ class EvaluationRunner:
         valid_counts = Counter(
             attempt.case_revision_id
             for attempt in run.attempts
-            if attempt.execution_status in VALID_ATTEMPT_STATUSES
+            if is_product_sample(attempt.outcome_class)
         )
         return [case for case in plan.cases if valid_counts[case.case_revision_id] < case.n]
 
@@ -447,15 +458,15 @@ class EvaluationRunner:
         ]
         if len(case_attempts) < case.n:
             return None
-        failed = next(
+        infrastructure_failure = next(
             (
                 attempt
                 for attempt in reversed(case_attempts)
-                if attempt.execution_status not in VALID_ATTEMPT_STATUSES
+                if attempt.outcome_class == "infrastructure"
             ),
             None,
         )
-        return None if failed is None else failed.attempt_id
+        return None if infrastructure_failure is None else infrastructure_failure.attempt_id
 
 
 def _execution_status(result: AgentRunResult) -> str:
@@ -469,9 +480,7 @@ def _execution_status(result: AgentRunResult) -> str:
 
 
 def _trace_status(result: AgentRunResult) -> str:
-    if not result.trace_id:
-        return "missing"
-    return "partial" if result.status == "failed" else "complete"
+    return result.trace_status
 
 
 def _result_error_code(result: AgentRunResult) -> str | None:

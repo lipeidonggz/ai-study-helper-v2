@@ -1,0 +1,875 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+from collections.abc import Sequence
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+
+from app.evaluation.database import EvaluationDatabase
+from app.evaluation.judgment import EvaluationJudgmentService
+from app.evaluation.models import StartJudgmentRequest
+from app.evaluation.repository import EvaluationRepository
+from app.evaluation.storage_models import (
+    EvalAttemptRow,
+    EvalExecutionPlanRow,
+    EvalExecutionRunRow,
+)
+from app.providers.chat import (
+    ChatCompletionResult,
+    ChatMessage,
+    ChatProviderError,
+    ChatProviderProfile,
+    FakeChatProvider,
+)
+from app.storage.credentials import CHAT_API_KEY_USERNAME
+from app.tracing.catalog import TraceNotFoundError
+from app.tracing.models import (
+    TraceArtifactRecord,
+    TraceDetailRecord,
+    TraceManifestRecord,
+    TraceSpanRecord,
+)
+
+
+class _MemoryCredentials:
+    def get(self, username: str) -> str | None:
+        return "judge-key" if username == CHAT_API_KEY_USERNAME else None
+
+    def set(self, username: str, value: str) -> None:
+        raise AssertionError("not used")
+
+    def delete(self, username: str) -> None:
+        raise AssertionError("not used")
+
+
+class _FakeTraceCatalog:
+    def __init__(self, root: Path, *, answer_completeness: str = "complete") -> None:
+        payload = {
+            "blocks": [
+                {
+                    "block_id": "block_1",
+                    "doc_id": "doc_1",
+                    "doc_title": "测试文档",
+                    "source_label": "doc",
+                    "section_path": ["边界"],
+                    "text": "MCP 沙箱是本文最重要的原文证据。",
+                }
+            ]
+        }
+        self._artifact_path = root / "payload.json"
+        self._artifact_path.write_text(
+            json.dumps(payload, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        artifact = TraceArtifactRecord(
+            artifact_id="a" * 64,
+            kind="tool.payload",
+            mime_type="application/json",
+            size_bytes=self._artifact_path.stat().st_size,
+            content_hash=hashlib.sha256(self._artifact_path.read_bytes()).hexdigest(),
+            state="stored",
+            relative_path="artifacts/payload.json",
+        )
+        started_at = "2026-10-23T00:00:00+00:00"
+        self._detail = TraceDetailRecord(
+            manifest=TraceManifestRecord(
+                trace_id="b" * 32,
+                mode="full",
+                app_version="0.1.0",
+                started_at=started_at,
+                ended_at="2026-10-23T00:00:02+00:00",
+                duration_ms=2000,
+                status="succeeded",
+                termination_reason="finish",
+                answer_completeness=answer_completeness,
+                question_preview="测试",
+                snapshot_id="s_0123456789abcdef",
+                snapshot_status="ready",
+                completeness="complete",
+                agent_turns=2,
+                tool_calls=1,
+                model_calls=2,
+                retry_count=0,
+                input_tokens=10,
+                output_tokens=5,
+                artifacts=[artifact],
+                replay_scope="retrieval",
+            ),
+            spans=[
+                TraceSpanRecord(
+                    trace_id="b" * 32,
+                    span_id="c" * 16,
+                    parent_span_id=None,
+                    name="tool",
+                    kind="TOOL",
+                    start_time_unix_nano=1,
+                    end_time_unix_nano=2,
+                    started_at=started_at,
+                    ended_at="2026-10-23T00:00:01+00:00",
+                    status="ok",
+                    attributes={"app.payload_artifact": artifact.model_dump(mode="json")},
+                )
+            ],
+        )
+
+    def load(self, trace_id: str) -> TraceDetailRecord:
+        assert trace_id == self._detail.manifest.trace_id
+        return self._detail
+
+    def artifact_path(self, trace_id: str, artifact_id: str) -> Path:
+        assert trace_id == self._detail.manifest.trace_id
+        assert artifact_id == "a" * 64
+        return self._artifact_path
+
+
+class _MissingTraceCatalog:
+    def load(self, trace_id: str) -> TraceDetailRecord:
+        raise TraceNotFoundError(trace_id)
+
+
+class _UnavailableChatProvider:
+    def __init__(self) -> None:
+        self._profile = FakeChatProvider(["unused"]).profile
+
+    @property
+    def profile(self) -> ChatProviderProfile:
+        return self._profile
+
+    async def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> ChatCompletionResult:
+        raise ChatProviderError(
+            code="chat_upstream_unavailable",
+            message="upstream unavailable",
+            retryable=True,
+        )
+
+
+def _add_judgeable_run(
+    database: EvaluationDatabase,
+    repository: EvaluationRepository,
+    *,
+    case_id: str,
+    answer: str | None,
+    trace_id: str,
+    run_id: str,
+    trace_status: str = "complete",
+    execution_status: str = "succeeded",
+    outcome_class: str = "product",
+    termination_reason: str = "finish",
+    error_code: str | None = None,
+) -> None:
+    case = next(item for item in repository.list_case_catalog() if item.case_id == case_id)
+    assert case.active_revision_id is not None
+    active_suite = next(
+        suite
+        for suite in repository.list_suite_revisions()
+        if suite.suite_id == "design03" and suite.review_status == "active" and not suite.stale
+    )
+    now = datetime.now(UTC)
+    plan_id = f"plan_{run_id}"
+    with database.session() as session, session.begin():
+        session.add(
+            EvalExecutionPlanRow(
+                plan_id=plan_id,
+                suite_revision_id=active_suite.revision_id,
+                collection_snapshot_id="s_0123456789abcdef",
+                run_type="quality",
+                mode="formal",
+                agent_version_set_json="{}",
+                model_config_json="{}",
+                run_policy_json="{}",
+                experiment_variable_json="{}",
+                preflight_result_json="[]",
+                status="planned",
+            )
+        )
+        session.add(
+            EvalExecutionRunRow(
+                run_id=run_id,
+                plan_id=plan_id,
+                status="sealed_complete",
+                started_at=now,
+                sealed_at=now,
+            )
+        )
+        session.flush()
+        session.add(
+            EvalAttemptRow(
+                attempt_id=f"attempt_{run_id}",
+                run_id=run_id,
+                case_revision_id=case.active_revision_id,
+                session_id=f"session_{run_id}",
+                trace_id=trace_id,
+                trace_status=trace_status,
+                execution_status=execution_status,
+                outcome_class=outcome_class,
+                termination_reason=termination_reason,
+                error_code=error_code,
+                answer=answer,
+                input_tokens=10,
+                output_tokens=5,
+                model_calls=1,
+                tool_calls=1,
+                started_at=now,
+                first_token_at=now,
+                finished_at=now,
+                usage_json="{}",
+            )
+        )
+
+
+async def _wait_revision(
+    service: EvaluationJudgmentService,
+    revision_id: str,
+) -> object:
+    for _ in range(200):
+        revision = service.get_revision(revision_id)
+        if revision.status in {"complete", "incomplete", "canceled"}:
+            return revision
+        await asyncio.sleep(0.01)
+    raise AssertionError("judgment revision did not finish")
+
+
+def test_llm_judge_builds_whitelist_input_and_judgments(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        database = EvaluationDatabase(tmp_path / "eval")
+        repository = EvaluationRepository(database)
+        trace_catalog = _FakeTraceCatalog(tmp_path)
+        _add_judgeable_run(
+            database,
+            repository,
+            case_id="c1-001",
+            answer="MCP 是外部内容边界。【来源：block_1】",
+            trace_id="b" * 32,
+            run_id="run_judge_success",
+        )
+        case = next(item for item in repository.list_case_catalog() if item.case_id == "c1-001")
+        active = next(
+            revision
+            for revision in case.revisions
+            if revision.revision_id == case.active_revision_id
+        )
+        provider = FakeChatProvider(
+            [
+                json.dumps(
+                    {
+                        "verdict": ("satisfied" if criterion.rule_type == "R" else "not_violated"),
+                        "reason": f"满足 {criterion.title}",
+                    },
+                    ensure_ascii=False,
+                )
+                for criterion in active.criteria
+            ]
+            + [
+                json.dumps(
+                    {
+                        "citations": [
+                            {
+                                "block_id": "block_1",
+                                "verdict": "supported",
+                                "reason": "引用原文支持答案主张。",
+                                "evidence_quotes": ["MCP 沙箱是本文最重要的原文证据。"],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+            ]
+        )
+        service = EvaluationJudgmentService(
+            database=database,
+            repository=repository,
+            trace_catalog=trace_catalog,  # type: ignore[arg-type]
+            credentials=_MemoryCredentials(),
+            chat_provider_factory=lambda _key: provider,
+        )
+        started = await service.start(
+            "run_judge_success",
+            StartJudgmentRequest(
+                concurrency=1,
+                token_budget=1_000_000,
+                judge_review_confirmed=True,
+            ),
+        )
+        revision = await _wait_revision(service, started.revision_id)
+        assert revision.status == "complete", [
+            (item.error_code, item.reason, [inv.error_code for inv in item.invocations])
+            for item in revision.judgments
+        ]
+        assert len(revision.judgments) == 3
+        assert all(item.executor == "llm_judge" for item in revision.judgments)
+        assert all(item.normalized_result == "pass" for item in revision.judgments)
+        assert all(
+            invocation.input_json
+            and json.loads(invocation.input_json)["prompt_version"] == "judge-rubric-v2"
+            for judgment in revision.judgments
+            for invocation in judgment.invocations
+        )
+        assert (
+            next(
+                check for check in revision.checks if check.checker_id == "citation_integrity"
+            ).result
+            == "pass"
+        )
+        assert (
+            next(
+                check for check in revision.checks if check.checker_id == "citation_support"
+            ).result
+            == "pass"
+        )
+        first_request = provider.requests[0]
+        judge_payload = json.loads(first_request[1].content)
+        assert set(judge_payload) == {"answer", "criterion"}
+        assert set(judge_payload["criterion"]) == {"rule_type", "rule_text"}
+
+    asyncio.run(scenario())
+
+
+def test_failed_product_attempt_without_answer_is_still_judged(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        database = EvaluationDatabase(tmp_path / "eval")
+        repository = EvaluationRepository(database)
+        _add_judgeable_run(
+            database,
+            repository,
+            case_id="cf-003",
+            answer=None,
+            trace_id="b" * 32,
+            run_id="run_failed_product",
+            execution_status="failed",
+            outcome_class="product",
+            termination_reason="request_budget_exceeded",
+            error_code="request_budget_exceeded",
+        )
+        provider = FakeChatProvider(
+            [
+                json.dumps(
+                    {
+                        "verdict": "unsatisfied",
+                        "reason": "答案为空，没有告知用户回答被截断。",
+                    },
+                    ensure_ascii=False,
+                )
+            ]
+        )
+        service = EvaluationJudgmentService(
+            database=database,
+            repository=repository,
+            trace_catalog=_FakeTraceCatalog(  # type: ignore[arg-type]
+                tmp_path,
+                answer_completeness="partial",
+            ),
+            credentials=_MemoryCredentials(),
+            chat_provider_factory=lambda _key: provider,
+        )
+        started = await service.start(
+            "run_failed_product",
+            StartJudgmentRequest(
+                concurrency=1,
+                token_budget=100_000,
+                judge_review_confirmed=True,
+            ),
+        )
+
+        revision = await _wait_revision(service, started.revision_id)
+
+        assert revision.status == "complete"
+        assert len(revision.judgments) == 2
+        checker_judgment = next(item for item in revision.judgments if item.executor == "checker")
+        judge_judgment = next(item for item in revision.judgments if item.executor == "llm_judge")
+        assert checker_judgment.normalized_result == "pass"
+        assert judge_judgment.normalized_result == "fail"
+        payload = json.loads(provider.requests[0][1].content)
+        assert payload["answer"] == ""
+        assert (
+            next(
+                check for check in revision.checks if check.checker_id == "citation_integrity"
+            ).result
+            == "pass"
+        )
+        assert not any(check.checker_id == "citation_support" for check in revision.checks)
+
+    asyncio.run(scenario())
+
+
+def test_invalid_judge_output_becomes_pending(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        database = EvaluationDatabase(tmp_path / "eval")
+        repository = EvaluationRepository(database)
+        _add_judgeable_run(
+            database,
+            repository,
+            case_id="c1-001",
+            answer="答案【来源：block_1】",
+            trace_id="b" * 32,
+            run_id="run_judge_invalid",
+        )
+        provider = FakeChatProvider(
+            [
+                "not-json",
+                "not-json",
+                "not-json",
+                json.dumps(
+                    {
+                        "citations": [
+                            {
+                                "block_id": "block_1",
+                                "verdict": "supported",
+                                "reason": "引用原文支持答案主张。",
+                                "evidence_quotes": ["MCP 沙箱是本文最重要的原文证据。"],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        service = EvaluationJudgmentService(
+            database=database,
+            repository=repository,
+            trace_catalog=_FakeTraceCatalog(tmp_path),  # type: ignore[arg-type]
+            credentials=_MemoryCredentials(),
+            chat_provider_factory=lambda _key: provider,
+        )
+        started = await service.start(
+            "run_judge_invalid",
+            StartJudgmentRequest(
+                concurrency=1,
+                token_budget=1_000_000,
+                judge_review_confirmed=True,
+            ),
+        )
+        revision = await _wait_revision(service, started.revision_id)
+        assert revision.status == "incomplete"
+        assert all(item.normalized_result == "pending" for item in revision.judgments)
+        assert all(
+            invocation.status == "output_invalid"
+            for judgment in revision.judgments
+            for invocation in judgment.invocations
+        )
+
+    asyncio.run(scenario())
+
+
+def test_citation_support_is_separate_from_criterion_judgments(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        database = EvaluationDatabase(tmp_path / "eval")
+        repository = EvaluationRepository(database)
+        _add_judgeable_run(
+            database,
+            repository,
+            case_id="c1-001",
+            answer="MCP 是外部内容边界。【来源：block_1】",
+            trace_id="b" * 32,
+            run_id="run_citation_support",
+        )
+        case = next(item for item in repository.list_case_catalog() if item.case_id == "c1-001")
+        active = next(
+            revision
+            for revision in case.revisions
+            if revision.revision_id == case.active_revision_id
+        )
+        provider = FakeChatProvider(
+            [
+                json.dumps(
+                    {
+                        "verdict": ("satisfied" if criterion.rule_type == "R" else "not_violated"),
+                        "reason": f"满足 {criterion.title}",
+                    },
+                    ensure_ascii=False,
+                )
+                for criterion in active.criteria
+            ]
+            + [
+                json.dumps(
+                    {
+                        "citations": [
+                            {
+                                "block_id": "block_1",
+                                "verdict": "unsupported",
+                                "reason": "引用原文没有提到 MCP。",
+                                "evidence_quotes": ["MCP 沙箱是本文最重要的原文证据。"],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+            ]
+        )
+        service = EvaluationJudgmentService(
+            database=database,
+            repository=repository,
+            trace_catalog=_FakeTraceCatalog(tmp_path),  # type: ignore[arg-type]
+            credentials=_MemoryCredentials(),
+            chat_provider_factory=lambda _key: provider,
+        )
+
+        started = await service.start(
+            "run_citation_support",
+            StartJudgmentRequest(
+                concurrency=1,
+                token_budget=1_000_000,
+                judge_review_confirmed=True,
+            ),
+        )
+        revision = await _wait_revision(service, started.revision_id)
+
+        assert revision.status == "complete"
+        assert all(judgment.normalized_result == "pass" for judgment in revision.judgments)
+        citation_support = next(
+            check for check in revision.checks if check.checker_id == "citation_support"
+        )
+        assert citation_support.result == "fail"
+        assert citation_support.error_code == "citation_not_supported"
+        citation_request = json.loads(provider.requests[-1][1].content)
+        assert set(citation_request) == {"answer", "citations"}
+        assert citation_request["citations"][0]["block_id"] == "block_1"
+        assert set(citation_request["citations"][0]) == {
+            "block_id",
+            "doc_title",
+            "section_path",
+            "text",
+        }
+
+    asyncio.run(scenario())
+
+
+def test_truncation_checker_judgment(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        database = EvaluationDatabase(tmp_path / "eval")
+        repository = EvaluationRepository(database)
+        _add_judgeable_run(
+            database,
+            repository,
+            case_id="cf-003",
+            answer="第一部分内容……（内容未完）",
+            trace_id="b" * 32,
+            run_id="run_checker",
+        )
+        service = EvaluationJudgmentService(
+            database=database,
+            repository=repository,
+            trace_catalog=_FakeTraceCatalog(
+                tmp_path,
+                answer_completeness="partial",
+            ),  # type: ignore[arg-type]
+            credentials=_MemoryCredentials(),
+            chat_provider_factory=lambda _key: FakeChatProvider(
+                [
+                    json.dumps(
+                        {
+                            "verdict": "satisfied",
+                            "reason": "答案明确声明内容未完成。",
+                        },
+                        ensure_ascii=False,
+                    )
+                ]
+            ),
+        )
+        started = await service.start(
+            "run_checker",
+            StartJudgmentRequest(
+                concurrency=1,
+                token_budget=1_000_000,
+                judge_review_confirmed=True,
+            ),
+        )
+        revision = await _wait_revision(service, started.revision_id)
+        assert revision.status == "complete"
+        assert len(revision.judgments) == 2
+        checker = next(item for item in revision.judgments if item.executor == "checker")
+        llm = next(item for item in revision.judgments if item.executor == "llm_judge")
+        assert checker.normalized_result == "pass"
+        assert checker.invocations == []
+        assert llm.normalized_result == "pass"
+
+    asyncio.run(scenario())
+
+
+def test_rejudge_creates_new_revision_without_replacing_history(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        database = EvaluationDatabase(tmp_path / "eval")
+        repository = EvaluationRepository(database)
+        _add_judgeable_run(
+            database,
+            repository,
+            case_id="c1-001",
+            answer="答案。【来源：block_1】",
+            trace_id="b" * 32,
+            run_id="run_judge_repeat",
+        )
+        case = next(item for item in repository.list_case_catalog() if item.case_id == "c1-001")
+        active = next(
+            revision
+            for revision in case.revisions
+            if revision.revision_id == case.active_revision_id
+        )
+        criteria_outputs = [
+            json.dumps(
+                {
+                    "verdict": ("satisfied" if criterion.rule_type == "R" else "not_violated"),
+                    "reason": f"满足 {criterion.title}",
+                },
+                ensure_ascii=False,
+            )
+            for criterion in active.criteria
+        ]
+        citation_output = json.dumps(
+            {
+                "citations": [
+                    {
+                        "block_id": "block_1",
+                        "verdict": "supported",
+                        "reason": "引用原文支持答案主张。",
+                        "evidence_quotes": ["MCP 沙箱是本文最重要的原文证据。"],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+        provider = FakeChatProvider(
+            [response for _ in range(2) for response in [*criteria_outputs, citation_output]]
+        )
+        service = EvaluationJudgmentService(
+            database=database,
+            repository=repository,
+            trace_catalog=_FakeTraceCatalog(tmp_path),  # type: ignore[arg-type]
+            credentials=_MemoryCredentials(),
+            chat_provider_factory=lambda _key: provider,
+        )
+
+        first_started = await service.start(
+            "run_judge_repeat",
+            StartJudgmentRequest(
+                concurrency=1,
+                token_budget=1_000_000,
+                judge_review_confirmed=True,
+            ),
+        )
+        first = await _wait_revision(service, first_started.revision_id)
+        second_started = await service.start(
+            "run_judge_repeat",
+            StartJudgmentRequest(
+                concurrency=1,
+                token_budget=1_000_000,
+                judge_review_confirmed=True,
+            ),
+        )
+        second = await _wait_revision(service, second_started.revision_id)
+
+        revisions = service.list_run_revisions("run_judge_repeat")
+        assert {revision.revision_id for revision in revisions} == {
+            first.revision_id,
+            second.revision_id,
+        }
+        assert {
+            judgment.judgment_id for judgment in service.get_revision(first.revision_id).judgments
+        }.isdisjoint(
+            {
+                judgment.judgment_id
+                for judgment in service.get_revision(second.revision_id).judgments
+            }
+        )
+
+    asyncio.run(scenario())
+
+
+def test_request_budget_exhaustion_keeps_judgments_pending(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        database = EvaluationDatabase(tmp_path / "eval")
+        repository = EvaluationRepository(database)
+        _add_judgeable_run(
+            database,
+            repository,
+            case_id="c1-001",
+            answer="答案。【来源：block_1】",
+            trace_id="b" * 32,
+            run_id="run_judge_budget",
+        )
+        service = EvaluationJudgmentService(
+            database=database,
+            repository=repository,
+            trace_catalog=_FakeTraceCatalog(tmp_path),  # type: ignore[arg-type]
+            credentials=_MemoryCredentials(),
+            chat_provider_factory=lambda _key: FakeChatProvider(["unused"]),
+        )
+
+        started = await service.start(
+            "run_judge_budget",
+            StartJudgmentRequest(
+                concurrency=1,
+                token_budget=1_000_000,
+                request_budget=1,
+                judge_review_confirmed=True,
+            ),
+        )
+        revision = await _wait_revision(service, started.revision_id)
+
+        assert revision.status == "incomplete"
+        assert revision.summary["pending"] == len(revision.judgments)
+        assert all(
+            judgment.error_code == "judge_budget_exhausted" for judgment in revision.judgments
+        )
+        assert all(not judgment.invocations for judgment in revision.judgments)
+
+    asyncio.run(scenario())
+
+
+def test_judging_rejects_run_bound_to_legacy_prompt_revision(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        database = EvaluationDatabase(tmp_path / "eval")
+        repository = EvaluationRepository(database)
+        _add_judgeable_run(
+            database,
+            repository,
+            case_id="c1-001",
+            answer="答案。【来源：block_1】",
+            trace_id="b" * 32,
+            run_id="run_judge_legacy_prompt",
+        )
+        with database.session() as session, session.begin():
+            attempt = session.get(
+                EvalAttemptRow,
+                "attempt_run_judge_legacy_prompt",
+            )
+            assert attempt is not None
+            attempt.case_revision_id = "cr_c1_001_selfcontained_v1"
+        service = EvaluationJudgmentService(
+            database=database,
+            repository=repository,
+            trace_catalog=_FakeTraceCatalog(tmp_path),  # type: ignore[arg-type]
+            credentials=_MemoryCredentials(),
+            chat_provider_factory=lambda _key: FakeChatProvider(["unused"]),
+        )
+
+        with pytest.raises(ValueError, match="different judge prompt revision"):
+            await service.start(
+                "run_judge_legacy_prompt",
+                StartJudgmentRequest(
+                    concurrency=1,
+                    token_budget=1_000_000,
+                    judge_review_confirmed=True,
+                ),
+            )
+
+    asyncio.run(scenario())
+
+
+def test_missing_trace_only_blocks_trace_dependent_checks(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        database = EvaluationDatabase(tmp_path / "eval")
+        repository = EvaluationRepository(database)
+        _add_judgeable_run(
+            database,
+            repository,
+            case_id="c1-001",
+            answer="答案。【来源：block_1】",
+            trace_id="b" * 32,
+            run_id="run_judge_trace_missing",
+        )
+        case = next(item for item in repository.list_case_catalog() if item.case_id == "c1-001")
+        active = next(
+            revision
+            for revision in case.revisions
+            if revision.revision_id == case.active_revision_id
+        )
+        provider = FakeChatProvider(
+            [
+                json.dumps(
+                    {
+                        "verdict": ("satisfied" if criterion.rule_type == "R" else "not_violated"),
+                        "reason": f"满足 {criterion.title}",
+                    },
+                    ensure_ascii=False,
+                )
+                for criterion in active.criteria
+            ]
+        )
+        service = EvaluationJudgmentService(
+            database=database,
+            repository=repository,
+            trace_catalog=_MissingTraceCatalog(),  # type: ignore[arg-type]
+            credentials=_MemoryCredentials(),
+            chat_provider_factory=lambda _key: provider,
+        )
+
+        started = await service.start(
+            "run_judge_trace_missing",
+            StartJudgmentRequest(
+                concurrency=1,
+                token_budget=1_000_000,
+                judge_review_confirmed=True,
+            ),
+        )
+        revision = await _wait_revision(service, started.revision_id)
+
+        assert revision.status == "incomplete"
+        assert all(judgment.normalized_result == "pass" for judgment in revision.judgments), [
+            (judgment.criterion_revision_id, judgment.error_code, judgment.reason)
+            for judgment in revision.judgments
+        ]
+        assert all(judgment.invocations for judgment in revision.judgments)
+        assert (
+            next(
+                check for check in revision.checks if check.checker_id == "citation_integrity"
+            ).error_code
+            == "judge_trace_missing"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_retryable_provider_failure_keeps_judgments_pending(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        database = EvaluationDatabase(tmp_path / "eval")
+        repository = EvaluationRepository(database)
+        _add_judgeable_run(
+            database,
+            repository,
+            case_id="c1-001",
+            answer="答案。【来源：block_1】",
+            trace_id="b" * 32,
+            run_id="run_judge_upstream",
+        )
+        service = EvaluationJudgmentService(
+            database=database,
+            repository=repository,
+            trace_catalog=_FakeTraceCatalog(tmp_path),  # type: ignore[arg-type]
+            credentials=_MemoryCredentials(),
+            chat_provider_factory=lambda _key: _UnavailableChatProvider(),
+        )
+
+        started = await service.start(
+            "run_judge_upstream",
+            StartJudgmentRequest(
+                concurrency=1,
+                token_budget=1_000_000,
+                judge_review_confirmed=True,
+            ),
+        )
+        revision = await _wait_revision(service, started.revision_id)
+
+        assert revision.status == "incomplete"
+        assert all(
+            judgment.error_code == "judge_upstream_unavailable" for judgment in revision.judgments
+        )
+        assert all(
+            len(judgment.invocations) == 2
+            and all(
+                invocation.error_code == "chat_upstream_unavailable"
+                for invocation in judgment.invocations
+            )
+            for judgment in revision.judgments
+        )
+
+    asyncio.run(scenario())
