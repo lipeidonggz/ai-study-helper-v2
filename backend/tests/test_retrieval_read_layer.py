@@ -102,6 +102,21 @@ def test_reader_keeps_its_snapshot_after_a_new_collection_is_published(
     }
 
 
+def test_explicit_snapshot_binding_does_not_follow_active_pointer(tmp_path: Path) -> None:
+    first_path = tmp_path / "alpha-doc.html"
+    second_path = tmp_path / "beta-doc.html"
+    first_path.write_bytes(_html("Alpha document", "第一篇文档的第二章节正文。"))
+    second_path.write_bytes(_html("Beta document", "第二篇文档的第二章节正文。"))
+
+    first_snapshot = _ingest(tmp_path, [first_path])
+    second_snapshot = _ingest(tmp_path, [second_path])
+    reader = RetrievalReadService(tmp_path).bind_snapshot(first_snapshot)
+
+    assert second_snapshot != first_snapshot
+    assert RetrievalReadService(tmp_path).bind_current().snapshot_id == second_snapshot
+    assert [document.title for document in reader.list_documents().documents] == ["Alpha document"]
+
+
 def test_list_documents_applies_filters_and_stable_sorting(tmp_path: Path) -> None:
     paths = [tmp_path / f"document-{index}.html" for index in range(3)]
     for index, path in enumerate(paths):

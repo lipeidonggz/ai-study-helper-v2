@@ -18,6 +18,10 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 uuid = { version = "1", features = ["v4"] }
 
+[features]
+default = []
+eval-console = []
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",

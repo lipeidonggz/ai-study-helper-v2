@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -35,6 +36,7 @@ from app.ingestion.source import ArtifactStore
 from app.storage.database import StorageDatabase
 
 INDEX_SCHEMA = "lancedb-blocks-v1"
+SNAPSHOT_ID_PATTERN = re.compile(r"^s_[0-9a-f]{16}$")
 
 
 @dataclass(slots=True)
@@ -137,6 +139,34 @@ class CollectionSnapshotService:
                 503,
             )
         return CurrentCollectionResponse(pointer=pointer, manifest=manifest)
+
+    def snapshot(self, snapshot_id: str) -> CandidateSnapshotManifest:
+        """按 ID 只读加载冻结快照，不读取或改变当前活动指针。"""
+
+        if not SNAPSHOT_ID_PATTERN.fullmatch(snapshot_id):
+            raise IngestFailure(
+                "collection_unavailable",
+                f"invalid collection snapshot id: {snapshot_id}",
+            )
+        snapshot_root = self._collections_root / snapshot_id
+        manifest_path = snapshot_root / "manifest.json"
+        try:
+            manifest = CandidateSnapshotManifest.model_validate_json(
+                manifest_path.read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError) as error:
+            raise IngestFailure(
+                "collection_unavailable",
+                f"collection snapshot manifest is unreadable: {error}",
+                503,
+            ) from error
+        if manifest.snapshot_id != snapshot_id:
+            raise IngestFailure(
+                "collection_unavailable",
+                "collection snapshot id does not match its manifest",
+            )
+        self._verify_snapshot(manifest)
+        return manifest
 
     def active_document(
         self,

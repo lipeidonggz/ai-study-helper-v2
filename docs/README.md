@@ -6,9 +6,9 @@
 
 ## 当前状态
 
-- 阶段：实现阶段，015 后台交付和 016 确定性检索读取层已完成。
-- 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付和快照绑定检索读取能力已实现。
-- 当前工作：020 流式问答与运行诊断事件已完成，下一步进入 021 Trace 持久化与本地诊断。
+- 阶段：实现阶段，021 Trace 持久化与本地诊断已完成。
+- 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付、检索与 Agent 运行链、流式问答和本地 trace 诊断已实现。
+- 当前工作：022A 执行内核与只读目录、022B 用例／用例集编写与快速试跑均已完成。
 
 ## 设计基线
 
@@ -54,6 +54,9 @@
 - [0006 · 使用当前 HTML 入库快照作为检索基线](decisions/0006-use-current-html-corpus-for-retrieval-baseline.md)
 - [0007 · 人-AI 协同控制模型（试行中）](decisions/0007-human-ai-collaboration-control-model.md)
 - [0008 · Harness 统一计算 Tool Observation token](decisions/0008-harness-owned-result-token-accounting.md)
+- [0009 · 单开发壳承载产品和评测](decisions/0009-development-shell-with-compiled-evaluation.md)
+- [0010 · 评测用例与用例集采用草稿、不可变修订版和显式启用](decisions/0010-evaluation-case-and-suite-revision-workflow.md)
+- [0008 · Harness 统一计算 Tool Observation token](decisions/0008-harness-owned-result-token-accounting.md)
 - [切片控制契约与证据包模板](development/slices/TEMPLATE.md)
 - [001 · 桌面 sidecar 最小启动链（已完成）](development/slices/001-desktop-sidecar-bootstrap.md)
 - [002 · PyInstaller one-folder sidecar 与 release 冒烟（已完成）](development/slices/002-packaged-sidecar.md)
@@ -86,6 +89,10 @@
 - [020 · 流式问答工作台人工验收清单（已完成）](development/manual-tests/020-streaming-chat.md)
 - [021 · Trace 持久化与本地诊断（已完成）](development/slices/021-trace-persistence.md)
 - [021 · Trace 本地诊断人工验收清单（已完成）](development/manual-tests/021-trace-local-diagnostics.md)
+- [022A · 评测执行内核与只读用例目录（已完成）](development/slices/022-evaluation-execution-core.md)
+- [022B · 评测用例、用例集编写与快速试跑（已完成）](development/slices/022B-evaluation-authoring.md)
+- [022A · 评测执行内核人工验收清单（已完成）](development/manual-tests/022-evaluation-execution-core.md)
+- [022B · 评测用例与用例集编写人工验收清单（已完成）](development/manual-tests/022B-evaluation-authoring.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库

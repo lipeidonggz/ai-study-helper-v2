@@ -247,6 +247,10 @@ input {
   backdrop-filter: blur(18px);
 }
 
+.main-nav.with-eval {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
 .main-nav button {
   display: flex;
   align-items: center;

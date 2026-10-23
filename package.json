@@ -6,6 +6,7 @@
   "scripts": {
     "prepare": "node scripts/setup-git-hooks.mjs",
     "dev": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1",
+    "dev:eval": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1 -EvalConsole",
     "build": "corepack pnpm --dir desktop tauri build",
     "check": "corepack pnpm --dir frontend check && corepack pnpm --dir desktop check",
     "comments:check": "node scripts/check-comments.mjs",
