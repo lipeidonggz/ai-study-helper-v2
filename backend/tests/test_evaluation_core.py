@@ -17,11 +17,13 @@ from app.evaluation.cases import load_design_case_seeds
 from app.evaluation.database import EvaluationDatabase, _migration_config
 from app.evaluation.models import (
     CaseDraftCriterionView,
+    CriterionSeed,
     PreflightRequest,
     QuickPlanRequest,
     SaveCaseDraftRequest,
     SaveSuiteDraftRequest,
 )
+from app.evaluation.outcomes import classify_attempt_outcome
 from app.evaluation.planner import EvaluationPlanner
 from app.evaluation.repository import EvaluationRepository
 from app.evaluation.runner import EvaluationRunner
@@ -66,13 +68,18 @@ class _FakeRuntime:
                 self._owner.has_blocked = True
                 self._owner.entered.set()
                 await self._owner.release.wait()
+            should_fail = len(self._owner.calls) == 1 and self._owner.fail_first_with is not None
+            status = "failed" if should_fail else "succeeded"
+            answer = None if should_fail else "答案"
+            completeness = "partial" if should_fail else "complete"
+            termination_reason = self._owner.fail_first_with if should_fail else "finish"
             return AgentRunResult(
-                status="succeeded",
+                status=status,
                 trace_id=f"{len(self._owner.calls):032x}",
-                answer="答案",
-                answer_completeness="complete",
+                answer=answer,
+                answer_completeness=completeness,
                 limitations=(),
-                termination_reason="finish",
+                termination_reason=termination_reason,
                 snapshot_id=snapshot_id,
                 prompt_bundle_version="test-prompt-v1",
                 prompt_template_hash="a" * 64,
@@ -84,17 +91,24 @@ class _FakeRuntime:
                 output_tokens=2,
                 sources=[],
                 events=(),
+                trace_status="complete",
             )
         finally:
             self._owner.active -= 1
 
 
 class _FakeExecutionService:
-    def __init__(self, *, block_first: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        block_first: bool = False,
+        fail_first_with: str | None = None,
+    ) -> None:
         self.calls: list[tuple[str, str | None]] = []
         self.settings_overrides: list[RuntimeSettingsResponse] = []
         self.prompt_overrides: list[PromptBundle | None] = []
         self.block_first = block_first
+        self.fail_first_with = fail_first_with
         self.has_blocked = False
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
@@ -223,13 +237,18 @@ def test_design_case_seed_is_complete_and_deterministic() -> None:
     second = load_design_case_seeds()
 
     assert len(first) == 18
-    assert sum(len(case.criteria) for case in first) == 73
+    assert sum(len(case.criteria) for case in first) == 69
     assert [case.content_hash for case in first] == [case.content_hash for case in second]
     assert all(criterion.revision_id for case in first for criterion in case.criteria)
     assert {criterion.rule_type for case in first for criterion in case.criteria} == {
         "R",
         "X",
     }
+    c1 = next(case for case in first if case.case_id == "c1-001")
+    assert c1.criteria[1].rule_text.endswith("没有说明其所属类别，不算满足。")
+    assert not any(
+        criterion.rule_text.endswith(" 边界") for case in first for criterion in case.criteria
+    )
 
 
 def test_schema_v1_upgrades_plan_facts_without_rewriting_them(tmp_path: Path) -> None:
@@ -325,7 +344,7 @@ def test_schema_v1_upgrades_plan_facts_without_rewriting_them(tmp_path: Path) ->
         )
     finally:
         connection.close()
-    assert database.schema_version() == 2
+    assert database.schema_version() == 4
     assert (source_n, source_k) == (10, 9)
     assert mode == "formal"
     assert suite_statuses == {"sr_old": "retired", "sr_new": "active"}
@@ -391,7 +410,59 @@ def test_repository_seed_is_idempotent(tmp_path: Path) -> None:
 
     suite = repository.get_suite_revision("sr_design03_r1")
     assert suite.case_count == 18
-    assert sum(len(case.criteria) for case in suite.cases) == 73
+    assert sum(len(case.criteria) for case in suite.cases) == 69
+
+
+def test_existing_seed_revision_is_not_extended_by_design_changes(tmp_path: Path) -> None:
+    database = EvaluationDatabase(tmp_path)
+    repository = EvaluationRepository(database)
+    seed = next(item for item in load_design_case_seeds() if item.case_id == "cf-003")
+    changed_seed = seed.model_copy(
+        update={
+            "criteria": [
+                *seed.criteria,
+                CriterionSeed(
+                    criterion_id="cf-003-r99",
+                    revision_id="ccr_cf_003_r99_r1",
+                    rule_type="R",
+                    ordinal=99,
+                    title="不应写入历史",
+                    rule_text="新设计内容不应扩展旧 revision。",
+                ),
+            ]
+        }
+    )
+    with database.session() as session, session.begin():
+        repository._seed_case(session, changed_seed, datetime.now(UTC))
+
+    historical = repository.get_case_revisions([seed.revision_id])[0]
+    assert [criterion.criterion_id for criterion in historical.criteria] == [
+        criterion.criterion_id for criterion in seed.criteria
+    ]
+
+
+def test_minimal_judge_seed_routes_semantic_and_truncation_criteria(
+    tmp_path: Path,
+) -> None:
+    database = EvaluationDatabase(tmp_path)
+    repository = EvaluationRepository(database)
+    suites = repository.list_suite_revisions()
+    active_suite = next(
+        suite
+        for suite in suites
+        if suite.suite_id == "design03" and suite.review_status == "active"
+    )
+
+    assert active_suite.revision_id == "sr_design03_minimal_judge_v2"
+    assert active_suite.case_count == 18
+    c1 = next(case for case in active_suite.cases if case.case_id == "c1-001")
+    cf3 = next(case for case in active_suite.cases if case.case_id == "cf-003")
+    assert all(criterion.evaluator == "llm_judge" for criterion in c1.criteria)
+    assert len(cf3.criteria) == 2
+    assert [criterion.title for criterion in cf3.criteria] == ["截断事实", "截断声明"]
+    assert cf3.criteria[0].evaluator == "checker"
+    assert cf3.criteria[0].evaluator_ref == "truncation_declared"
+    assert cf3.criteria[1].evaluator == "llm_judge"
 
 
 def test_runner_pauses_resumes_and_seals_at_attempt_boundary(
@@ -504,6 +575,98 @@ def test_runner_uses_global_attempt_concurrency(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize(
+    ("execution_status", "error_code", "expected"),
+    [
+        ("succeeded", None, "product"),
+        ("partial", None, "product"),
+        ("failed", "request_budget_exceeded", "product"),
+        ("failed", "chat_upstream_unavailable", "infrastructure"),
+        ("failed", "embedding_upstream_unavailable", "infrastructure"),
+        ("failed", "evaluation_attempt_timeout", "infrastructure"),
+        ("canceled", "canceled_by_user", "canceled"),
+        ("outcome_unknown", "evaluation_process_restarted", "unknown"),
+    ],
+)
+def test_attempt_outcome_classification(
+    execution_status: str,
+    error_code: str | None,
+    expected: str,
+) -> None:
+    assert classify_attempt_outcome(execution_status, error_code) == expected
+
+
+def test_product_failure_counts_as_sample_without_replacement(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        database = EvaluationDatabase(tmp_path)
+        repository = EvaluationRepository(database)
+        suite_revision_id = _add_test_suite(database)
+        plan_id = _create_plan(
+            database,
+            repository,
+            suite_revision_id,
+            concurrency=1,
+        )
+        execution = _FakeExecutionService(fail_first_with="request_budget_exceeded")
+        runner = EvaluationRunner(repository, execution)  # type: ignore[arg-type]
+        try:
+            run = await runner.start(plan_id)
+            assert (
+                await _wait_for_status(repository, run.run_id, {"sealed_complete"})
+                == "sealed_complete"
+            )
+            finished = repository.get_run(run.run_id)
+            assert finished.totals["attempts"] == 1
+            assert finished.totals["valid_samples"] == 1
+            assert finished.attempts[0].outcome_class == "product"
+            assert finished.attempts[0].execution_status == "failed"
+            assert finished.attempts[0].trace_status == "complete"
+        finally:
+            await runner.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_infrastructure_failure_is_replaced_without_counting_n(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        database = EvaluationDatabase(tmp_path)
+        repository = EvaluationRepository(database)
+        suite_revision_id = _add_test_suite(database)
+        plan_id = _create_plan(
+            database,
+            repository,
+            suite_revision_id,
+            concurrency=1,
+        )
+        execution = _FakeExecutionService(
+            fail_first_with="chat_upstream_unavailable",
+        )
+        runner = EvaluationRunner(repository, execution)  # type: ignore[arg-type]
+        try:
+            run = await runner.start(plan_id)
+            assert (
+                await _wait_for_status(repository, run.run_id, {"sealed_complete"})
+                == "sealed_complete"
+            )
+            finished = repository.get_run(run.run_id)
+            assert finished.totals["attempts"] == 2
+            assert finished.totals["valid_samples"] == 1
+            assert finished.totals["infrastructure_failures"] == 1
+            assert finished.attempts[0].outcome_class == "infrastructure"
+            assert finished.attempts[1].outcome_class == "product"
+            assert (
+                finished.attempts[1].replacement_for_attempt_id == finished.attempts[0].attempt_id
+            )
+        finally:
+            await runner.shutdown()
+
+    asyncio.run(scenario())
+
+
 def test_restart_marks_running_attempt_unknown_without_resend(tmp_path: Path) -> None:
     database = EvaluationDatabase(tmp_path)
     repository = EvaluationRepository(database)
@@ -522,6 +685,7 @@ def test_restart_marks_running_attempt_unknown_without_resend(tmp_path: Path) ->
     assert recovered.status == "paused"
     assert recovered.pause_reason == "evaluation_process_restarted"
     assert recovered.attempts[0].execution_status == "outcome_unknown"
+    assert recovered.attempts[0].outcome_class == "unknown"
     assert recovered.attempts[0].error_code == "evaluation_process_restarted"
 
 
@@ -564,7 +728,7 @@ def test_case_draft_is_mutable_until_atomic_reviewed_publication(
 
     published = repository.publish_case_draft("c1-001", reviewer="reviewer-a")
     assert published.review_status == "reviewed"
-    assert published.revision_number == 2
+    assert published.revision_number == 6
     assert published.question == "再次修改后的问题"
     assert published.criteria[0].criterion_id == draft.criteria[0].criterion_id
     assert published.criteria[0].revision_id != draft.criteria[0].base_revision_id
@@ -573,7 +737,7 @@ def test_case_draft_is_mutable_until_atomic_reviewed_publication(
         next(
             item for item in repository.list_case_catalog() if item.case_id == "c1-001"
         ).active_revision_id
-        == "cr_c1_001_r1"
+        == "cr_c1_001_minimal_judge_v2"
     )
 
     activated = repository.review_case_revision(
@@ -602,7 +766,10 @@ def test_suite_subset_publication_and_stale_after_case_upgrade(
             name="最小回归",
             description="只跑前两条",
             scope_id="smoke",
-            case_revision_ids=["cr_c1_001_r1", "cr_c2_001_r1"],
+            case_revision_ids=[
+                "cr_c1_001_minimal_judge_v2",
+                "cr_c2_001_minimal_judge_v2",
+            ],
             change_note="建立小套件",
             updated_by="author",
         ),
@@ -610,7 +777,7 @@ def test_suite_subset_publication_and_stale_after_case_upgrade(
     assert len(suite_draft.cases) == 2
 
     suite = repository.publish_suite_draft("design03", reviewer="reviewer-a")
-    assert suite.revision_number == 2
+    assert suite.revision_number == 6
     assert suite.case_count == 2
     assert suite.stale is False
     assert {
@@ -634,7 +801,7 @@ def test_suite_subset_publication_and_stale_after_case_upgrade(
     stale = repository.get_suite_revision(suite.revision_id)
     assert stale.stale is True
     assert any("case_revision_not_active:c1-001" in item for item in stale.stale_reasons)
-    assert case_draft.base_revision_id == "cr_c1_001_r1"
+    assert case_draft.base_revision_id == "cr_c1_001_minimal_judge_v2"
     invalid = EvaluationPlanner(
         repository,
         _StaticCollectionService(_manifest()),

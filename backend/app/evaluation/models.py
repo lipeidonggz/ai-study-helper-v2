@@ -348,8 +348,9 @@ class AttemptView(BaseModel):
     replacement_for_attempt_id: str | None
     session_id: str
     trace_id: str | None
-    trace_status: Literal["complete", "partial", "missing"]
+    trace_status: Literal["complete", "partial", "dropped", "missing"]
     execution_status: str
+    outcome_class: Literal["product", "infrastructure", "canceled", "unknown"]
     termination_reason: str | None
     error_code: str | None
     answer: str | None
@@ -377,8 +378,94 @@ class RunView(BaseModel):
     created_at: str
     started_at: str | None
     sealed_at: str | None
+    updated_at: str
     totals: dict[str, int]
     attempts: list[AttemptView]
+
+
+class StartJudgmentRequest(BaseModel):
+    """启动一次 EvaluationRevision 判定的运行策略。"""
+
+    concurrency: int = Field(default=2, ge=1, le=8)
+    token_budget: int = Field(default=500_000, ge=1)
+    request_budget: int = Field(default=500, ge=1)
+    attempt_timeout_seconds: int = Field(default=60, ge=10, le=300)
+    judge_review_confirmed: bool = False
+
+
+class JudgeInvocationView(BaseModel):
+    """一次 Judge provider 调用及 usage。"""
+
+    invocation_id: str
+    attempt_number: int
+    prompt_version: str
+    model_id: str
+    status: str
+    error_code: str | None
+    input_tokens: int
+    output_tokens: int
+    request_id: str | None
+    input_json: str | None
+    raw_output: str | None
+    started_at: str
+    finished_at: str | None
+
+
+class JudgmentView(BaseModel):
+    """一条 attempt×criterion Judgment 及 invocation 历史。"""
+
+    judgment_id: str
+    attempt_id: str
+    criterion_revision_id: str
+    executor: str
+    executor_ref: str | None
+    verdict: str
+    normalized_result: str
+    reason: str | None
+    evidence: dict[str, Any]
+    error_code: str | None
+    created_at: str
+    invocations: list[JudgeInvocationView]
+
+
+class CheckResultView(BaseModel):
+    """一条通用跨判定项确定性检查结果。"""
+
+    check_result_id: str
+    attempt_id: str
+    checker_id: str
+    checker_version: str
+    result: Literal["pass", "fail", "pending"]
+    payload: dict[str, Any]
+    error_code: str | None
+    created_at: str
+
+
+class EvaluationRevisionView(BaseModel):
+    """一次判定任务的进度、版本和逐项结果。"""
+
+    revision_id: str
+    execution_run_id: str
+    status: Literal["running", "complete", "incomplete", "canceled"]
+    checker_version_set: dict[str, Any]
+    judge_version_set: dict[str, Any]
+    config: dict[str, Any]
+    summary: dict[str, int]
+    error_code: str | None
+    error_message: str | None
+    created_at: str
+    started_at: str | None
+    finished_at: str | None
+    judgments: list[JudgmentView]
+    checks: list[CheckResultView]
+
+
+class JudgePromptView(BaseModel):
+    """当前判官 prompt 的原文与版本，供人工审核。"""
+
+    version: str
+    content_hash: str
+    content: str
 
 
 class EvaluationHealthResponse(BaseModel):

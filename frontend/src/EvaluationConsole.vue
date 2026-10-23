@@ -3,6 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import { fetchWithTimeout } from "./api";
+import TraceArtifactContentViewer from "./TraceArtifactContentViewer.vue";
+import TraceDetailViewer from "./TraceDetailViewer.vue";
+import type { TraceArtifact, TraceDetail } from "./trace";
 
 /** 评测 sidecar 的独立回环地址与启动令牌。 */
 interface EvaluationConnection {
@@ -163,11 +166,14 @@ interface ExecutionPlanView {
 interface AttemptView {
   attempt_id: string;
   case_revision_id: string;
+  replacement_for_attempt_id: string | null;
   trace_id: string | null;
-  trace_status: "complete" | "partial" | "missing";
+  trace_status: "complete" | "partial" | "dropped" | "missing";
   execution_status: string;
+  outcome_class: "product" | "infrastructure" | "canceled" | "unknown";
   termination_reason: string | null;
   error_code: string | null;
+  answer: string | null;
   input_tokens: number;
   output_tokens: number;
   model_calls: number;
@@ -191,29 +197,90 @@ interface RunView {
   created_at: string;
   started_at: string | null;
   sealed_at: string | null;
+  updated_at: string;
   totals: Record<string, number>;
   attempts: AttemptView[];
 }
 
-/** 评测 trace 的摘要与 span 时间线。 */
-interface TraceDetail {
-  manifest: {
-    trace_id: string;
-    status: string;
-    termination_reason: string | null;
-    input_tokens: number;
-    output_tokens: number;
-    question_preview: string;
+/** 一次 Judge provider 调用及 usage。 */
+interface JudgeInvocationView {
+  invocation_id: string;
+  attempt_number: number;
+  prompt_version: string;
+  model_id: string;
+  status: string;
+  error_code: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  request_id: string | null;
+  input_json: string | null;
+  raw_output: string | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
+/** 一条 attempt×criterion 判定及 invocation 历史。 */
+interface JudgmentView {
+  judgment_id: string;
+  attempt_id: string;
+  criterion_revision_id: string;
+  executor: string;
+  executor_ref: string | null;
+  verdict: string;
+  normalized_result: "pass" | "fail" | "pending";
+  reason: string | null;
+  evidence: {
+    block_ids?: string[];
+    quotes?: string[];
   };
-  spans: Array<{
-    span_id: string;
-    name: string;
-    kind: string;
-    status: string;
-    started_at: string;
-    ended_at: string;
-    attributes: Record<string, unknown>;
-  }>;
+  error_code: string | null;
+  created_at: string;
+  invocations: JudgeInvocationView[];
+}
+
+/** 按 R／X 分组的 Judgment 及界面说明。 */
+interface JudgmentGroup {
+  ruleType: "R" | "X";
+  title: string;
+  description: string;
+  items: JudgmentView[];
+}
+
+/** 一条通用跨判定项确定性检查结果。 */
+interface CheckResultView {
+  check_result_id: string;
+  attempt_id: string;
+  checker_id: string;
+  checker_version: string;
+  result: "pass" | "fail" | "pending";
+  payload: Record<string, unknown>;
+  error_code: string | null;
+  created_at: string;
+}
+
+/** 一次判定修订版及其逐项结果。 */
+interface EvaluationRevisionView {
+  revision_id: string;
+  execution_run_id: string;
+  status: "running" | "complete" | "incomplete" | "canceled";
+  checker_version_set: Record<string, unknown>;
+  judge_version_set: Record<string, unknown>;
+  config: Record<string, unknown>;
+  summary: Record<string, number>;
+  error_code: string | null;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  judgments: JudgmentView[];
+  checks: CheckResultView[];
+}
+
+/** 判官 prompt 原文与版本。 */
+interface JudgePromptView {
+  version: string;
+  content_hash: string;
+  content: string;
 }
 
 /** 评测 API 的稳定错误响应。 */
@@ -254,12 +321,26 @@ const plan = ref<ExecutionPlanView | null>(null);
 const runs = ref<RunView[]>([]);
 const historySuiteFilter = ref("all");
 const selectedRun = ref<RunView | null>(null);
+const evaluationRevisions = ref<EvaluationRevisionView[]>([]);
+const evaluationRevision = ref<EvaluationRevisionView | null>(null);
+const isJudgmentFormOpen = ref(false);
+const judgePrompt = ref<JudgePromptView | null>(null);
+const citationPrompt = ref<JudgePromptView | null>(null);
+const judgeReviewConfirmed = ref(false);
+const judgeConcurrency = ref(2);
+const judgeTokenBudget = ref(500_000);
+const judgeRequestBudget = ref(500);
+const judgeTimeoutSeconds = ref(60);
+const judgingBusy = ref(false);
+const judgingError = ref("");
 const traceDetail = ref<TraceDetail | null>(null);
+const historyDetailTab = ref<"judgment" | "trace">("judgment");
 const loading = ref(true);
 const busy = ref(false);
 const error = ref("");
 const message = ref("");
 let pollTimer: number | undefined;
+let judgmentPollTimer: number | undefined;
 
 const selectedSuite = computed(
   () =>
@@ -496,8 +577,12 @@ function selectEvaluationTab(
   }
   if (tab === "history" && activeRun.value) {
     selectedRun.value = null;
+    evaluationRevisions.value = [];
+    evaluationRevision.value = null;
+    isJudgmentFormOpen.value = false;
     traceDetail.value = null;
     stopPolling();
+    stopJudgmentPolling();
   }
 }
 
@@ -562,12 +647,184 @@ function statusText(status: string): string {
     failed: "失败",
     outcome_unknown: "结果未知",
     complete: "完整",
+    incomplete: "不完整",
     missing: "缺失",
     ok: "正常",
     error: "错误",
     dropped: "已丢弃",
+    pass: "通过",
+    fail: "不通过",
+    pending: "待定",
+    satisfied: "满足",
+    unsatisfied: "未满足",
+    violated: "违规",
+    not_violated: "未违规",
+    supported: "有证据支持",
+    unsupported: "无证据支持",
+    unknown: "不确定",
   };
   return labels[status] ?? status;
+}
+
+/** 解释 attempt 是否计入有效评测样本。 */
+function outcomeClassText(outcomeClass: AttemptView["outcome_class"]): string {
+  const labels: Record<AttemptView["outcome_class"], string> = {
+    product: "有效样本",
+    infrastructure: "基础设施失败，不计样本",
+    canceled: "已取消，不计样本",
+    unknown: "等待结果",
+  };
+  return labels[outcomeClass];
+}
+
+/** 把判定或检查失败码转换成可操作的中文说明。 */
+function diagnosticErrorText(code: string): string {
+  const labels: Record<string, string> = {
+    judge_budget_exhausted: "判定预算不足，未发起模型调用",
+    judge_evidence_missing: "缺少可判定的检索证据",
+    judge_trace_incomplete: "运行轨迹不完整，无法构建判定证据",
+    judge_trace_missing: "运行轨迹不存在，无法构建判定证据",
+    judge_trace_invalid: "运行轨迹损坏，无法构建判定证据",
+    judge_evidence_artifact_missing: "检索证据文件缺失",
+    judge_evidence_artifact_invalid: "检索证据文件损坏",
+    judge_output_invalid: "模型输出不符合结构化格式",
+    judge_verdict_invalid: "模型结论超出允许的三态范围",
+    judge_timeout: "模型调用超时",
+    judge_provider_exception: "模型服务调用异常",
+    judge_upstream_unavailable: "模型服务暂时不可用",
+    judge_manual_required: "该判定项需要人工判定",
+    judge_prompt_version_mismatch: "当前判官提示词版本与 criterion 不匹配",
+    citation_block_missing: "答案引用的知识块不在本次检索证据中",
+    citation_not_supported: "答案引用存在，但证据原文不支持对应主张",
+    citation_support_unknown: "现有证据不足以判断引用是否支持答案",
+    citation_support_input_too_large: "本次引用证据超过支持检查输入上限",
+    citation_support_failed: "引用支持检查未完成",
+    citation_output_invalid: "引用支持检查输出格式非法",
+    citation_result_block_set_invalid: "引用支持检查的 block 结果不完整或重复",
+    citation_evidence_quote_invalid: "引用支持检查引用了不存在的证据原文",
+  };
+  return `${labels[code] ?? "执行未完成"}（${code}）`;
+}
+
+/** 把程序检查器标识转换成业务名称。 */
+function checkerText(checkerId: string): string {
+  const labels: Record<string, string> = {
+    citation_integrity: "引用完整性",
+    citation_support: "引用支持",
+    truncation_declared: "截断声明",
+  };
+  return labels[checkerId] ?? checkerId;
+}
+
+/** 按执行者类型展示 CheckResult 的版本来源。 */
+function checkExecutorVersionText(check: CheckResultView): string {
+  if (check.checker_id !== "citation_support") {
+    return `检查器版本 ${check.checker_version}`;
+  }
+  const promptVersion = check.payload.prompt_version;
+  return typeof promptVersion === "string" && promptVersion
+    ? `引用判官 ${promptVersion}`
+    : `引用判官版本 ${check.checker_version}`;
+}
+
+/** 读取检查 payload 中的字符串数组。 */
+function checkStringList(check: CheckResultView, field: string): string[] {
+  const value = check.payload[field];
+  return Array.isArray(value) && value.every((item) => typeof item === "string")
+    ? value
+    : [];
+}
+
+/** 读取引用判官的逐 block 结论。 */
+function checkCitationResults(
+  check: CheckResultView,
+): Array<{
+  blockId: string;
+  verdict: string;
+  reason: string;
+  evidenceQuotes: string[];
+}> {
+  const value = check.payload.citations;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((item) => {
+    if (
+      !item ||
+      typeof item !== "object" ||
+      !("block_id" in item) ||
+      !("verdict" in item) ||
+      !("reason" in item) ||
+      typeof item.block_id !== "string" ||
+      typeof item.verdict !== "string" ||
+      typeof item.reason !== "string"
+    ) {
+      return [];
+    }
+    const evidenceQuotes =
+      "evidence_quotes" in item &&
+      Array.isArray(item.evidence_quotes) &&
+      item.evidence_quotes.every((quote: unknown) => typeof quote === "string")
+        ? item.evidence_quotes
+        : [];
+    return [
+      {
+        blockId: item.block_id,
+        verdict: item.verdict,
+        reason: item.reason,
+        evidenceQuotes,
+      },
+    ];
+  });
+}
+
+/** 读取引用支持检查的调用审计。 */
+function checkInvocations(check: CheckResultView): Array<{
+  attemptNumber: number;
+  status: string;
+  errorCode: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  rawOutput: string | null;
+}> {
+  const value = check.payload.invocations;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((item) => {
+    if (
+      !item ||
+      typeof item !== "object" ||
+      !("attempt_number" in item) ||
+      !("status" in item) ||
+      typeof item.attempt_number !== "number" ||
+      typeof item.status !== "string"
+    ) {
+      return [];
+    }
+    return [
+      {
+        attemptNumber: item.attempt_number,
+        status: item.status,
+        errorCode:
+          "error_code" in item && typeof item.error_code === "string"
+            ? item.error_code
+            : null,
+        inputTokens:
+          "input_tokens" in item && typeof item.input_tokens === "number"
+            ? item.input_tokens
+            : 0,
+        outputTokens:
+          "output_tokens" in item && typeof item.output_tokens === "number"
+            ? item.output_tokens
+            : 0,
+        rawOutput:
+          "raw_output" in item && typeof item.raw_output === "string"
+            ? item.raw_output
+            : null,
+      },
+    ];
+  });
 }
 
 /** 把评测类型代码转换成中文名称。 */
@@ -604,14 +861,14 @@ function staleReasonText(reason: string): string {
   return reason;
 }
 
-/** 把 trace span 类型转换成中文名称。 */
-function spanKindText(kind: string): string {
+/** 把 Judgment executor 转换成中文名称。 */
+function executorText(executor: string): string {
   const labels: Record<string, string> = {
-    LLM: "模型调用",
-    TOOL: "工具调用",
-    INTERNAL: "内部步骤",
+    checker: "程序检查",
+    llm_judge: "LLM 判官",
+    human: "人工判定",
   };
-  return labels[kind] ?? kind;
+  return labels[executor] ?? executor;
 }
 
 const runStatusLabel = computed(() => statusText(selectedRun.value?.status ?? ""));
@@ -627,6 +884,99 @@ const caseById = computed(() => {
     values.set(item.revision_id, item);
   }
   return values;
+});
+
+const criterionById = computed(() => {
+  const values = new Map<string, CriterionView>();
+  for (const catalogItem of caseCatalog.value) {
+    for (const revision of catalogItem.revisions) {
+      for (const criterion of revision.criteria) {
+        values.set(criterion.revision_id, criterion);
+      }
+    }
+  }
+  return values;
+});
+
+const judgmentGroups = computed<JudgmentGroup[]>(() => {
+  const judgments = evaluationRevision.value?.judgments ?? [];
+  return [
+    {
+      ruleType: "R",
+      title: "必选判定项",
+      description:
+        "对同一执行样本的答案进行检查。全部 R 都通过才算满足；任一 R 不通过则整体失败；存在待定项时不能得出通过结论。",
+      items: judgments.filter(
+        (judgment) =>
+          criterionById.value.get(judgment.criterion_revision_id)?.rule_type ===
+          "R",
+      ),
+    },
+    {
+      ruleType: "X",
+      title: "边界判定项",
+      description:
+        "对同一执行样本的答案进行检查，确认是否触碰明确禁止的边界。全部 X 都合规才算满足；任一 X 违规则整体失败；存在待定项时不能得出通过结论。",
+      items: judgments.filter(
+        (judgment) =>
+          criterionById.value.get(judgment.criterion_revision_id)?.rule_type ===
+          "X",
+      ),
+    },
+  ];
+});
+
+const canStartJudgment = computed(() => {
+  if (!selectedRun.value || !judgePrompt.value) {
+    return false;
+  }
+  return (
+    ["sealed_complete", "sealed_partial", "canceled"].includes(
+      selectedRun.value.status,
+    ) &&
+    !evaluationRevisions.value.some((revision) => revision.status === "running")
+  );
+});
+
+const citationIntegrityCheck = computed(() =>
+  evaluationRevision.value?.checks.find(
+    (check) => check.checker_id === "citation_integrity",
+  ),
+);
+
+const citationSupportCheck = computed(() =>
+  evaluationRevision.value?.checks.find(
+    (check) => check.checker_id === "citation_support",
+  ),
+);
+
+const citationJudgeNotice = computed(() => {
+  if (!evaluationRevision.value || citationSupportCheck.value) {
+    return "";
+  }
+  if (!citationIntegrityCheck.value) {
+    return "尚未生成引用完整性检查。";
+  }
+  if (citationIntegrityCheck.value.result === "pending") {
+    return "运行轨迹或证据不可用，未执行引用支持判官。";
+  }
+  if (
+    checkStringList(citationIntegrityCheck.value, "cited_block_ids").length === 0
+  ) {
+    return "本次答案没有显式引用，引用支持判官未触发。";
+  }
+  return "本次存在无效引用，引用支持判官未执行。";
+});
+
+/** 当前选中的判定修订版；切换时同步轮询状态。 */
+const selectedEvaluationRevisionId = computed({
+  get: () => evaluationRevision.value?.revision_id ?? "",
+  set: (revisionId: string) => {
+    const selected = evaluationRevisions.value.find(
+      (revision) => revision.revision_id === revisionId,
+    );
+    setCurrentEvaluationRevision(selected ?? null);
+  },
 });
 
 /** 构造带启动令牌的评测 API 请求头。 */
@@ -674,11 +1024,20 @@ async function connectAndLoad(): Promise<void> {
       "eval_backend_connection",
     );
     await waitForHealth();
-    const [loadedSuites, loadedCases, collection, recentRuns] = await Promise.all([
+    const [
+      loadedSuites,
+      loadedCases,
+      collection,
+      recentRuns,
+      loadedJudgePrompt,
+      loadedCitationPrompt,
+    ] = await Promise.all([
       api<SuiteRevisionView[]>("/api/eval/suites"),
       api<CaseCatalogItem[]>("/api/eval/cases"),
       api<CurrentCollection | null>("/api/eval/collections/current"),
       api<RunView[]>("/api/eval/runs"),
+      api<JudgePromptView>("/api/eval/judge-prompt"),
+      api<JudgePromptView>("/api/eval/citation-prompt"),
     ]);
     suites.value = loadedSuites;
     caseCatalog.value = loadedCases;
@@ -688,6 +1047,8 @@ async function connectAndLoad(): Promise<void> {
     snapshotId.value =
       collection?.manifest.snapshot_id ?? snapshotId.value;
     runs.value = recentRuns;
+    judgePrompt.value = loadedJudgePrompt;
+    citationPrompt.value = loadedCitationPrompt;
     const active = recentRuns.find((run) =>
       ["planned", "running", "paused"].includes(run.status),
     );
@@ -1183,6 +1544,20 @@ function quickSelectedRevisionNumber(
   );
 }
 
+/** 根据 attempt 查找对应的稳定 case ID。 */
+function caseIdForAttempt(attemptId: string): string {
+  const attempt = selectedRun.value?.attempts.find(
+    (item) => item.attempt_id === attemptId,
+  );
+  if (!attempt) {
+    return attemptId;
+  }
+  return (
+    caseById.value.get(attempt.case_revision_id)?.case_id ??
+    attempt.case_revision_id
+  );
+}
+
 /** 请求后端验证现场并生成不可变 ExecutionPlan。 */
 async function runPreflight(): Promise<void> {
   busy.value = true;
@@ -1293,10 +1668,123 @@ async function refreshRun(): Promise<void> {
     if (!activeRun.value) {
       stopPolling();
       await refreshRuns();
+      await loadEvaluations(selectedRun.value.run_id);
     }
   } catch (reason) {
     error.value = `刷新运行进度失败：${String(reason)}`;
     stopPolling();
+  }
+}
+
+/** 切换当前查看的判定修订版，并让轮询只跟随当前修订版。 */
+function setCurrentEvaluationRevision(
+  revision: EvaluationRevisionView | null,
+): void {
+  evaluationRevision.value = revision;
+  if (revision) {
+    const index = evaluationRevisions.value.findIndex(
+      (item) => item.revision_id === revision.revision_id,
+    );
+    if (index === -1) {
+      evaluationRevisions.value = [revision, ...evaluationRevisions.value];
+    } else {
+      evaluationRevisions.value.splice(index, 1, revision);
+    }
+  }
+  if (revision?.status === "running") {
+    scheduleJudgmentPolling();
+  } else {
+    stopJudgmentPolling();
+  }
+}
+
+/** 展开或收起重新判定表单，避免在模板中直接修改响应式状态。 */
+function toggleJudgmentForm(): void {
+  isJudgmentFormOpen.value = !isJudgmentFormOpen.value;
+}
+
+/** 加载一个历史 run 的全部 EvaluationRevision，并优先保留当前选择。 */
+async function loadEvaluations(runId: string): Promise<void> {
+  judgingError.value = "";
+  try {
+    const revisions = await api<EvaluationRevisionView[]>(
+      `/api/eval/runs/${encodeURIComponent(runId)}/evaluations`,
+    );
+    const selectedRevisionId = evaluationRevision.value?.revision_id;
+    evaluationRevisions.value = revisions;
+    setCurrentEvaluationRevision(
+      revisions.find((item) => item.revision_id === selectedRevisionId) ??
+        revisions[0] ??
+        null,
+    );
+  } catch (reason) {
+    judgingError.value = `读取判定记录失败：${String(reason)}`;
+  }
+}
+
+/** 启动逐 criterion 判定。 */
+async function startJudgment(): Promise<void> {
+  if (!selectedRun.value || !judgeReviewConfirmed.value) {
+    return;
+  }
+  judgingBusy.value = true;
+  judgingError.value = "";
+  try {
+    const revision = await api<EvaluationRevisionView>(
+      `/api/eval/runs/${encodeURIComponent(selectedRun.value.run_id)}/judging`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          concurrency: judgeConcurrency.value,
+          token_budget: judgeTokenBudget.value,
+          request_budget: judgeRequestBudget.value,
+          attempt_timeout_seconds: judgeTimeoutSeconds.value,
+          judge_review_confirmed: true,
+        }),
+      },
+    );
+    isJudgmentFormOpen.value = false;
+    judgeReviewConfirmed.value = false;
+    setCurrentEvaluationRevision(revision);
+  } catch (reason) {
+    judgingError.value = `启动判定失败：${String(reason)}`;
+  } finally {
+    judgingBusy.value = false;
+  }
+}
+
+/** 刷新正在运行的 EvaluationRevision。 */
+async function refreshJudgment(): Promise<void> {
+  if (!evaluationRevision.value) {
+    return;
+  }
+  try {
+    const revision = await api<EvaluationRevisionView>(
+      `/api/eval/evaluations/${encodeURIComponent(evaluationRevision.value.revision_id)}`,
+    );
+    setCurrentEvaluationRevision(revision);
+  } catch (reason) {
+    judgingError.value = `刷新判定进度失败：${String(reason)}`;
+    stopJudgmentPolling();
+  }
+}
+
+/** 为 running EvaluationRevision 建立轮询。 */
+function scheduleJudgmentPolling(): void {
+  stopJudgmentPolling();
+  if (evaluationRevision.value?.status === "running") {
+    judgmentPollTimer = window.setInterval(
+      () => void refreshJudgment(),
+      800,
+    );
+  }
+}
+
+/** 停止判定进度轮询。 */
+function stopJudgmentPolling(): void {
+  if (judgmentPollTimer !== undefined) {
+    window.clearInterval(judgmentPollTimer);
+    judgmentPollTimer = undefined;
   }
 }
 
@@ -1330,7 +1818,9 @@ async function inspectTrace(traceId: string | null): Promise<void> {
   if (!traceId) {
     return;
   }
+  historyDetailTab.value = "trace";
   error.value = "";
+  traceDetail.value = null;
   try {
     traceDetail.value = await api<TraceDetail>(
       `/api/eval/traces/${encodeURIComponent(traceId)}`,
@@ -1340,11 +1830,56 @@ async function inspectTrace(traceId: string | null): Promise<void> {
   }
 }
 
+/** 切换到历史详情页签；首次进入轨迹时自动打开第一条可用 trace。 */
+function selectHistoryDetailTab(tab: "judgment" | "trace"): void {
+  historyDetailTab.value = tab;
+  if (tab === "trace" && !traceDetail.value) {
+    const attempt = selectedRun.value?.attempts.find((item) => item.trace_id);
+    void inspectTrace(attempt?.trace_id ?? null);
+  }
+}
+
+/** 读取评测 trace 的 artifact，并返回文本或格式化 JSON。 */
+async function loadTraceArtifactContent(
+  traceId: string,
+  artifact: TraceArtifact,
+): Promise<string> {
+  if (!connection.value) {
+    throw new Error("评测服务尚未连接");
+  }
+  if (artifact.state !== "stored") {
+    return artifact.state === "omitted"
+      ? "当前 trace 模式未保存正文，仅保留内容 hash。"
+      : "运行内容写入失败，正文不可用。";
+  }
+  const response = await fetchWithTimeout(
+    `${connection.value.baseUrl}/api/eval/traces/${encodeURIComponent(traceId)}/artifacts/${encodeURIComponent(artifact.artifact_id)}`,
+    {
+      headers: headers(),
+      cache: "no-store",
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  const text = await response.text();
+  return artifact.mime_type.includes("json")
+    ? JSON.stringify(JSON.parse(text) as unknown, null, 2)
+    : text;
+}
+
 /** 切换查看的 ExecutionRun。 */
 function selectRun(run: RunView): void {
   selectedRun.value = run;
+  evaluationRevisions.value = [];
+  evaluationRevision.value = null;
+  isJudgmentFormOpen.value = false;
+  judgeReviewConfirmed.value = false;
   traceDetail.value = null;
+  historyDetailTab.value = "judgment";
+  stopJudgmentPolling();
   schedulePolling();
+  void loadEvaluations(run.run_id);
 }
 
 /** 把 attempt 起止时间格式化成秒级耗时。 */
@@ -1374,11 +1909,62 @@ function formatTokens(value: number): string {
   return new Intl.NumberFormat("zh-CN").format(value);
 }
 
+/** 把 run 时间按浏览器本地时区格式化为年月日和时分秒。 */
+function formatRunDate(value: string | null): string {
+  if (!value) {
+    return "—";
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(new Date(value));
+}
+
+/** 把两个 ISO 时间之间的差值格式化为易读耗时。 */
+function durationBetweenText(start: string, end: string): string {
+  const elapsed = Math.max(
+    0,
+    new Date(end).getTime() - new Date(start).getTime(),
+  );
+  if (elapsed < 1_000) {
+    return `${elapsed} 毫秒`;
+  }
+  const seconds = Math.floor(elapsed / 1_000);
+  if (seconds < 60) {
+    return `${seconds} 秒`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (minutes < 60) {
+    return `${minutes} 分 ${remainingSeconds} 秒`;
+  }
+  const hours = Math.floor(minutes / 60);
+  return `${hours} 小时 ${minutes % 60} 分`;
+}
+
+/** 计算历史 run 从开始到封存／最终状态更新的耗时。 */
+function runDurationText(run: RunView): string {
+  if (["planned", "running", "paused"].includes(run.status)) {
+    return "进行中";
+  }
+  const startedAt = run.started_at ?? run.created_at;
+  const finishedAt = run.sealed_at ?? run.updated_at;
+  return durationBetweenText(startedAt, finishedAt);
+}
+
 onMounted(() => {
   void connectAndLoad();
 });
 
-onBeforeUnmount(stopPolling);
+onBeforeUnmount(() => {
+  stopPolling();
+  stopJudgmentPolling();
+});
 </script>
 
 <template>
@@ -1591,7 +2177,15 @@ onBeforeUnmount(stopPolling);
                       item.suite_revision_number ?? "?"
                     } 版`
               }}
-              · {{ item.totals.attempts }} 个执行样本
+              · {{ item.totals.attempts }} 个执行样本 / 有效
+              {{ item.totals.valid_samples ?? 0 }}
+            </small>
+            <small>
+              {{ formatRunDate(item.started_at ?? item.created_at) }}
+              <template v-if="item.sealed_at">
+                → {{ formatRunDate(item.sealed_at) }}
+              </template>
+              · 耗时 {{ runDurationText(item) }}
             </small>
           </button>
         </section>
@@ -1943,7 +2537,9 @@ onBeforeUnmount(stopPolling);
                     <strong>{{ criterion.rule_type }} · {{ criterion.title }}</strong>
                     <p>{{ criterion.rule_text }}</p>
                     <small>
-                      {{ criterion.criterion_id }} · 修订 {{ criterion.revision_id }}
+                      {{ criterion.criterion_id }} ·
+                      {{ executorText(criterion.evaluator) }} ·
+                      修订 {{ criterion.revision_id }}
                     </small>
                   </li>
                 </ul>
@@ -2231,6 +2827,13 @@ onBeforeUnmount(stopPolling);
                       } 版 · ${selectedRun.suite_revision_id ?? ""}`
                 }}
               </small>
+              <small class="eval-run-time">
+                执行时间：{{ formatRunDate(selectedRun.started_at ?? selectedRun.created_at) }}
+                <template v-if="selectedRun.sealed_at">
+                  → {{ formatRunDate(selectedRun.sealed_at) }}
+                </template>
+                · 耗时 {{ runDurationText(selectedRun) }}
+              </small>
             </div>
             <span class="eval-run-state" :class="selectedRun.status">
               {{ runStatusLabel }}
@@ -2245,10 +2848,8 @@ onBeforeUnmount(stopPolling);
               <strong>{{ selectedRun.totals.attempts }}</strong>
             </div>
             <div>
-              <span>有效答案</span>
-              <strong>
-                {{ selectedRun.totals.succeeded + selectedRun.totals.partial }}
-              </strong>
+              <span>有效样本</span>
+              <strong>{{ selectedRun.totals.valid_samples ?? 0 }}</strong>
             </div>
             <div>
               <span>输入 token</span>
@@ -2305,6 +2906,7 @@ onBeforeUnmount(stopPolling);
               </div>
               <span class="eval-attempt-status" :class="attempt.execution_status">
                 {{ statusText(attempt.execution_status) }}
+                <small>{{ outcomeClassText(attempt.outcome_class) }}</small>
               </span>
               <span>首字 {{ firstTokenLabel(attempt) }}</span>
               <span>耗时 {{ durationLabel(attempt) }}</span>
@@ -2321,30 +2923,435 @@ onBeforeUnmount(stopPolling);
               </button>
             </div>
           </div>
+          <nav
+            v-if="evaluationTab === 'history'"
+            class="eval-history-tabs"
+            aria-label="历史结果详情"
+          >
+            <button
+              type="button"
+              :class="{ active: historyDetailTab === 'judgment' }"
+              @click="selectHistoryDetailTab('judgment')"
+            >
+              判定结果
+            </button>
+            <button
+              type="button"
+              :class="{ active: historyDetailTab === 'trace' }"
+              @click="selectHistoryDetailTab('trace')"
+            >
+              运行轨迹
+            </button>
+          </nav>
         </section>
 
         <section
-          v-if="traceDetail"
-          v-show="['execute', 'history'].includes(evaluationTab)"
-          class="eval-panel eval-trace-panel"
+          v-show="
+            evaluationTab === 'history' &&
+            selectedRun &&
+            historyDetailTab === 'judgment'
+          "
+          class="eval-panel eval-judgment-panel"
         >
           <div class="eval-panel-heading">
             <div>
-              <span class="eval-kicker">运行轨迹</span>
-              <h3>{{ traceDetail.manifest.trace_id }}</h3>
+              <span class="eval-kicker">判官</span>
+              <h3>逐项判定</h3>
             </div>
-            <span class="eval-count">{{ statusText(traceDetail.manifest.status) }}</span>
+            <span class="eval-count">
+              {{
+                evaluationRevision
+                  ? statusText(evaluationRevision.status)
+                  : "尚未判定"
+              }}
+            </span>
           </div>
-          <p class="eval-trace-question">
-            {{ traceDetail.manifest.question_preview }}
-          </p>
-          <ol class="eval-span-list">
-            <li v-for="span in traceDetail.spans" :key="span.span_id">
-              <strong>{{ span.name }}</strong>
-              <span>{{ spanKindText(span.kind) }} · {{ statusText(span.status) }}</span>
-              <small>{{ span.started_at }} → {{ span.ended_at }}</small>
-            </li>
-          </ol>
+
+          <section class="eval-prompt-review">
+            <div class="eval-prompt-review-heading">
+              <strong>判官提示词</strong>
+              <span>启动判定前必须共同审阅</span>
+            </div>
+            <details v-if="judgePrompt" class="eval-judge-prompt">
+              <summary>
+                <span>
+                  <strong>主判官 · {{ judgePrompt.version }}</strong>
+                  <small>
+                    只接收答案和当前 criterion 的 rule_type／rule_text，逐条判断
+                    R／X 是否满足。
+                  </small>
+                </span>
+                <code>{{ judgePrompt.content_hash.slice(0, 12) }}</code>
+              </summary>
+              <pre>{{ judgePrompt.content }}</pre>
+            </details>
+            <details v-if="citationPrompt" class="eval-judge-prompt">
+              <summary>
+                <span>
+                  <strong>引用支持判官 · {{ citationPrompt.version }}</strong>
+                  <small>
+                    只在答案存在合法显式引用时触发，逐 block 检查证据是否支持对应主张。
+                  </small>
+                </span>
+                <code>{{ citationPrompt.content_hash.slice(0, 12) }}</code>
+              </summary>
+              <pre>{{ citationPrompt.content }}</pre>
+            </details>
+          </section>
+
+          <div v-if="evaluationRevisions.length" class="eval-revision-picker">
+            <label class="eval-field">
+              <span>判定修订版</span>
+              <select v-model="selectedEvaluationRevisionId">
+                <option
+                  v-for="revision in evaluationRevisions"
+                  :key="revision.revision_id"
+                  :value="revision.revision_id"
+                >
+                  {{ formatRunDate(revision.created_at) }} ·
+                  {{ statusText(revision.status) }} ·
+                  通过 {{ revision.summary.pass ?? 0 }}/{{ revision.summary.total ?? 0 }} ·
+                  {{ revision.revision_id.slice(-8) }}
+                </option>
+              </select>
+            </label>
+            <button
+              type="button"
+              class="eval-secondary"
+              :disabled="
+                judgingBusy ||
+                !canStartJudgment ||
+                evaluationRevision?.status === 'running'
+              "
+              @click="toggleJudgmentForm"
+            >
+              {{ isJudgmentFormOpen ? "收起重新判定" : "重新判定" }}
+            </button>
+          </div>
+
+          <template v-if="!evaluationRevision || isJudgmentFormOpen">
+            <label class="eval-confirm-row">
+              <input v-model="judgeReviewConfirmed" type="checkbox" />
+              <span>
+                我已人工审阅主判官和引用支持判官提示词，并确认可以调用云端模型。
+              </span>
+            </label>
+            <div class="eval-form-grid eval-judge-config-grid">
+              <label class="eval-field">
+                <span>判定并发</span>
+                <input
+                  v-model.number="judgeConcurrency"
+                  type="number"
+                  min="1"
+                  max="8"
+                />
+                <small class="eval-field-help">
+                  同时处理多少个“样本 × 判定项”任务。默认 2。
+                </small>
+              </label>
+              <label class="eval-field">
+                <span>Token 消耗上限</span>
+                <input
+                  v-model.number="judgeTokenBudget"
+                  type="number"
+                  min="1"
+                />
+                <small class="eval-field-help">
+                  整次判定最多消耗多少 token，包含判官提示词、题目、答案、证据等输入和模型回复。
+                </small>
+              </label>
+              <label class="eval-field">
+                <span>模型调用次数上限</span>
+                <input
+                  v-model.number="judgeRequestBudget"
+                  type="number"
+                  min="1"
+                />
+                <small class="eval-field-help">
+                  每个任务通常调用 1 次、最多重试 1 次；系统启动任务前按 2
+                  次预留，因此设得过小会让任务保持待定。
+                </small>
+              </label>
+              <label class="eval-field">
+                <span>单次超时（秒）</span>
+                <input
+                  v-model.number="judgeTimeoutSeconds"
+                  type="number"
+                  min="10"
+                  max="300"
+                />
+                <small class="eval-field-help">
+                  任意一次模型请求超过该时长即中止，并将判定保持为待定。
+                </small>
+              </label>
+            </div>
+            <p v-if="judgingError" class="eval-error">{{ judgingError }}</p>
+            <div class="eval-actions">
+              <button
+                type="button"
+                class="eval-primary"
+                :disabled="
+                  judgingBusy ||
+                  !judgeReviewConfirmed ||
+                  !canStartJudgment
+                "
+                @click="startJudgment"
+              >
+                {{
+                  judgingBusy
+                    ? "正在启动…"
+                    : evaluationRevision
+                      ? "创建新判定"
+                      : "开始判定"
+                }}
+              </button>
+              <button
+                v-if="isJudgmentFormOpen"
+                type="button"
+                :disabled="judgingBusy"
+                @click="toggleJudgmentForm"
+              >
+                取消
+              </button>
+            </div>
+          </template>
+
+          <template v-if="evaluationRevision">
+            <div class="eval-judgment-summary">
+              <span>总任务 {{ evaluationRevision.summary.total ?? 0 }}</span>
+              <span>通过 {{ evaluationRevision.summary.pass ?? 0 }}</span>
+              <span>不通过 {{ evaluationRevision.summary.fail ?? 0 }}</span>
+              <span>待定 {{ evaluationRevision.summary.pending ?? 0 }}</span>
+              <span>{{ evaluationRevision.revision_id }}</span>
+            </div>
+            <p v-if="judgingError || evaluationRevision.error_message" class="eval-error">
+              {{ judgingError || evaluationRevision.error_message }}
+            </p>
+            <div class="eval-check-guide">
+              <article>
+                <strong>引用完整性</strong>
+                <p>
+                  检查引用有没有指错地方。程序会逐个核对答案中的知识块编号（block_id），确认它们都来自本次检索工具实际返回的证据。
+                </p>
+              </article>
+              <article>
+                <strong>引用支持</strong>
+                <p>
+                  检查引用内容能不能证明答案。模型判官会逐个查看被引用的证据原文，判断它是否支持答案中的对应说法。只有引用完整且答案包含显式引用时才会执行。
+                </p>
+              </article>
+            </div>
+            <details class="eval-check-results">
+              <summary>通用跨判定项检查 · {{ evaluationRevision.checks.length }}</summary>
+              <details
+                v-for="check in evaluationRevision.checks"
+                :key="check.check_result_id"
+                class="eval-check-result"
+              >
+                <summary>
+                  <strong :title="check.checker_id">
+                    {{ checkerText(check.checker_id) }}
+                  </strong>
+                  <span :class="`result-${check.result}`">
+                    {{ statusText(check.result) }}
+                  </span>
+                  <small>
+                    {{ caseIdForAttempt(check.attempt_id) }} ·
+                    {{
+                      check.error_code
+                        ? diagnosticErrorText(check.error_code)
+                        : "无错误"
+                    }}
+                    · {{ checkExecutorVersionText(check) }}
+                  </small>
+                </summary>
+                <div class="eval-check-detail">
+                  <p
+                    v-if="
+                      typeof check.payload.reason === 'string' &&
+                      check.payload.reason
+                    "
+                  >
+                    {{ check.payload.reason }}
+                  </p>
+                  <p
+                    v-if="
+                      typeof check.payload.model_id === 'string' &&
+                      check.payload.model_id
+                    "
+                  >
+                    模型：{{ check.payload.model_id }}
+                  </p>
+                  <template v-if="check.checker_id === 'citation_integrity'">
+                    <p>
+                      已引用：
+                      {{ checkStringList(check, "cited_block_ids").join("、") || "无" }}
+                    </p>
+                    <p>
+                      缺失 block：
+                      {{ checkStringList(check, "missing_block_ids").join("、") || "无" }}
+                    </p>
+                    <p>
+                      本次工具证据块：
+                      {{ check.payload.evidence_block_count ?? 0 }}
+                    </p>
+                  </template>
+                  <template v-if="check.checker_id === 'citation_support'">
+                    <article
+                      v-for="citation in checkCitationResults(check)"
+                      :key="citation.blockId"
+                      class="eval-citation-result"
+                    >
+                      <header>
+                        <code>{{ citation.blockId }}</code>
+                        <span>{{ statusText(citation.verdict) }}</span>
+                      </header>
+                      <p>{{ citation.reason }}</p>
+                      <blockquote
+                        v-for="(quote, index) in citation.evidenceQuotes"
+                        :key="index"
+                      >
+                        {{ quote }}
+                      </blockquote>
+                    </article>
+                    <details
+                      v-for="invocation in checkInvocations(check)"
+                      :key="invocation.attemptNumber"
+                      class="eval-check-invocation"
+                    >
+                      <summary>
+                        第 {{ invocation.attemptNumber }} 次 ·
+                        {{ statusText(invocation.status) }} ·
+                        输入 {{ invocation.inputTokens }} / 输出
+                        {{ invocation.outputTokens }} token
+                      </summary>
+                      <p v-if="invocation.errorCode">
+                        {{ diagnosticErrorText(invocation.errorCode) }}
+                      </p>
+                      <pre v-if="invocation.rawOutput">{{ invocation.rawOutput }}</pre>
+                    </details>
+                  </template>
+                </div>
+              </details>
+              <p v-if="citationJudgeNotice" class="eval-check-notice">
+                {{ citationJudgeNotice }}
+              </p>
+            </details>
+            <div class="eval-judgment-groups">
+              <section
+                v-for="group in judgmentGroups"
+                v-show="group.items.length"
+                :key="group.ruleType"
+                class="eval-judgment-group"
+                :class="`eval-judgment-group-${group.ruleType.toLowerCase()}`"
+              >
+                <header class="eval-judgment-group-guide">
+                  <span class="eval-rule-badge">{{ group.ruleType }}</span>
+                  <div>
+                    <h4>{{ group.title }}</h4>
+                    <p>{{ group.description }}</p>
+                  </div>
+                </header>
+                <div class="eval-judgment-list">
+                  <article
+                    v-for="judgment in group.items"
+                    :key="judgment.judgment_id"
+                  >
+                    <div class="eval-judgment-head">
+                      <div>
+                        <strong>{{ caseIdForAttempt(judgment.attempt_id) }}</strong>
+                        <span>
+                          {{
+                            criterionById.get(judgment.criterion_revision_id)?.title ??
+                            judgment.criterion_revision_id
+                          }}
+                        </span>
+                      </div>
+                      <span :class="`result-${judgment.normalized_result}`">
+                        {{ statusText(judgment.normalized_result) }}
+                      </span>
+                    </div>
+                    <p>
+                      {{ executorText(judgment.executor) }}：
+                      {{ statusText(judgment.verdict) }} ·
+                      {{
+                        judgment.error_code
+                          ? diagnosticErrorText(judgment.error_code)
+                          : judgment.reason ?? "无判定说明"
+                      }}
+                    </p>
+                    <p v-if="judgment.evidence.quotes?.length" class="eval-judge-quote">
+                      “{{ judgment.evidence.quotes[0] }}”
+                    </p>
+                    <details v-if="judgment.invocations.length">
+                      <summary>
+                        判官调用 · {{ judgment.invocations.length }} 次
+                      </summary>
+                      <article
+                        v-for="invocation in judgment.invocations"
+                        :key="invocation.invocation_id"
+                        class="eval-invocation"
+                      >
+                        <span>
+                          第 {{ invocation.attempt_number }} 次 ·
+                          {{ statusText(invocation.status) }} · {{ invocation.model_id }}
+                        </span>
+                        <small>
+                          输入 {{ invocation.input_tokens }} / 输出
+                          {{ invocation.output_tokens }} token
+                        </small>
+                        <details
+                          v-if="invocation.input_json"
+                          class="eval-invocation-payload"
+                        >
+                          <summary>查看判官输入</summary>
+                          <TraceArtifactContentViewer
+                            artifact-kind="judge.input"
+                            :content="invocation.input_json"
+                            error=""
+                            :is-loading="false"
+                          />
+                        </details>
+                        <details
+                          v-if="invocation.raw_output"
+                          class="eval-invocation-payload"
+                        >
+                          <summary>查看判官输出</summary>
+                          <TraceArtifactContentViewer
+                            artifact-kind="judge.output"
+                            :content="invocation.raw_output"
+                            error=""
+                            :is-loading="false"
+                          />
+                        </details>
+                      </article>
+                    </details>
+                  </article>
+                </div>
+              </section>
+            </div>
+          </template>
+        </section>
+
+        <section
+          v-if="
+            (evaluationTab === 'history' &&
+              selectedRun &&
+              historyDetailTab === 'trace') ||
+            (evaluationTab === 'execute' && traceDetail)
+          "
+          class="eval-trace-shell"
+        >
+          <TraceDetailViewer
+            v-if="traceDetail"
+            :trace="traceDetail"
+            :load-artifact="loadTraceArtifactContent"
+          />
+          <div v-else class="eval-panel eval-placeholder">
+            <span class="eval-kicker">运行轨迹</span>
+            <h3>选择一个执行样本的运行轨迹</h3>
+            <p>在上方样本列表点击“运行轨迹”后，这里会展示调用树和运行内容。</p>
+          </div>
         </section>
 
         <section
@@ -2643,6 +3650,10 @@ onBeforeUnmount(stopPolling);
   color: #75847a;
   font-size: 0.7rem;
   font-weight: 400;
+}
+
+.eval-field-help {
+  line-height: 1.5;
 }
 
 .eval-stale-notice {
@@ -3013,6 +4024,29 @@ onBeforeUnmount(stopPolling);
   gap: 0 12px;
 }
 
+.eval-judge-config-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 14px;
+  row-gap: 18px;
+  align-items: start;
+}
+
+.eval-judge-config-grid .eval-field {
+  grid-template-rows: 22px 44px auto;
+  align-items: start;
+  margin-top: 0;
+}
+
+.eval-judge-config-grid .eval-field > span {
+  min-height: 22px;
+  line-height: 22px;
+}
+
+.eval-judge-config-grid .eval-field > input {
+  box-sizing: border-box;
+  height: 44px;
+}
+
 .eval-field-wide {
   grid-column: 1 / -1;
 }
@@ -3026,6 +4060,7 @@ onBeforeUnmount(stopPolling);
 
 .eval-actions button,
 .eval-heading-actions button,
+.eval-secondary,
 .eval-primary {
   border: 1px solid #b8cbbd;
   border-radius: 10px;
@@ -3050,9 +4085,26 @@ onBeforeUnmount(stopPolling);
 
 .eval-actions button:disabled,
 .eval-heading-actions button:disabled,
+.eval-secondary:disabled,
 .eval-primary:disabled {
   cursor: not-allowed;
   opacity: 0.5;
+}
+
+.eval-revision-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid #dce6de;
+  border-radius: 10px;
+  background: #f7faf7;
+}
+
+.eval-revision-picker .eval-field {
+  margin: 0;
 }
 
 .eval-plan-status {
@@ -3144,6 +4196,383 @@ onBeforeUnmount(stopPolling);
   margin-top: 4px;
   color: #6f7f74;
   font-size: 0.7rem;
+}
+
+.eval-run-time {
+  display: block;
+  margin-top: 3px;
+  color: #7b897f;
+  font-size: 0.68rem;
+}
+
+.eval-judgment-panel {
+  border-color: rgba(65, 103, 79, 0.24);
+}
+
+.eval-prompt-review {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.eval-prompt-review-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #52675a;
+  font-size: 0.72rem;
+}
+
+.eval-prompt-review-heading span {
+  color: #7b897f;
+  font-size: 0.67rem;
+}
+
+.eval-judge-prompt {
+  border: 1px solid #dce6de;
+  border-radius: 10px;
+  padding: 9px 11px;
+  color: #53665a;
+  font-size: 0.75rem;
+}
+
+.eval-judge-prompt > summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.eval-judge-prompt > summary > span {
+  display: grid;
+  gap: 3px;
+}
+
+.eval-judge-prompt > summary small {
+  color: #728178;
+  font-size: 0.68rem;
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+.eval-judge-prompt > summary code {
+  color: #718077;
+  font-size: 0.65rem;
+}
+
+.eval-judge-prompt pre {
+  max-height: 320px;
+  overflow: auto;
+  margin: 10px 0 0;
+  color: #405249;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-size: 0.72rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.eval-confirm-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-top: 12px;
+  border-radius: 10px;
+  padding: 10px;
+  color: #53665a;
+  background: #f0f5f0;
+  font-size: 0.76rem;
+  line-height: 1.55;
+}
+
+.eval-judgment-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-top: 12px;
+  border-radius: 10px;
+  padding: 10px;
+  color: #53665a;
+  background: #eef5ef;
+  font-size: 0.74rem;
+}
+
+.eval-check-guide {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.eval-check-guide article {
+  display: grid;
+  gap: 4px;
+  border: 1px solid #dfe8e0;
+  border-radius: 10px;
+  padding: 9px 11px;
+  color: #53665a;
+  background: #f8fbf8;
+  font-size: 0.72rem;
+}
+
+.eval-check-guide strong {
+  color: #345a42;
+}
+
+.eval-check-guide p {
+  margin: 0;
+  line-height: 1.55;
+}
+
+.eval-check-results {
+  margin-top: 12px;
+  border: 1px solid #dfe8e0;
+  border-radius: 10px;
+  padding: 9px 11px;
+}
+
+.eval-check-result {
+  margin-top: 7px;
+  border-top: 1px solid #e3eae4;
+}
+
+.eval-check-result > summary {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) auto;
+  gap: 3px 10px;
+  padding: 7px 0;
+  color: #53665a;
+  cursor: pointer;
+  font-size: 0.74rem;
+}
+
+.eval-check-result > summary small {
+  grid-column: 1 / -1;
+  color: #7b897f;
+}
+
+.eval-check-detail {
+  display: grid;
+  gap: 8px;
+  padding: 8px 0 9px;
+  color: #53665a;
+  font-size: 0.72rem;
+}
+
+.eval-check-detail p,
+.eval-check-detail blockquote,
+.eval-check-detail ul {
+  margin: 0;
+}
+
+.eval-check-notice {
+  margin: 8px 0 0;
+  border-radius: 8px;
+  padding: 8px 9px;
+  color: #66776c;
+  background: #eef3ec;
+  font-size: 0.7rem;
+}
+
+.eval-check-detail blockquote {
+  border-left: 3px solid #72a17f;
+  padding-left: 9px;
+  color: #637269;
+}
+
+.eval-citation-result {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #e0e8e1;
+  border-radius: 8px;
+  padding: 8px;
+  background: #f8fbf8;
+}
+
+.eval-citation-result header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.eval-check-invocation {
+  border-radius: 8px;
+  padding: 7px 8px;
+  background: #f4f7f4;
+}
+
+.eval-check-invocation > summary {
+  cursor: pointer;
+  color: #52675a;
+  font-size: 0.7rem;
+}
+
+.eval-check-invocation pre {
+  max-height: 220px;
+  overflow: auto;
+  margin: 7px 0 0;
+  border-radius: 7px;
+  padding: 8px;
+  background: #fff;
+  white-space: pre-wrap;
+}
+
+.result-pass {
+  color: #2c6b42;
+  font-weight: 700;
+}
+
+.result-fail {
+  color: #9a3636;
+  font-weight: 700;
+}
+
+.result-pending {
+  color: #895e20;
+  font-weight: 700;
+}
+
+.eval-judgment-groups {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.eval-judgment-group {
+  display: grid;
+  gap: 9px;
+  border: 1px solid #dfe8e0;
+  border-radius: 12px;
+  padding: 10px;
+  background: #fbfdfb;
+}
+
+.eval-judgment-group-r {
+  border-left: 4px solid #5d8f6b;
+}
+
+.eval-judgment-group-x {
+  border-left: 4px solid #b48a45;
+}
+
+.eval-judgment-group-guide {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.eval-judgment-group-guide > div {
+  display: grid;
+  gap: 3px;
+}
+
+.eval-judgment-group-guide h4 {
+  margin: 0;
+  color: #345a42;
+  font-size: 0.82rem;
+}
+
+.eval-judgment-group-guide p {
+  margin: 0;
+  color: #66776c;
+  font-size: 0.72rem;
+  line-height: 1.55;
+}
+
+.eval-rule-badge {
+  display: inline-grid;
+  flex: 0 0 26px;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  color: #fff;
+  background: #5d8f6b;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.eval-judgment-group-x .eval-rule-badge {
+  background: #a77b36;
+}
+
+.eval-judgment-list {
+  display: grid;
+  gap: 8px;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.eval-judgment-list > article {
+  display: grid;
+  gap: 7px;
+  border: 1px solid #e0e8e1;
+  border-radius: 10px;
+  padding: 10px;
+  color: #52645a;
+  background: #fff;
+  font-size: 0.75rem;
+}
+
+.eval-judgment-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.eval-judgment-head > div {
+  display: grid;
+  gap: 2px;
+}
+
+.eval-judgment-list p {
+  margin: 0;
+  line-height: 1.55;
+}
+
+.eval-judge-quote {
+  border-left: 3px solid #72a17f;
+  padding-left: 9px;
+  color: #637269;
+}
+
+.eval-invocation {
+  display: grid;
+  gap: 4px;
+  margin-top: 7px;
+  border-top: 1px solid #e1e9e2;
+  padding-top: 7px;
+  font-size: 0.7rem;
+}
+
+.eval-invocation small {
+  color: #7e8b82;
+}
+
+.eval-invocation-payload {
+  border-radius: 7px;
+  padding: 6px 8px;
+  background: #f7faf7;
+}
+
+.eval-invocation-payload summary {
+  color: #4f6657;
+  cursor: pointer;
+  font-size: 0.7rem;
+}
+
+.eval-invocation pre {
+  max-height: 180px;
+  overflow: auto;
+  margin: 2px 0 0;
+  border-radius: 7px;
+  padding: 7px;
+  color: #46564c;
+  background: #f4f7f4;
+  font-family: Consolas, monospace;
+  white-space: pre-wrap;
 }
 
 .eval-run-state.running {
@@ -3243,11 +4672,19 @@ onBeforeUnmount(stopPolling);
 }
 
 .eval-attempt-status {
+  display: grid;
+  gap: 1px;
+  justify-items: center;
   border-radius: 999px;
   padding: 3px 7px;
   color: #315d3d;
   background: #e8f4ea;
   font-weight: 700;
+}
+
+.eval-attempt-status small {
+  font-size: 0.58rem;
+  font-weight: 500;
 }
 
 .eval-attempt-status.failed,
@@ -3271,28 +4708,32 @@ onBeforeUnmount(stopPolling);
   text-decoration: underline;
 }
 
-.eval-trace-question {
-  color: #56695c;
+.eval-history-tabs {
+  display: flex;
+  gap: 6px;
+  margin-top: 18px;
+  border-bottom: 1px solid #dce6de;
 }
 
-.eval-span-list {
-  display: grid;
-  gap: 7px;
-  margin: 0;
-  padding-left: 20px;
-}
-
-.eval-span-list li {
-  display: grid;
-  grid-template-columns: minmax(160px, 1fr) auto;
-  gap: 2px 10px;
-  color: #53655a;
+.eval-history-tabs button {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 8px 12px;
+  color: #65766b;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
   font-size: 0.76rem;
+  font-weight: 700;
 }
 
-.eval-span-list small {
-  grid-column: 1 / -1;
-  color: #839087;
+.eval-history-tabs button.active {
+  border-bottom-color: #2d6942;
+  color: #245b38;
+}
+
+.eval-trace-shell {
+  min-width: 0;
 }
 
 .eval-empty {
@@ -3332,6 +4773,18 @@ onBeforeUnmount(stopPolling);
   .eval-form-grid,
   .eval-metrics {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .eval-judge-config-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .eval-check-guide {
+    grid-template-columns: 1fr;
+  }
+
+  .eval-revision-picker {
+    grid-template-columns: 1fr;
   }
 
   .eval-field-wide {

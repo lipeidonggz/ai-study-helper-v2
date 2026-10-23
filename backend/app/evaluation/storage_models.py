@@ -398,6 +398,11 @@ class EvalAttemptRow(EvaluationBase):
     trace_id: Mapped[str | None] = mapped_column(String(64))
     trace_status: Mapped[str] = mapped_column(String(16), nullable=False)
     execution_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    outcome_class: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="unknown",
+    )
     termination_reason: Mapped[str | None] = mapped_column(String(96))
     error_code: Mapped[str | None] = mapped_column(String(96))
     answer: Mapped[str | None] = mapped_column(Text)
@@ -409,6 +414,135 @@ class EvalAttemptRow(EvaluationBase):
     first_token_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     usage_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+
+
+class EvalEvaluationRevisionRow(EvaluationBase):
+    """一次逐 criterion 判定任务的不可变配置与可更新进度。"""
+
+    __tablename__ = "eval_evaluation_revisions"
+
+    revision_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    execution_run_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("eval_execution_runs.run_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    checker_version_set_json: Mapped[str] = mapped_column(Text, nullable=False)
+    judge_version_set_json: Mapped[str] = mapped_column(Text, nullable=False)
+    config_json: Mapped[str] = mapped_column(Text, nullable=False)
+    summary_json: Mapped[str] = mapped_column(Text, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(96))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class EvalCheckResultRow(EvaluationBase):
+    """一次通用跨判定项确定性检查结果，只追加。"""
+
+    __tablename__ = "eval_check_results"
+
+    check_result_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    evaluation_revision_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey(
+            "eval_evaluation_revisions.revision_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    attempt_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("eval_attempts.attempt_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    checker_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    checker_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    result: Mapped[str] = mapped_column(String(16), nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(96))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+    )
+
+
+class EvalJudgmentRow(EvaluationBase):
+    """一个 attempt 对一条 criterion 的最终判定事实。"""
+
+    __tablename__ = "eval_judgments"
+
+    judgment_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    evaluation_revision_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey(
+            "eval_evaluation_revisions.revision_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    attempt_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("eval_attempts.attempt_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    criterion_revision_id: Mapped[str] = mapped_column(
+        String(96),
+        ForeignKey(
+            "eval_criterion_revisions.revision_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    executor: Mapped[str] = mapped_column(String(16), nullable=False)
+    executor_ref: Mapped[str | None] = mapped_column(Text)
+    verdict: Mapped[str] = mapped_column(String(24), nullable=False)
+    normalized_result: Mapped[str] = mapped_column(String(16), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text)
+    evidence_json: Mapped[str] = mapped_column(Text, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(96))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+    )
+
+
+class EvalJudgeInvocationRow(EvaluationBase):
+    """一次 Judge provider 调用及其原始输入输出。"""
+
+    __tablename__ = "eval_judge_invocations"
+
+    invocation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    judgment_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("eval_judgments.judgment_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(96), nullable=False)
+    model_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    output_hash: Mapped[str | None] = mapped_column(String(64))
+    input_json: Mapped[str] = mapped_column(Text, nullable=False)
+    raw_output: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(96))
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    request_id: Mapped[str | None] = mapped_column(String(128))
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class EvalSchemaVersionRow(EvaluationBase):

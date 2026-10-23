@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
@@ -39,11 +39,18 @@ from app.providers.chat import (
 from app.providers.embeddings import EmbeddingProvider
 from app.retrieval.hybrid import DEFAULT_HYBRID_RETRIEVAL_PROFILE, HybridRetrievalProfile
 from app.retrieval.service import RetrievalFailure, RetrievalReadService, RetrievalSnapshotReader
-from app.tracing.models import TraceMode
+from app.tracing.models import TraceMode, TraceStatus
 from app.tracing.store import TraceSession, TraceSpanHandle, TraceStore, new_trace_id
 
 AGENT_LOOP_VERSION = "react-langgraph-v1"
 HISTORY_ASSISTANT_WRAPPER = "Assistant response:\n"
+_PARTIAL_ANSWER_NOTICE = "**内容未完**：本次回答因运行预算限制提前结束，以上内容可能不完整。"
+_TRUNCATION_NOTICE_MARKERS = (
+    "内容未完",
+    "尚未讲完",
+    "回答未完成",
+    "内容未完成",
+)
 TOOL_ACTIVITY_LABELS = {
     "list_documents": "正在查看文档列表",
     "get_outline": "正在查看文档结构",
@@ -108,6 +115,7 @@ class AgentRunResult:
     output_tokens: int
     sources: list[dict[str, Any]]
     events: tuple[AgentEvent, ...]
+    trace_status: Literal["complete", "partial", "dropped", "missing"] = "missing"
 
 
 class _AgentGraphState(TypedDict, total=False):
@@ -265,8 +273,8 @@ class AgentRuntime:
         except Exception:
             self._finish_trace_failure(trace_session)
             raise
-        self._finish_trace(trace_session, result)
-        return result
+        trace_status = self._finish_trace(trace_session, result)
+        return replace(result, trace_status=trace_status)
 
     def begin_trace(self, question: str) -> tuple[str, TraceSession | None]:
         """在模型和工具启动前创建运行级 trace 上下文。"""
@@ -370,9 +378,9 @@ class AgentRuntime:
         self,
         trace_session: TraceSession | None,
         result: AgentRunResult,
-    ) -> None:
+    ) -> TraceStatus | Literal["missing"]:
         if trace_session is None:
-            return
+            return "missing"
         try:
             trace_session.finish(
                 status=result.status,
@@ -393,6 +401,9 @@ class AgentRuntime:
                     trace_session.trace_id,
                     "trace finalization failed",
                 )
+        if self._trace_store is None:
+            return "missing"
+        return self._trace_store.health(trace_session.trace_id).status
 
     def _finish_trace_failure(self, trace_session: TraceSession | None) -> None:
         if trace_session is None or self._trace_store is None:
@@ -693,16 +704,30 @@ class _AgentGraphExecution:
                 decision="terminate",
             )
         if used_tokens >= self._config.max_request_tokens:
+            answer, _ = _partial_answer_with_notice(state.get("final_answer"))
             return self._terminal_state(
                 state,
                 events=events,
-                status="failed",
+                status="partial",
                 reason="request_budget_exceeded",
+                extra={
+                    "final_answer": answer,
+                    "limitations": _with_limitation(
+                        limitations,
+                        code="request_budget_exceeded",
+                        message="本次回答因累计 token 预算耗尽而提前结束。",
+                        parameter="max_request_tokens",
+                        limit=self._config.max_request_tokens,
+                    ),
+                    "tools_enabled": False,
+                    "finalization_mode": True,
+                },
             )
 
         system_prompt = self._prompt_bundle.render(
             tools=self._adapter.descriptors if tools_enabled else [],
             collection_status=self._collection_status(),
+            finalization_mode=finalization_mode,
         )
         user_prompt = self._render_user_prompt(state.get("question", ""), history)
         prior_context_estimate = state.get("next_context_estimate")
@@ -740,6 +765,7 @@ class _AgentGraphExecution:
                 system_prompt = self._prompt_bundle.render(
                     tools=[],
                     collection_status=self._collection_status(),
+                    finalization_mode=True,
                 )
                 if prior_system_prompt is not None and prior_context_estimate is not None:
                     system_delta = self._token_counter.count(
@@ -753,12 +779,14 @@ class _AgentGraphExecution:
                     )
                     context_estimate_source = "estimated"
             if context_estimate > self._config.max_context_tokens:
+                answer, _ = _partial_answer_with_notice(state.get("final_answer"))
                 return self._terminal_state(
                     state,
                     events=events,
-                    status="failed",
+                    status="partial",
                     reason="context_budget_exceeded",
                     extra={
+                        "final_answer": answer,
                         "limitations": _with_limitation(
                             limitations,
                             code="context_budget_exceeded",
@@ -768,7 +796,9 @@ class _AgentGraphExecution:
                             ),
                             parameter="max_context_tokens",
                             limit=self._config.max_context_tokens,
-                        )
+                        ),
+                        "tools_enabled": False,
+                        "finalization_mode": True,
                     },
                 )
         self._trace_budget_check(
@@ -992,6 +1022,46 @@ class _AgentGraphExecution:
         try:
             action = parse_action(result.content)
         except ActionProtocolError as protocol_error:
+            if finalization_mode or result.finish_reason == "length":
+                reason = (
+                    "request_budget_exceeded" if finalization_mode else "answer_output_truncated"
+                )
+                answer, visible_suffix = _partial_answer_with_notice(outcome.emitted_answer)
+                if visible_suffix:
+                    self._record_event(
+                        events,
+                        AgentEvent(
+                            event_type="answer_delta",
+                            payload={"delta": visible_suffix},
+                        ),
+                    )
+                return self._terminal_state(
+                    state,
+                    events=events,
+                    status="partial",
+                    reason=reason,
+                    extra={
+                        "history": history,
+                        "final_answer": answer,
+                        "limitations": _with_limitation(
+                            limitations,
+                            code=reason,
+                            message=(
+                                "模型最终答案未按协议闭合；已保留用户实际看到的部分正文，"
+                                "并标记内容未完。"
+                            ),
+                        ),
+                        "agent_turns": agent_turns,
+                        "model_calls": model_calls,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "tools_enabled": False,
+                        "finalization_mode": True,
+                        "current_system_prompt": system_prompt,
+                        "next_context_estimate": next_context_estimate,
+                        "context_estimate_source": next_context_estimate_source,
+                    },
+                )
             observation = _observation(
                 harness_status="protocol_error",
                 tool=None,
@@ -1046,7 +1116,23 @@ class _AgentGraphExecution:
                             payload={"delta": final_delta},
                         ),
                     )
-            answer = _render_answer_with_limitations(action.answer, limitations)
+            answer_text = action.answer
+            if result.finish_reason == "length":
+                limitations = _with_limitation(
+                    limitations,
+                    code="answer_output_truncated",
+                    message="最终答案达到单次输出长度上限，部分内容未完。",
+                )
+                answer_text, visible_suffix = _partial_answer_with_notice(answer_text)
+                if visible_suffix:
+                    self._record_event(
+                        events,
+                        AgentEvent(
+                            event_type="answer_delta",
+                            payload={"delta": visible_suffix},
+                        ),
+                    )
+            answer = _render_answer_with_limitations(answer_text, limitations)
             status: Literal["succeeded", "partial"] = "partial" if limitations else "succeeded"
             self._record_event(
                 events,
@@ -1798,3 +1884,20 @@ def _render_answer_with_limitations(
     details = "；".join(limitation.message.rstrip("。") for limitation in limitations)
     warning = f"注意：本次回答未完整完成。{details}。以下内容仅基于已经获取并进入上下文的证据。"
     return f"{warning}\n\n{answer}"
+
+
+def _partial_answer_with_notice(answer: str | None) -> tuple[str, str]:
+    """补齐用户可见的部分回答声明，并返回新增流式增量。
+
+    模型可能被输出长度截断在 ``Finish[...]`` 中间。此时已经流出的正文仍然
+    是用户实际看到的内容，不能因为协议未闭合而丢弃；追加固定声明可保证用户
+    知道回答不完整，并让 checker 获得稳定、可核验的截断事实。
+    """
+
+    content = (answer or "").strip()
+    if any(marker in content for marker in _TRUNCATION_NOTICE_MARKERS):
+        return content, ""
+    if not content:
+        return _PARTIAL_ANSWER_NOTICE, _PARTIAL_ANSWER_NOTICE
+    suffix = f"\n\n---\n\n{_PARTIAL_ANSWER_NOTICE}"
+    return f"{content}{suffix}", suffix

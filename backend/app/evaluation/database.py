@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.evaluation.storage_models import EvalSchemaVersionRow
 
-EVALUATION_SCHEMA_VERSION = 2
+EVALUATION_SCHEMA_VERSION = 4
 
 
 def _migrations_directory() -> Path:

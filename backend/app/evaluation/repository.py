@@ -30,6 +30,7 @@ from app.evaluation.models import (
     SuiteDraftView,
     SuiteRevisionView,
 )
+from app.evaluation.outcomes import AttemptOutcomeClass
 from app.evaluation.storage_models import (
     EvalAttemptRow,
     EvalCaseDraftCriterionRow,
@@ -111,6 +112,9 @@ class EvaluationRepository:
                         ordinal=ordinal,
                     )
                 )
+            self._ensure_judge_ready_versions(session, seeds, reviewed_at)
+            self._ensure_self_contained_versions(session, seeds, reviewed_at)
+            self._ensure_minimal_judge_versions(session, seeds, reviewed_at)
 
     def list_suite_revisions(self) -> list[SuiteRevisionView]:
         """返回全部 suite revision 及其固定 case revision。"""
@@ -875,6 +879,7 @@ class EvaluationRepository:
                     session_id=f"eval-session-{uuid4().hex}",
                     trace_status="missing",
                     execution_status="running",
+                    outcome_class="unknown",
                     started_at=utc_now(),
                 )
             )
@@ -887,6 +892,7 @@ class EvaluationRepository:
         execution_status: str,
         trace_id: str | None,
         trace_status: str,
+        outcome_class: AttemptOutcomeClass,
         termination_reason: str | None,
         error_code: str | None,
         answer: str | None,
@@ -908,6 +914,7 @@ class EvaluationRepository:
             row.execution_status = execution_status
             row.trace_id = trace_id
             row.trace_status = trace_status
+            row.outcome_class = outcome_class
             row.termination_reason = termination_reason
             row.error_code = error_code
             row.answer = answer
@@ -928,6 +935,7 @@ class EvaluationRepository:
             ).all()
             for attempt in running_attempts:
                 attempt.execution_status = "outcome_unknown"
+                attempt.outcome_class = "unknown"
                 attempt.error_code = "evaluation_process_restarted"
                 attempt.finished_at = utc_now()
             running_runs = session.scalars(
@@ -945,29 +953,29 @@ class EvaluationRepository:
             session.add(EvalCaseRow(case_id=seed.case_id))
             session.flush()
         revision = session.get(EvalCaseRevisionRow, seed.revision_id)
-        if revision is None:
-            session.add(
-                EvalCaseRevisionRow(
-                    revision_id=seed.revision_id,
-                    case_id=seed.case_id,
-                    revision_number=1,
-                    category=seed.category,
-                    question=seed.question,
-                    target_bindings_json=_json(seed.target_bindings),
-                    distractor_metadata_json=_json(seed.distractor_metadata),
-                    n=seed.n,
-                    k=seed.k,
-                    execution_policy_json=_json(seed.execution_policy),
-                    source_ref=seed.source_ref,
-                    content_hash=seed.content_hash,
-                    review_status=seed.review_status,
-                    reviewer=seed.reviewer,
-                    reviewed_at=reviewed_at,
-                )
+        if revision is not None:
+            # 历史 revision 及其 criterion 集合都不可变；设计变化只追加新版本。
+            return
+        session.add(
+            EvalCaseRevisionRow(
+                revision_id=seed.revision_id,
+                case_id=seed.case_id,
+                revision_number=1,
+                category=seed.category,
+                question=seed.question,
+                target_bindings_json=_json(seed.target_bindings),
+                distractor_metadata_json=_json(seed.distractor_metadata),
+                n=seed.n,
+                k=seed.k,
+                execution_policy_json=_json(seed.execution_policy),
+                source_ref=seed.source_ref,
+                content_hash=seed.content_hash,
+                review_status=seed.review_status,
+                reviewer=seed.reviewer,
+                reviewed_at=reviewed_at,
             )
-            session.flush()
-        elif revision.content_hash != seed.content_hash:
-            raise ValueError(f"seed content changed without a revision: {seed.revision_id}")
+        )
+        session.flush()
         for criterion in seed.criteria:
             criterion_row = session.get(EvalCriterionRow, criterion.criterion_id)
             if criterion_row is None:
@@ -1014,6 +1022,429 @@ class EvaluationRepository:
                         ordinal=criterion.ordinal,
                     )
                 )
+
+    def _ensure_judge_ready_versions(
+        self,
+        session,
+        seeds: list[CaseSeed],
+        reviewed_at: datetime,
+    ) -> None:
+        """首次升级时创建 r2 judge-ready revisions 与新的 active suite。"""
+
+        configured_revision_ids: list[str] = []
+        for seed in seeds:
+            case_revision_id = f"cr_{seed.case_id.replace('-', '_')}_judge_v1"
+            configured_revision_ids.append(case_revision_id)
+            if session.get(EvalCaseRevisionRow, case_revision_id) is not None:
+                continue
+            criterion_revision_ids: list[str] = []
+            criterion_hashes: list[str] = []
+            for criterion in seed.criteria:
+                checker = seed.case_id == "cf-003" and criterion.criterion_id.endswith("-r1")
+                evaluator = "checker" if checker else "llm_judge"
+                evaluator_ref = "truncation_declared" if checker else "judge-rubric-v1"
+                revision_id = (
+                    f"ccr_{seed.case_id.replace('-', '_')}_"
+                    f"{criterion.criterion_id.rsplit('-', 1)[-1]}_judge_v1"
+                )
+                revision = EvalCriterionRevisionRow(
+                    revision_id=revision_id,
+                    criterion_id=criterion.criterion_id,
+                    revision_number=2,
+                    rule_type=criterion.rule_type,
+                    ordinal=criterion.ordinal,
+                    title=criterion.title,
+                    rule_text=criterion.rule_text,
+                    evaluator=evaluator,
+                    evaluator_ref=evaluator_ref,
+                    source_ref=seed.source_ref,
+                    content_hash=_content_hash(
+                        {
+                            **criterion.model_dump(mode="json"),
+                            "evaluator": evaluator,
+                            "evaluator_ref": evaluator_ref,
+                            "judge_ready": "v1",
+                        }
+                    ),
+                    change_note="023A 判官路由：语义 LLM Judge，截断规则使用 checker。",
+                    review_status="active",
+                    reviewer="023A-seed",
+                    reviewed_at=reviewed_at,
+                )
+                session.add(revision)
+                session.flush()
+                criterion_revision_ids.append(revision_id)
+                criterion_hashes.append(revision.content_hash)
+            previous_active = session.scalars(
+                select(EvalCaseRevisionRow).where(
+                    EvalCaseRevisionRow.case_id == seed.case_id,
+                    EvalCaseRevisionRow.review_status == "active",
+                )
+            ).all()
+            for previous in previous_active:
+                previous.review_status = "retired"
+                previous.reviewer = "023A-seed"
+                previous.reviewed_at = reviewed_at
+            session.flush()
+            session.add(
+                EvalCaseRevisionRow(
+                    revision_id=case_revision_id,
+                    case_id=seed.case_id,
+                    revision_number=2,
+                    category=seed.category,
+                    question=seed.question,
+                    target_bindings_json=_json(seed.target_bindings),
+                    distractor_metadata_json=_json(seed.distractor_metadata),
+                    n=seed.n,
+                    k=seed.k,
+                    execution_policy_json=_json(seed.execution_policy),
+                    source_ref=seed.source_ref,
+                    content_hash=_content_hash(
+                        {
+                            "case": seed.content_hash,
+                            "criteria": criterion_hashes,
+                            "judge_ready": "v1",
+                        }
+                    ),
+                    change_note="023A 判官就绪修订版。",
+                    review_status="active",
+                    reviewer="023A-seed",
+                    reviewed_at=reviewed_at,
+                )
+            )
+            session.flush()
+            for ordinal, criterion_revision_id in enumerate(
+                criterion_revision_ids,
+                start=1,
+            ):
+                session.add(
+                    EvalCaseRevisionCriterionRow(
+                        case_revision_id=case_revision_id,
+                        criterion_revision_id=criterion_revision_id,
+                        ordinal=ordinal,
+                    )
+                )
+
+        judge_suite_revision_id = "sr_design03_judge_v1"
+        if session.get(EvalSuiteRevisionRow, judge_suite_revision_id) is not None:
+            return
+        previous_suites = session.scalars(
+            select(EvalSuiteRevisionRow).where(
+                EvalSuiteRevisionRow.suite_id == DESIGN_SUITE_ID,
+                EvalSuiteRevisionRow.review_status == "active",
+            )
+        ).all()
+        for previous in previous_suites:
+            previous.review_status = "retired"
+            previous.reviewer = "023A-seed"
+            previous.reviewed_at = reviewed_at
+        session.flush()
+        session.add(
+            EvalSuiteRevisionRow(
+                revision_id=judge_suite_revision_id,
+                suite_id=DESIGN_SUITE_ID,
+                revision_number=2,
+                name="设计基线 · LLM Judge v1",
+                description="LLM Judge 为语义判定主力，截断声明使用 checker。",
+                scope_id="current-html-15",
+                review_status="active",
+                reviewer="023A-seed",
+                reviewed_at=reviewed_at,
+                content_hash=_content_hash(configured_revision_ids),
+                change_note="023A judge-ready suite。",
+            )
+        )
+        session.flush()
+        for ordinal, case_revision_id in enumerate(configured_revision_ids, start=1):
+            session.add(
+                EvalSuiteRevisionCaseRow(
+                    suite_revision_id=judge_suite_revision_id,
+                    case_revision_id=case_revision_id,
+                    ordinal=ordinal,
+                )
+            )
+
+    def _ensure_self_contained_versions(
+        self,
+        session,
+        seeds: list[CaseSeed],
+        reviewed_at: datetime,
+    ) -> None:
+        """创建已人工确认的自包含 criterion 修订版与 active suite。"""
+
+        configured_revision_ids: list[str] = []
+        for seed in seeds:
+            case_revision_id = f"cr_{seed.case_id.replace('-', '_')}_selfcontained_v1"
+            configured_revision_ids.append(case_revision_id)
+            if session.get(EvalCaseRevisionRow, case_revision_id) is not None:
+                continue
+            criterion_revision_ids: list[str] = []
+            criterion_hashes: list[str] = []
+            for criterion in seed.criteria:
+                checker = seed.case_id == "cf-003" and criterion.criterion_id.endswith("-r1")
+                evaluator = "checker" if checker else "llm_judge"
+                evaluator_ref = "truncation_declared" if checker else "judge-rubric-v1"
+                revision_id = (
+                    f"ccr_{seed.case_id.replace('-', '_')}_"
+                    f"{criterion.criterion_id.rsplit('-', 1)[-1]}_selfcontained_v1"
+                )
+                revision = EvalCriterionRevisionRow(
+                    revision_id=revision_id,
+                    criterion_id=criterion.criterion_id,
+                    revision_number=3,
+                    rule_type=criterion.rule_type,
+                    ordinal=criterion.ordinal,
+                    title=criterion.title,
+                    rule_text=criterion.rule_text,
+                    evaluator=evaluator,
+                    evaluator_ref=evaluator_ref,
+                    source_ref=seed.source_ref,
+                    content_hash=_content_hash(
+                        {
+                            **criterion.model_dump(mode="json"),
+                            "evaluator": evaluator,
+                            "evaluator_ref": evaluator_ref,
+                            "judge_ready": "selfcontained-v1",
+                        }
+                    ),
+                    change_note="判据自包含修订：仅凭答案和当前 criterion 判定。",
+                    review_status="active",
+                    reviewer="peidong",
+                    reviewed_at=reviewed_at,
+                )
+                session.add(revision)
+                session.flush()
+                criterion_revision_ids.append(revision_id)
+                criterion_hashes.append(revision.content_hash)
+            previous_active = session.scalars(
+                select(EvalCaseRevisionRow).where(
+                    EvalCaseRevisionRow.case_id == seed.case_id,
+                    EvalCaseRevisionRow.review_status == "active",
+                )
+            ).all()
+            for previous in previous_active:
+                previous.review_status = "retired"
+                previous.reviewer = "peidong"
+                previous.reviewed_at = reviewed_at
+            session.flush()
+            session.add(
+                EvalCaseRevisionRow(
+                    revision_id=case_revision_id,
+                    case_id=seed.case_id,
+                    revision_number=3,
+                    category=seed.category,
+                    question=seed.question,
+                    target_bindings_json=_json(seed.target_bindings),
+                    distractor_metadata_json=_json(seed.distractor_metadata),
+                    n=seed.n,
+                    k=seed.k,
+                    execution_policy_json=_json(seed.execution_policy),
+                    source_ref=seed.source_ref,
+                    content_hash=_content_hash(
+                        {
+                            "case": seed.content_hash,
+                            "criteria": criterion_hashes,
+                            "judge_ready": "selfcontained-v1",
+                        }
+                    ),
+                    change_note="判据自包含审查通过，生成新版用例 revision。",
+                    review_status="active",
+                    reviewer="peidong",
+                    reviewed_at=reviewed_at,
+                )
+            )
+            session.flush()
+            for ordinal, criterion_revision_id in enumerate(
+                criterion_revision_ids,
+                start=1,
+            ):
+                session.add(
+                    EvalCaseRevisionCriterionRow(
+                        case_revision_id=case_revision_id,
+                        criterion_revision_id=criterion_revision_id,
+                        ordinal=ordinal,
+                    )
+                )
+
+        suite_revision_id = "sr_design03_selfcontained_v1"
+        if session.get(EvalSuiteRevisionRow, suite_revision_id) is not None:
+            return
+        previous_suites = session.scalars(
+            select(EvalSuiteRevisionRow).where(
+                EvalSuiteRevisionRow.suite_id == DESIGN_SUITE_ID,
+                EvalSuiteRevisionRow.review_status == "active",
+            )
+        ).all()
+        for previous in previous_suites:
+            previous.review_status = "retired"
+            previous.reviewer = "peidong"
+            previous.reviewed_at = reviewed_at
+        session.flush()
+        session.add(
+            EvalSuiteRevisionRow(
+                revision_id=suite_revision_id,
+                suite_id=DESIGN_SUITE_ID,
+                revision_number=3,
+                name="设计基线 · 自包含判据 v1",
+                description="18 个用例、69 条 criterion；仅凭答案和当前 criterion 语义判定。",
+                scope_id="current-html-15",
+                review_status="active",
+                reviewer="peidong",
+                reviewed_at=reviewed_at,
+                content_hash=_content_hash(configured_revision_ids),
+                change_note="判据自包含审查后的 active suite。",
+            )
+        )
+        session.flush()
+        for ordinal, case_revision_id in enumerate(configured_revision_ids, start=1):
+            session.add(
+                EvalSuiteRevisionCaseRow(
+                    suite_revision_id=suite_revision_id,
+                    case_revision_id=case_revision_id,
+                    ordinal=ordinal,
+                )
+            )
+
+    def _ensure_minimal_judge_versions(
+        self,
+        session,
+        seeds: list[CaseSeed],
+        reviewed_at: datetime,
+    ) -> None:
+        """创建只向主判官发送答案和 criterion 的 active revision v2。"""
+
+        configured_revision_ids: list[str] = []
+        for seed in seeds:
+            case_revision_id = f"cr_{seed.case_id.replace('-', '_')}_minimal_judge_v2"
+            configured_revision_ids.append(case_revision_id)
+            if session.get(EvalCaseRevisionRow, case_revision_id) is not None:
+                continue
+            criterion_revision_ids: list[str] = []
+            criterion_hashes: list[str] = []
+            for criterion in seed.criteria:
+                checker = seed.case_id == "cf-003" and criterion.criterion_id.endswith("-r1")
+                evaluator = "checker" if checker else "llm_judge"
+                evaluator_ref = "truncation_declared" if checker else "judge-rubric-v2"
+                revision_id = (
+                    f"ccr_{seed.case_id.replace('-', '_')}_"
+                    f"{criterion.criterion_id.rsplit('-', 1)[-1]}_minimal_judge_v2"
+                )
+                revision = EvalCriterionRevisionRow(
+                    revision_id=revision_id,
+                    criterion_id=criterion.criterion_id,
+                    revision_number=5,
+                    rule_type=criterion.rule_type,
+                    ordinal=criterion.ordinal,
+                    title=criterion.title,
+                    rule_text=criterion.rule_text,
+                    evaluator=evaluator,
+                    evaluator_ref=evaluator_ref,
+                    source_ref=seed.source_ref,
+                    content_hash=_content_hash(
+                        {
+                            **criterion.model_dump(mode="json"),
+                            "evaluator": evaluator,
+                            "evaluator_ref": evaluator_ref,
+                            "judge_ready": "minimal-v2",
+                        }
+                    ),
+                    change_note="主判官最小输入 v2：修正设计表分区标题被并入规则文本。",
+                    review_status="active",
+                    reviewer="023A-seed",
+                    reviewed_at=reviewed_at,
+                )
+                session.add(revision)
+                session.flush()
+                criterion_revision_ids.append(revision_id)
+                criterion_hashes.append(revision.content_hash)
+            previous_active = session.scalars(
+                select(EvalCaseRevisionRow).where(
+                    EvalCaseRevisionRow.case_id == seed.case_id,
+                    EvalCaseRevisionRow.review_status == "active",
+                )
+            ).all()
+            for previous in previous_active:
+                previous.review_status = "retired"
+                previous.reviewer = "023A-seed"
+                previous.reviewed_at = reviewed_at
+            session.flush()
+            session.add(
+                EvalCaseRevisionRow(
+                    revision_id=case_revision_id,
+                    case_id=seed.case_id,
+                    revision_number=5,
+                    category=seed.category,
+                    question=seed.question,
+                    target_bindings_json=_json(seed.target_bindings),
+                    distractor_metadata_json=_json(seed.distractor_metadata),
+                    n=seed.n,
+                    k=seed.k,
+                    execution_policy_json=_json(seed.execution_policy),
+                    source_ref=seed.source_ref,
+                    content_hash=_content_hash(
+                        {
+                            "case": seed.content_hash,
+                            "criteria": criterion_hashes,
+                            "judge_ready": "minimal-v2",
+                        }
+                    ),
+                    change_note="主判官最小输入 v2，修正规则文本中的分区标题污染。",
+                    review_status="active",
+                    reviewer="023A-seed",
+                    reviewed_at=reviewed_at,
+                )
+            )
+            session.flush()
+            for ordinal, criterion_revision_id in enumerate(
+                criterion_revision_ids,
+                start=1,
+            ):
+                session.add(
+                    EvalCaseRevisionCriterionRow(
+                        case_revision_id=case_revision_id,
+                        criterion_revision_id=criterion_revision_id,
+                        ordinal=ordinal,
+                    )
+                )
+
+        suite_revision_id = "sr_design03_minimal_judge_v2"
+        if session.get(EvalSuiteRevisionRow, suite_revision_id) is not None:
+            return
+        previous_suites = session.scalars(
+            select(EvalSuiteRevisionRow).where(
+                EvalSuiteRevisionRow.suite_id == DESIGN_SUITE_ID,
+                EvalSuiteRevisionRow.review_status == "active",
+            )
+        ).all()
+        for previous in previous_suites:
+            previous.review_status = "retired"
+            previous.reviewer = "023A-seed"
+            previous.reviewed_at = reviewed_at
+        session.flush()
+        session.add(
+            EvalSuiteRevisionRow(
+                revision_id=suite_revision_id,
+                suite_id=DESIGN_SUITE_ID,
+                revision_number=5,
+                name="设计基线 · 最小判官输入 v2",
+                description="主判官只接收答案和当前 criterion；规则文本已排除设计表分区标题。",
+                scope_id="current-html-15",
+                review_status="active",
+                reviewer="023A-seed",
+                reviewed_at=reviewed_at,
+                content_hash=_content_hash(configured_revision_ids),
+                change_note="主判官最小输入 suite v2。",
+            )
+        )
+        session.flush()
+        for ordinal, case_revision_id in enumerate(configured_revision_ids, start=1):
+            session.add(
+                EvalSuiteRevisionCaseRow(
+                    suite_revision_id=suite_revision_id,
+                    case_revision_id=case_revision_id,
+                    ordinal=ordinal,
+                )
+            )
 
     def _get_case_revision(self, revision_id: str) -> CaseRevisionView:
         with self._database.session() as session:
@@ -1291,6 +1722,7 @@ class EvaluationRepository:
                 trace_id=attempt.trace_id,
                 trace_status=cast(Any, attempt.trace_status),
                 execution_status=attempt.execution_status,
+                outcome_class=cast(Any, attempt.outcome_class),
                 termination_reason=attempt.termination_reason,
                 error_code=attempt.error_code,
                 answer=attempt.answer,
@@ -1315,6 +1747,10 @@ class EvaluationRepository:
         )
         totals = {
             "attempts": len(attempt_views),
+            "valid_samples": sum(attempt.outcome_class == "product" for attempt in attempt_views),
+            "infrastructure_failures": sum(
+                attempt.outcome_class == "infrastructure" for attempt in attempt_views
+            ),
             "running": int(execution_counts.get("running", 0)),
             "succeeded": int(execution_counts.get("succeeded", 0)),
             "partial": int(execution_counts.get("partial", 0)),
@@ -1337,6 +1773,7 @@ class EvaluationRepository:
             created_at=utc_iso(row.created_at),
             started_at=None if row.started_at is None else utc_iso(row.started_at),
             sealed_at=None if row.sealed_at is None else utc_iso(row.sealed_at),
+            updated_at=utc_iso(row.updated_at),
             totals=totals,
             attempts=attempt_views,
         )

@@ -6,9 +6,9 @@
 
 ## 当前状态
 
-- 阶段：实现阶段，021 Trace 持久化与本地诊断已完成。
-- 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付、检索与 Agent 运行链、流式问答和本地 trace 诊断已实现。
-- 当前工作：022A 执行内核与只读目录、022B 用例／用例集编写与快速试跑均已完成。
+- 阶段：实现阶段，023A 程序 Checker 与 LLM Judge 已完成。
+- 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付、检索与 Agent 运行链、流式问答、本地 trace 诊断和逐 criterion 评测判定已实现。
+- 当前工作：022A／022B／023A 已完成；下一步进入 023B。
 
 ## 设计基线
 
@@ -16,7 +16,7 @@
 | --- | --- | --- |
 | [01](design/01-product-requirements.md) | 产品需求、问题空间、范围和质量属性 | 已审核 · 实现基线 |
 | [02](design/02-how-to-build-an-agent.md) | Agent 开发方法与知识面 | 已审核 · 实现基线 |
-| [03](design/03-cases-and-gold-standard.md) | 用例与金标准 | 已审核 · 实现基线 |
+| [03](design/03-cases-and-gold-standard.md) | 用例与金标准 | v0.2 · 实现基线 |
 | [04](design/04-architecture-design-method.md) | 架构设计方法 | 已审核 · 实现基线 |
 | [05](design/05-storage-and-retrieval-strategy.md) | 存储结构与检索策略 | 已审核 · 实现基线 |
 | [06](design/06-retrieval-pure-agent.md) | 检索工具、Agent 循环、提示词、trace 与部署 | 已审核 · 实现基线 |
@@ -25,7 +25,7 @@
 | [09](design/09-technology-selection.md) | 技术选型与总体架构 | v0.4 · 实现基线 |
 | [10](design/10-document-detail-design.md) | 文档详情页信息架构与数据边界 | 已审核 · 首版实现基线 |
 
-01–09 已于 2026-10-20 审核，并作为当前实现基线；09 已依据 ADR 0004 更新为 v0.4。后续修改必须保留变更原因，同时更新本索引。
+01–09 已于 2026-10-20 审核，并作为当前实现基线；03 已于 2026-10-23 完成 criterion 自包含修订并更新为 v0.2，09 已依据 ADR 0004 更新为 v0.4。后续修改必须保留变更原因，同时更新本索引。
 
 ## 记录分类
 
@@ -93,6 +93,8 @@
 - [022B · 评测用例、用例集编写与快速试跑（已完成）](development/slices/022B-evaluation-authoring.md)
 - [022A · 评测执行内核人工验收清单（已完成）](development/manual-tests/022-evaluation-execution-core.md)
 - [022B · 评测用例与用例集编写人工验收清单（已完成）](development/manual-tests/022B-evaluation-authoring.md)
+- [023A · 程序 Checker 与 LLM Judge（已完成）](development/slices/023A-evaluation-judgment.md)
+- [023A · 程序 Checker 与 LLM Judge 人工验收清单（已完成）](development/manual-tests/023A-evaluation-judgment.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库

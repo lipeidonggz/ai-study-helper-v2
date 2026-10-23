@@ -253,6 +253,7 @@ def test_agent_runtime_persists_parented_trace_with_tool_and_budget_data(
     result = asyncio.run(runtime.run("MCP 在哪个章节？"))
 
     assert result.trace_id and TRACE_ID_PATTERN.fullmatch(result.trace_id)
+    assert result.trace_status == "complete"
     assert store.wait_for_idle(3)
     detail = TraceCatalog(tmp_path / "traces").load(result.trace_id)
     store.close()
@@ -430,9 +431,35 @@ def test_tool_limit_enters_finalization_mode(tmp_path: Path) -> None:
     assert result.answer is not None
     assert result.answer.startswith("注意：本次回答未完整完成")
     assert any(event.event_type == "budget_warning" for event in result.events)
+    assert "<finalization_mode>" in chat_provider.requests[0][0].content
     assert (
         "工具" not in chat_provider.requests[0][0].content.split("<tools>")[1].split("</tools>")[0]
     )
+
+
+def test_truncated_finish_keeps_streamed_partial_answer_and_declares_incomplete(
+    tmp_path: Path,
+) -> None:
+    embedding_provider = _prepare_snapshot(tmp_path)
+    chat_provider = FakeChatProvider(
+        ["Thought: 输出过长。\nAction: Finish[已经生成但尚未闭合的部分正文"]
+    )
+    runtime = AgentRuntime(
+        tmp_path,
+        chat_provider=chat_provider,
+        embedding_provider=embedding_provider,
+        config=AgentRunConfig(max_tool_calls=0),
+    )
+
+    result = asyncio.run(runtime.run("测试截断 Finish"))
+
+    assert result.status == "partial"
+    assert result.answer_completeness == "partial"
+    assert result.termination_reason == "request_budget_exceeded"
+    assert result.answer is not None
+    assert "已经生成但尚未闭合的部分正文" in result.answer
+    assert "内容未完" in result.answer
+    assert any(limitation.code == "request_budget_exceeded" for limitation in result.limitations)
 
 
 def test_tool_attempt_after_limit_is_blocked_until_finish(tmp_path: Path) -> None:
@@ -484,9 +511,11 @@ def test_context_budget_failure_is_explicit(tmp_path: Path) -> None:
 
     result = asyncio.run(runtime.run("上下文超界"))
 
-    assert result.status == "failed"
+    assert result.status == "partial"
     assert result.termination_reason == "context_budget_exceeded"
     assert result.answer_completeness == "partial"
+    assert result.answer is not None
+    assert "内容未完" in result.answer
 
 
 def test_oversized_tool_result_is_dropped_and_answer_is_marked_partial(
@@ -685,7 +714,7 @@ def test_protected_agent_api_runs_with_injected_providers(tmp_path: Path) -> Non
     assert result["answer"] == "API 运行成功"
     assert result["answer_completeness"] == "complete"
     assert result["limitations"] == []
-    assert result["prompt_bundle_version"] == "chat-v2"
+    assert result["prompt_bundle_version"] == "chat-v3"
     assert result["observation_token_counter_version"] == "chat-budget-conservative-v1"
 
 
