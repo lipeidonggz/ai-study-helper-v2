@@ -1,6 +1,13 @@
+param(
+    [switch]$EvalConsole
+)
+
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path $PSScriptRoot -Parent
+if ($EvalConsole) {
+    $env:VITE_EVAL_CONSOLE = "true"
+}
 $cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
 if (Test-Path $cargoBin) {
     $env:PATH = "$cargoBin;$env:PATH"
@@ -38,7 +45,11 @@ try {
         throw "Vite did not start. See frontend/.runtime/vite-error.log."
     }
 
-    cargo run --manifest-path desktop/src-tauri/Cargo.toml
+    if ($EvalConsole) {
+        cargo run --manifest-path desktop/src-tauri/Cargo.toml --features eval-console
+    } else {
+        cargo run --manifest-path desktop/src-tauri/Cargo.toml
+    }
     $appExit = $LASTEXITCODE
 }
 finally {

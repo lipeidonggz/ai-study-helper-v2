@@ -21,6 +21,8 @@ use uuid::Uuid;
 
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
+#[cfg(feature = "eval-console")]
+use std::path::Path;
 #[cfg(windows)]
 use windows_sys::Win32::{
     Foundation::{CloseHandle, HANDLE},
@@ -383,6 +385,329 @@ impl BackendManager {
     }
 }
 
+#[cfg(feature = "eval-console")]
+/// 按需管理独立评测 sidecar；评测进程和数据根均与产品侧隔离。
+struct EvaluationBackendManager {
+    port: u16,
+    token: String,
+    job_handle: usize,
+    launch_spec: Mutex<Option<BackendLaunchSpec>>,
+    roots: Mutex<Option<(PathBuf, PathBuf)>>,
+    child: Mutex<Option<Child>>,
+    started: AtomicBool,
+    shutting_down: AtomicBool,
+    restart_count: AtomicU32,
+    last_status: Mutex<BackendStatus>,
+}
+
+#[cfg(feature = "eval-console")]
+impl EvaluationBackendManager {
+    /// 创建尚未启动的评测 sidecar 管理器。
+    fn new(port: u16, token: String) -> Result<Self, String> {
+        Ok(Self {
+            port,
+            token,
+            job_handle: create_job_object()?,
+            launch_spec: Mutex::new(None),
+            roots: Mutex::new(None),
+            child: Mutex::new(None),
+            started: AtomicBool::new(false),
+            shutting_down: AtomicBool::new(false),
+            restart_count: AtomicU32::new(0),
+            last_status: Mutex::new(BackendStatus {
+                status: "stopped",
+                port,
+                restart_count: 0,
+                message: Some("评测 sidecar 尚未启动。".to_owned()),
+            }),
+        })
+    }
+
+    /// 返回评测前端使用的独立回环地址和启动令牌。
+    fn connection(&self) -> BackendConnection {
+        BackendConnection {
+            base_url: format!("http://127.0.0.1:{}", self.port),
+            token: self.token.clone(),
+        }
+    }
+
+    /// 返回评测 sidecar 的最近状态。
+    fn status(&self) -> BackendStatus {
+        self.last_status
+            .lock()
+            .expect("evaluation backend status lock poisoned")
+            .clone()
+    }
+
+    /// 保存产品 collection 根和独立评测数据根，首次访问时再启动进程。
+    fn configure_roots(&self, product_root: PathBuf, eval_root: PathBuf) {
+        *self
+            .roots
+            .lock()
+            .expect("evaluation backend roots lock poisoned") = Some((product_root, eval_root));
+    }
+
+    /// 首次进入评测工作区时启动 sidecar。
+    fn ensure_started(self: &Arc<Self>, app: &AppHandle) {
+        if self.started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let roots = self
+            .roots
+            .lock()
+            .expect("evaluation backend roots lock poisoned")
+            .clone();
+        let Some((product_root, eval_root)) = roots else {
+            self.set_status(app, "failed", Some("评测数据根尚未配置。".to_owned()));
+            return;
+        };
+        self.start(app.clone(), product_root, eval_root);
+    }
+
+    /// 更新状态并向评测 UI 推送事件。
+    fn set_status(&self, app: &AppHandle, status: &'static str, message: Option<String>) {
+        let next = BackendStatus {
+            status,
+            port: self.port,
+            restart_count: self.restart_count.load(Ordering::SeqCst),
+            message,
+        };
+        *self
+            .last_status
+            .lock()
+            .expect("evaluation backend status lock poisoned") = next.clone();
+        let _ = app.emit("eval-backend-status", next);
+    }
+
+    /// 启动评测 Python 进程，并显式传入两个隔离的数据根。
+    fn start(self: &Arc<Self>, app: AppHandle, product_root: PathBuf, eval_root: PathBuf) {
+        self.set_status(&app, "starting", None);
+        match resolve_eval_launch_spec(&app) {
+            Ok(spec) => {
+                *self
+                    .launch_spec
+                    .lock()
+                    .expect("evaluation backend launch spec lock poisoned") = Some(spec);
+            }
+            Err(error) => {
+                self.set_status(&app, "failed", Some(error));
+                return;
+            }
+        }
+        match self.spawn_child(&product_root, &eval_root) {
+            Ok(child) => {
+                *self
+                    .child
+                    .lock()
+                    .expect("evaluation backend child lock poisoned") = Some(child);
+                self.set_status(
+                    &app,
+                    "running",
+                    Some("评测 sidecar 已启动，等待健康检查。".to_owned()),
+                );
+            }
+            Err(error) => {
+                self.set_status(&app, "failed", Some(error));
+            }
+        }
+        self.start_monitor(app);
+    }
+
+    /// 使用独立启动令牌、端口、trace 级别和根目录启动子进程。
+    fn spawn_child(&self, product_root: &Path, eval_root: &Path) -> Result<Child, String> {
+        let launch_spec = self
+            .launch_spec
+            .lock()
+            .expect("evaluation backend launch spec lock poisoned")
+            .clone()
+            .ok_or_else(|| "evaluation launch specification is unavailable".to_owned())?;
+        std::fs::create_dir_all(&launch_spec.log_directory)
+            .map_err(|error| format!("failed to create evaluation log directory: {error}"))?;
+        let log_path = launch_spec.log_directory.join("evaluation-sidecar.log");
+        let log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .map_err(|error| format!("failed to open evaluation sidecar log: {error}"))?;
+        let error_log = log
+            .try_clone()
+            .map_err(|error| format!("failed to clone evaluation sidecar log: {error}"))?;
+
+        let mut command = Command::new(&launch_spec.executable);
+        command
+            .current_dir(&launch_spec.working_directory)
+            .args(&launch_spec.arguments)
+            .arg("--port")
+            .arg(self.port.to_string())
+            .env("ASH_LAUNCH_TOKEN", &self.token)
+            .env("ASH_DATA_ROOT", product_root)
+            .env("ASH_EVAL_DATA_ROOT", eval_root)
+            .env("ASH_TRACE_MODE", "full")
+            .env("PYTHONUNBUFFERED", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(error_log));
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000);
+        }
+
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("failed to start evaluation sidecar: {error}"))?;
+        #[cfg(windows)]
+        {
+            let assigned = unsafe {
+                AssignProcessToJobObject(self.job_handle as HANDLE, child.as_raw_handle() as HANDLE)
+            };
+            if assigned == 0 {
+                let error = std::io::Error::last_os_error();
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "failed to attach evaluation sidecar to job object: {error}"
+                ));
+            }
+        }
+        Ok(child)
+    }
+
+    /// 监控评测进程退出，并在有限次数内自动重启。
+    fn start_monitor(self: &Arc<Self>, app: AppHandle) {
+        let manager = Arc::clone(self);
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_millis(500));
+            if manager.shutting_down.load(Ordering::SeqCst) {
+                break;
+            }
+            let exit_status = {
+                let mut guard = manager
+                    .child
+                    .lock()
+                    .expect("evaluation backend child lock poisoned");
+                match guard.as_mut() {
+                    Some(child) => match child.try_wait() {
+                        Ok(Some(status)) => {
+                            guard.take();
+                            Some(Ok(status.to_string()))
+                        }
+                        Ok(None) => None,
+                        Err(error) => {
+                            let _ = child.kill();
+                            guard.take();
+                            Some(Err(error.to_string()))
+                        }
+                    },
+                    None => None,
+                }
+            };
+            if let Some(exit) = exit_status {
+                let reason = match exit {
+                    Ok(status) => format!("evaluation sidecar exited unexpectedly ({status})"),
+                    Err(error) => format!("evaluation sidecar monitor failed: {error}"),
+                };
+                manager.restart_after_exit(&app, reason);
+            }
+        });
+    }
+
+    /// 在独立重启上限内重新启动评测进程。
+    fn restart_after_exit(&self, app: &AppHandle, reason: String) {
+        self.terminate_job();
+        let attempt = self.restart_count.fetch_add(1, Ordering::SeqCst) + 1;
+        if attempt > MAX_RESTART_ATTEMPTS {
+            self.set_status(
+                app,
+                "failed",
+                Some(format!(
+                    "{reason}; 已达到自动重启上限 {MAX_RESTART_ATTEMPTS} 次。"
+                )),
+            );
+            return;
+        }
+        let roots = self
+            .roots
+            .lock()
+            .expect("evaluation backend roots lock poisoned")
+            .clone();
+        let Some((product_root, eval_root)) = roots else {
+            self.set_status(app, "failed", Some(reason));
+            return;
+        };
+        self.set_status(
+            app,
+            "restarting",
+            Some(format!("{reason}; 正在第 {attempt} 次重启。")),
+        );
+        thread::sleep(Duration::from_millis(750));
+        match self.spawn_child(&product_root, &eval_root) {
+            Ok(child) => {
+                *self
+                    .child
+                    .lock()
+                    .expect("evaluation backend child lock poisoned") = Some(child);
+                self.set_status(
+                    app,
+                    "running",
+                    Some(format!("评测 sidecar 已自动重启（第 {attempt} 次）。")),
+                );
+            }
+            Err(error) => {
+                self.set_status(
+                    app,
+                    "failed",
+                    Some(format!("{reason}; 自动重启失败：{error}")),
+                );
+            }
+        }
+    }
+
+    /// 停止评测进程树，不影响产品 sidecar。
+    fn shutdown(&self, app: &AppHandle) {
+        if self.shutting_down.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.terminate_job();
+        if let Some(mut child) = self
+            .child
+            .lock()
+            .expect("evaluation backend child lock poisoned")
+            .take()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.set_status(
+            app,
+            "stopped",
+            Some("桌面应用已退出，评测 sidecar 已停止。".to_owned()),
+        );
+    }
+
+    /// 终止独立 Job Object 中的评测 sidecar。
+    fn terminate_job(&self) {
+        #[cfg(windows)]
+        unsafe {
+            let _ = TerminateJobObject(self.job_handle as HANDLE, 1);
+        }
+    }
+}
+
+#[cfg(feature = "eval-console")]
+impl Drop for EvaluationBackendManager {
+    fn drop(&mut self) {
+        self.terminate_job();
+        #[cfg(windows)]
+        unsafe {
+            if self.job_handle != 0 {
+                let _ = CloseHandle(self.job_handle as HANDLE);
+            }
+        }
+    }
+}
+
 #[cfg(windows)]
 /// 创建随桌面进程关闭而终止子进程的 Job Object。
 fn create_job_object() -> Result<usize, String> {
@@ -520,6 +845,52 @@ fn resolve_launch_spec(app: &AppHandle) -> Result<BackendLaunchSpec, String> {
     })
 }
 
+#[cfg(all(feature = "eval-console", debug_assertions))]
+/// 解析开发模式下的评测 sidecar 启动参数。
+fn resolve_eval_launch_spec(_app: &AppHandle) -> Result<BackendLaunchSpec, String> {
+    let backend_dir = backend_dir();
+    let python = python_path(&backend_dir);
+    if !python.is_file() {
+        return Err(format!(
+            "Python evaluation sidecar interpreter not found at {}",
+            python.display()
+        ));
+    }
+    Ok(BackendLaunchSpec {
+        executable: python,
+        working_directory: backend_dir.clone(),
+        arguments: vec!["-m".to_owned(), "eval_main".to_owned()],
+        log_directory: backend_dir.join(".runtime"),
+    })
+}
+
+#[cfg(all(feature = "eval-console", not(debug_assertions)))]
+/// 解析显式评测构建中的独立 sidecar。
+fn resolve_eval_launch_spec(app: &AppHandle) -> Result<BackendLaunchSpec, String> {
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("failed to resolve Tauri resource directory: {error}"))?;
+    let backend_dir = resource_dir.join("evaluation");
+    let executable = backend_dir.join("ai-study-helper-evaluation.exe");
+    if !executable.is_file() {
+        return Err(format!(
+            "packaged evaluation sidecar not found at {}",
+            executable.display()
+        ));
+    }
+    let log_directory = app
+        .path()
+        .app_log_dir()
+        .map_err(|error| format!("failed to resolve application log directory: {error}"))?;
+    Ok(BackendLaunchSpec {
+        executable,
+        working_directory: backend_dir,
+        arguments: Vec::new(),
+        log_directory,
+    })
+}
+
 /// 申请一个仅绑定回环地址的临时端口。
 fn free_loopback_port() -> Result<u16, String> {
     let listener = TcpListener::bind(("127.0.0.1", 0))
@@ -542,6 +913,24 @@ fn backend_status(state: State<'_, Arc<BackendManager>>) -> BackendStatus {
     state.status()
 }
 
+#[cfg(feature = "eval-console")]
+#[tauri::command]
+/// Tauri 命令：首次访问时启动评测 sidecar 并返回独立连接。
+fn eval_backend_connection(
+    app: AppHandle,
+    state: State<'_, Arc<EvaluationBackendManager>>,
+) -> BackendConnection {
+    state.ensure_started(&app);
+    state.connection()
+}
+
+#[cfg(feature = "eval-console")]
+#[tauri::command]
+/// Tauri 命令：返回评测 sidecar 的最近状态。
+fn eval_backend_status(state: State<'_, Arc<EvaluationBackendManager>>) -> BackendStatus {
+    state.status()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// 构建并运行桌面应用，退出时确保 sidecar 进程树被清理。
 pub fn run() {
@@ -550,26 +939,59 @@ pub fn run() {
         BackendManager::new(port, Uuid::new_v4().simple().to_string())
             .unwrap_or_else(|error| panic!("{error}")),
     );
+    #[cfg(feature = "eval-console")]
+    let eval_manager = Arc::new(
+        EvaluationBackendManager::new(
+            free_loopback_port().unwrap_or_else(|error| panic!("{error}")),
+            Uuid::new_v4().simple().to_string(),
+        )
+        .unwrap_or_else(|error| panic!("{error}")),
+    );
 
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(Arc::clone(&manager))
-        .invoke_handler(tauri::generate_handler![backend_connection, backend_status])
+        .manage(Arc::clone(&manager));
+    #[cfg(feature = "eval-console")]
+    let builder =
+        builder
+            .manage(Arc::clone(&eval_manager))
+            .invoke_handler(tauri::generate_handler![
+                backend_connection,
+                backend_status,
+                eval_backend_connection,
+                eval_backend_status
+            ]);
+    #[cfg(not(feature = "eval-console"))]
+    let builder =
+        builder.invoke_handler(tauri::generate_handler![backend_connection, backend_status]);
+
+    #[cfg(feature = "eval-console")]
+    let eval_setup = Arc::clone(&eval_manager);
+    let app = builder
         .setup({
             let manager = Arc::clone(&manager);
             move |app| {
                 let data_root =
                     prepare_app_data_root(app.handle()).map_err(std::io::Error::other)?;
-                manager.start(app.handle().clone(), data_root);
+                manager.start(app.handle().clone(), data_root.clone());
+                #[cfg(feature = "eval-console")]
+                {
+                    let eval_root = data_root.join("eval-data");
+                    eval_setup.configure_roots(data_root, eval_root);
+                }
                 Ok(())
             }
         })
         .build(tauri::generate_context!())
         .expect("failed to build Tauri application");
 
+    #[cfg(feature = "eval-console")]
+    let eval_runtime = Arc::clone(&eval_manager);
     app.run(move |app_handle, event| {
         if matches!(event, tauri::RunEvent::Exit) {
             manager.shutdown(app_handle);
+            #[cfg(feature = "eval-console")]
+            eval_runtime.shutdown(app_handle);
         }
     });
 }

@@ -7,7 +7,6 @@ import secrets
 import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
-from dataclasses import replace
 from pathlib import Path
 
 import uvicorn
@@ -17,13 +16,13 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from app import __version__
+from app.agent.factory import AgentExecutionService
 from app.agent.models import (
     AgentRunEvent,
     AgentRunRequest,
     AgentRunResponse,
     AgentRunStartResponse,
 )
-from app.agent.runtime import AgentRunConfig, AgentRuntime
 from app.agent.streaming import (
     AgentRunEventGapError,
     AgentRunNotFoundError,
@@ -49,9 +48,8 @@ from app.ingestion.models import (
 )
 from app.ingestion.service import IngestionService
 from app.ingestion.source import UrlFetcher
-from app.providers.chat import ChatProvider, DeepSeekChatProvider
-from app.providers.embeddings import DashScopeEmbeddingProvider, EmbeddingProvider
-from app.retrieval.hybrid import DEFAULT_HYBRID_RETRIEVAL_PROFILE
+from app.providers.chat import ChatProvider
+from app.providers.embeddings import EmbeddingProvider
 from app.settings.models import (
     ChatProviderTestResult,
     ModelSettingsResponse,
@@ -64,8 +62,6 @@ from app.settings.models import (
 from app.settings.runtime_service import RuntimeSettingsService
 from app.settings.service import ModelSettingsService
 from app.storage.credentials import (
-    CHAT_API_KEY_USERNAME,
-    EMBEDDING_API_KEY_USERNAME,
     CredentialStore,
     WindowsCredentialStore,
 )
@@ -174,6 +170,18 @@ def create_app(
     trace_catalog = (
         TraceCatalog(resolved_data_root / "traces") if resolved_data_root is not None else None
     )
+    agent_execution_service = (
+        AgentExecutionService(
+            collection_data_root=resolved_data_root,
+            credentials=resolved_credentials,
+            settings_provider=runtime_settings_service.get,
+            trace_store=trace_store,
+            embedding_provider_factory=embedding_provider_factory,
+            chat_provider_factory=chat_provider_factory,
+        )
+        if resolved_data_root is not None and runtime_settings_service is not None
+        else None
+    )
 
     async def trace_cleanup_loop() -> None:
         """启动时及每日一次清理过期 trace，不影响主服务启动。"""
@@ -255,61 +263,16 @@ def create_app(
 
     protected = [Depends(require_launch_token)]
 
-    def build_agent_runtime() -> AgentRuntime:
-        """使用请求开始时的凭证与运行设置创建独立 Agent Runtime。"""
+    def build_agent_runtime():
+        """通过产品与评测共享的工厂创建一次独立 Agent Runtime。"""
 
-        if resolved_data_root is None:
+        if agent_execution_service is None:
             raise IngestFailure(
                 "data_root_unavailable",
                 "application data root is not configured",
                 503,
             )
-        embedding_key = resolved_credentials.get(EMBEDDING_API_KEY_USERNAME)
-        if not embedding_key:
-            raise IngestFailure(
-                "embedding_api_key_missing",
-                "configure an embedding API key before asking questions",
-                409,
-            )
-        chat_key = resolved_credentials.get(CHAT_API_KEY_USERNAME)
-        if not chat_key:
-            raise IngestFailure(
-                "chat_api_key_missing",
-                "configure a chat API key before asking questions",
-                409,
-            )
-        runtime_settings = (
-            runtime_settings_service.get()
-            if runtime_settings_service is not None
-            else RuntimeSettingsResponse()
-        )
-        embedding_provider = (
-            embedding_provider_factory()
-            if embedding_provider_factory is not None
-            else DashScopeEmbeddingProvider(embedding_key)
-        )
-        chat_provider = (
-            chat_provider_factory(chat_key)
-            if chat_provider_factory is not None
-            else DeepSeekChatProvider(chat_key)
-        )
-        return AgentRuntime(
-            resolved_data_root,
-            chat_provider=chat_provider,
-            embedding_provider=embedding_provider,
-            config=AgentRunConfig(
-                max_tool_calls=runtime_settings.max_tool_calls,
-                max_context_tokens=runtime_settings.max_context_tokens,
-                max_request_tokens=runtime_settings.max_request_tokens,
-                max_output_tokens=runtime_settings.max_output_tokens,
-            ),
-            retrieval_profile=replace(
-                DEFAULT_HYBRID_RETRIEVAL_PROFILE,
-                top_k=runtime_settings.top_k,
-            ),
-            trace_store=trace_store,
-            trace_mode=runtime_settings.trace_mode,
-        )
+        return agent_execution_service.create_runtime()
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:

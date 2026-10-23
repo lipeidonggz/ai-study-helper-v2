@@ -11,7 +11,6 @@ from pydantic import ValidationError
 
 from app.collections.models import (
     CandidateSnapshotManifest,
-    CurrentCollectionResponse,
     SnapshotDocument,
 )
 from app.collections.service import CollectionSnapshotService
@@ -56,7 +55,7 @@ _ASCII_FOLD_TABLE = str.maketrans(_ASCII_UPPER, _ASCII_LOWER)
 
 
 class RetrievalReadService:
-    """为一次读取操作绑定当前活动 collection 快照。"""
+    """为一次读取操作绑定当前或显式指定的 collection 快照。"""
 
     def __init__(self, data_root: Path) -> None:
         self._data_root = data_root.resolve()
@@ -89,8 +88,29 @@ class RetrievalReadService:
                 f"active collection status is not readable: {current.manifest.status}",
             )
         return RetrievalSnapshotReader(
-            current=current,
+            manifest=current.manifest,
             snapshot_root=self._collections_root / current.manifest.snapshot_id,
+        )
+
+    def bind_snapshot(self, snapshot_id: str) -> RetrievalSnapshotReader:
+        """按 ID 返回只读 reader，不跟随之后的活动 collection 指针变化。"""
+
+        try:
+            manifest = self._collections.snapshot(snapshot_id)
+        except IngestFailure as error:
+            raise RetrievalFailure(
+                error.code,
+                error.message,
+                retryable=error.retryable,
+            ) from error
+        if manifest.status not in {"ready", "ready_partial"}:
+            raise RetrievalFailure(
+                "collection_unavailable",
+                f"collection status is not readable: {manifest.status}",
+            )
+        return RetrievalSnapshotReader(
+            manifest=manifest,
+            snapshot_root=self._collections_root / manifest.snapshot_id,
         )
 
 
@@ -113,15 +133,13 @@ class RetrievalSnapshotReader:
     def __init__(
         self,
         *,
-        current: CurrentCollectionResponse,
+        manifest: CandidateSnapshotManifest,
         snapshot_root: Path,
     ) -> None:
-        self._current = current
+        self._manifest = manifest
         self._snapshot_root = snapshot_root.resolve()
-        self._documents_by_id = {
-            document.doc_id: document for document in current.manifest.documents
-        }
-        if len(self._documents_by_id) != len(current.manifest.documents):
+        self._documents_by_id = {document.doc_id: document for document in manifest.documents}
+        if len(self._documents_by_id) != len(manifest.documents):
             raise RetrievalFailure(
                 "snapshot_integrity_error",
                 "snapshot manifest contains duplicate document IDs",
@@ -132,19 +150,19 @@ class RetrievalSnapshotReader:
     def snapshot_id(self) -> str:
         """返回 reader 生命周期内固定的快照 ID。"""
 
-        return self._current.manifest.snapshot_id
+        return self._manifest.snapshot_id
 
     @property
     def completeness(self) -> str:
         """返回固定快照的完整性。"""
 
-        return self._current.manifest.completeness
+        return self._manifest.completeness
 
     @property
     def manifest(self) -> CandidateSnapshotManifest:
         """返回 reader 固定的快照 manifest。"""
 
-        return self._current.manifest
+        return self._manifest
 
     def list_documents(
         self,
@@ -158,7 +176,7 @@ class RetrievalSnapshotReader:
         source_filter = _optional_non_empty(source, "source")
         title_filter = _optional_non_empty(title_contains, "title_contains")
         documents: list[RetrievalDocumentSummary] = []
-        for summary in self._current.manifest.documents:
+        for summary in self._manifest.documents:
             persisted = self._load_document(summary.doc_id)
             metadata = persisted.document
             if source_filter is not None:
@@ -268,7 +286,7 @@ class RetrievalSnapshotReader:
 
         normalized_term = _required_non_empty(term, "term")
         requested_ids = (
-            [document.doc_id for document in self._current.manifest.documents]
+            [document.doc_id for document in self._manifest.documents]
             if doc_ids is None
             else _deduplicate_non_empty(doc_ids, "doc_ids")
         )
@@ -337,7 +355,7 @@ class RetrievalSnapshotReader:
         """执行混合检索，并返回仅供后续 trace 使用的内部排名信息。"""
 
         normalized_query = _required_non_empty(query, "query")
-        versions = self._current.manifest.versions
+        versions = self._manifest.versions
         if versions is None:
             raise RetrievalFailure(
                 "collection_unavailable",
@@ -355,7 +373,7 @@ class RetrievalSnapshotReader:
             )
 
         selected_ids = self._search_scope(doc_ids)
-        if not self._current.manifest.documents:
+        if not self._manifest.documents:
             empty = SearchBlocksResult(blocks=[], empty_reason="collection_empty")
             return HybridSearchExecution(
                 result=empty,
@@ -381,7 +399,7 @@ class RetrievalSnapshotReader:
         query_result = await _embed_query_with_retry(provider, normalized_query)
         _validate_query_vector(query_result.vector, expected_profile.dimension)
         expected_index_ref = f"collections/{self.snapshot_id}/index/lance"
-        if self._current.manifest.index_ref != expected_index_ref:
+        if self._manifest.index_ref != expected_index_ref:
             raise RetrievalFailure(
                 "snapshot_integrity_error",
                 "active collection index reference does not match snapshot",
@@ -442,7 +460,7 @@ class RetrievalSnapshotReader:
 
     def _search_scope(self, doc_ids: list[str] | None) -> tuple[str, ...]:
         if doc_ids is None:
-            return tuple(document.doc_id for document in self._current.manifest.documents)
+            return tuple(document.doc_id for document in self._manifest.documents)
         unique_ids = _deduplicate_non_empty(doc_ids, "doc_ids")
         missing_ids = [doc_id for doc_id in unique_ids if doc_id not in self._documents_by_id]
         if missing_ids:

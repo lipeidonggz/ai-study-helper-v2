@@ -184,6 +184,32 @@ Baseline
 
 **判定解析不采用“最后写入覆盖”。**同一 `attempt + criterion` 的多次 Judgment 全部保留；EvaluationRevision 显式记录当前生效的 judgment ID，人工复核通过替换绑定来完成覆盖。底层原始结论保留 R 的“满足／未满足／不确定”和 X 的“违规／无违规／不确定”，聚合后再归一成 pass／fail／pending。
 
+### 4.1 用例与用例集的版本工作流
+
+详细决定见 [ADR 0010](../decisions/0010-evaluation-case-and-suite-revision-workflow.md)。本节定义评测台必须遵守的用户可观察语义。
+
+**用例：**
+
+- 稳定 `case_id` 表示长期评测意图；草稿是可反复编辑的工作副本，不参与执行。
+- 草稿提交审核后，在单个事务中生成不可变 case revision。问题、逻辑目标文档／章节、干扰元数据、默认 N／K、执行策略、精确 criterion revision IDs、变更说明和 content hash 同属该修订包。
+- R／X 判定项内部保持独立 criterion revision；未修改项复用旧 revision，只修改变化的项。用户以整个 case revision 为审核单位，禁止判定项脱离用例包独立生效。
+- 同一 case 最多一个 active revision。激活新 revision 时，旧 active 自动退休。
+
+**快速试跑：**
+
+- 可选择 reviewed 或 active case revisions，不能选择 draft 或 retired。
+- 不要求先创建 suite；ExecutionPlan 直接冻结所选 case revisions、snapshot、有效 N／K 和预算。
+- 允许覆盖 N，但 K 始终取源 case revision。N<K 时只产生探索性执行结果，不生成正式 pass／fail，也不能成为基线。
+- ExecutionPlan 记录 `mode=exploratory`、source／effective N／K，并明确区分探索性试跑与正式评测。
+
+**用例集：**
+
+- suite 是具名、可复用评测范围；suite revision 精确引用 case revision IDs，不动态查询“当前最新版”。
+- 同一 case 在一个 suite revision 中最多一个 revision。suite draft 发布并激活时，同一 suite 的旧 active 退休；不同 suite 身份可同时 active。
+- suite 不自动跟随 case 新版本。任一成员 case revision 退休后，旧 suite revision 标记为 stale，禁止启动新正式 run，但历史 ExecutionPlan、run 和 trace 保持原引用。
+- 历史 suite revision 只读；使用旧范围形成新 run 时，必须克隆成 suite draft，显式替换用例修订版并重新发布。
+- 新正式 run 必须同时满足：suite active、全部成员 case revisions active、同一 case 唯一、snapshot 与版本预检通过。
+
 ## 5. 第一版五个核心模块
 
 | 模块 | 核心功能 | 关键边界 |
@@ -284,8 +310,8 @@ Baseline
 
 | 问题 | 已确认设计 |
 | --- | --- |
-| **产品形态** | 评测台是开发工具，不随桌面产品面向普通用户发布。第一版采用独立本地评测服务＋Web UI，只监听 `127.0.0.1`；不做 CLI、局域网访问或远程访问。 |
-| **数据根目录** | 评测数据使用独立目录，和正常产品数据、活动知识库、正常会话与用户 trace 主目录隔离。评测只读引用冻结 collection 快照；API Key 沿用开发环境配置，不写入任何评测记录。 |
+| **产品形态** | 评测台是开发工具，不随桌面产品面向普通用户发布。第一版复用产品桌面宿主源码和 Vue 源码，通过显式评测编译特性增加工作区；发布构建在编译期移除评测 UI、评测 sidecar 和评测模块。评测运行仍使用独立本地 sidecar 与数据根，只监听 `127.0.0.1`；不做 CLI、局域网访问或远程访问。 |
+| **数据根目录** | 评测数据使用独立目录，和正常产品数据、活动知识库、正常会话与用户 trace 主目录隔离。评测 sidecar 独立于产品 sidecar，只读引用冻结 collection 快照；API Key 沿用开发环境配置，不写入任何评测记录。 |
 | **被测系统入口** | 评测台只绕开 UI 和人工会话层，通过统一 Agent 执行核心运行用例。它不能复制 Agent 逻辑，也不能直接调用检索工具、数据库或模型来拼另一条问答链。 |
 | **会话隔离** | 每次 attempt 都从全新 Agent 会话开始，不继承上一条 attempt 的对话、工具结果或模型上下文；collection 快照在该 attempt 内固定不变。 |
 | **事实源** | suite、case、criterion 和人工复核状态存本地数据库。第一版不做用例导入／导出，也不建立第二个文件事实源。 |

@@ -2,7 +2,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import {
+  computed,
+  defineAsyncComponent,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+} from "vue";
 
 import { API_TIMEOUT_MS, fetchWithTimeout } from "./api";
 import {
@@ -26,9 +33,15 @@ type AppSection =
   | "ingest"
   | "history"
   | "settings"
-  | "diagnostics";
+  | "diagnostics"
+  | "evaluation";
 /** 入库工作区的两个子页面。 */
 type IngestMode = "batch" | "single";
+
+const evalConsoleEnabled = import.meta.env.VITE_EVAL_CONSOLE === "true";
+const EvaluationConsole = evalConsoleEnabled
+  ? defineAsyncComponent(() => import("./EvaluationConsole.vue"))
+  : null;
 
 /** Tauri 返回的后端进程状态。 */
 interface BackendStatus {
@@ -601,7 +614,8 @@ function readSectionFromHash(): AppSection {
     value === "ingest" ||
     value === "history" ||
     value === "settings" ||
-    value === "diagnostics"
+    value === "diagnostics" ||
+    (evalConsoleEnabled && value === "evaluation")
     ? value
     : "chat";
 }
@@ -3023,7 +3037,11 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <nav class="main-nav" aria-label="主导航">
+    <nav
+      class="main-nav"
+      :class="{ 'with-eval': evalConsoleEnabled }"
+      aria-label="主导航"
+    >
       <button
         type="button"
         :class="{ active: activeSection === 'chat' }"
@@ -3090,7 +3108,25 @@ onBeforeUnmount(() => {
           </small>
         </span>
       </button>
+      <button
+        v-if="evalConsoleEnabled"
+        type="button"
+        :class="{ active: activeSection === 'evaluation' }"
+        :aria-current="activeSection === 'evaluation' ? 'page' : undefined"
+        @click="selectSection('evaluation')"
+      >
+        <span class="nav-index">06</span>
+        <span>
+          <strong>评测</strong>
+          <small>开发构建专用</small>
+        </span>
+      </button>
     </nav>
+
+    <component
+      :is="EvaluationConsole"
+      v-if="evalConsoleEnabled && activeSection === 'evaluation'"
+    />
 
     <section v-if="activeSection === 'chat'" class="chat-layout">
       <section class="chat-query-card">

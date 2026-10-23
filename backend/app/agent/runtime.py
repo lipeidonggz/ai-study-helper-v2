@@ -206,6 +206,7 @@ class AgentRuntime:
         cancellation: RunCancellationToken | None = None,
         trace_session: TraceSession | None = None,
         trace_id: str | None = None,
+        snapshot_id: str | None = None,
     ) -> AgentRunResult:
         """在当前活动快照上执行一次单轮 Agent 请求，并可实时回调事件。"""
 
@@ -223,7 +224,12 @@ class AgentRuntime:
                 result = self._canceled_before_run(emit, resolved_trace_id)
             else:
                 try:
-                    reader = RetrievalReadService(self._data_root).bind_current()
+                    read_service = RetrievalReadService(self._data_root)
+                    reader = (
+                        read_service.bind_snapshot(snapshot_id)
+                        if snapshot_id is not None
+                        else read_service.bind_current()
+                    )
                 except RetrievalFailure as error:
                     result = self._failed_before_run(
                         error.code,
