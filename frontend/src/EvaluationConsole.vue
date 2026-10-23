@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { invoke } from "@tauri-apps/api/core";
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import { fetchWithTimeout } from "./api";
 import TraceArtifactContentViewer from "./TraceArtifactContentViewer.vue";
@@ -238,12 +238,59 @@ interface JudgmentView {
   invocations: JudgeInvocationView[];
 }
 
+/** 一条 Judgment 的 append-only 生效绑定。 */
+interface JudgmentBindingView {
+  binding_id: string;
+  attempt_id: string;
+  criterion_revision_id: string;
+  judgment_id: string;
+  executor: string;
+  verdict: string;
+  normalized_result: "pass" | "fail" | "pending";
+  is_effective: boolean;
+  bound_at: string;
+}
+
 /** 按 R／X 分组的 Judgment 及界面说明。 */
 interface JudgmentGroup {
   ruleType: "R" | "X";
   title: string;
   description: string;
   items: JudgmentView[];
+}
+
+/** 一个 attempt 下用于诊断的 Judgment 集合。 */
+interface AttemptJudgmentGroup {
+  attemptId: string;
+  caseId: string;
+  caseRevisionId: string;
+  sampleLabel: string;
+  result: AttemptAggregateView["result"];
+  aggregate: AttemptAggregateView | undefined;
+  judgments: JudgmentView[];
+  answer: string | null;
+  traceId: string | null;
+  traceStatus: AttemptView["trace_status"];
+}
+
+/** 当前打开的人工 LLM Judgment 改判目标。 */
+interface JudgeOverrideTarget {
+  attemptId: string;
+  criterionRevisionId: string;
+  ruleType: "R" | "X";
+}
+
+/** 逐 block 引用支持人工复核草稿。 */
+interface CitationReviewDraft {
+  blockId: string;
+  verdict: "supported" | "unsupported" | "unknown";
+  reason: string;
+}
+
+/** 当前打开的 LLM CheckResult 人工复核目标。 */
+interface CheckReviewTarget {
+  check: CheckResultView;
+  items: CitationReviewDraft[];
 }
 
 /** 一条通用跨判定项确定性检查结果。 */
@@ -256,6 +303,54 @@ interface CheckResultView {
   payload: Record<string, unknown>;
   error_code: string | null;
   created_at: string;
+}
+
+/** 一条人工追加的 LLM CheckResult 复核。 */
+interface CheckReviewView {
+  review_id: string;
+  attempt_id: string;
+  checker_id: string;
+  source_check_result_id: string;
+  result: "pass" | "fail" | "pending";
+  payload: Record<string, unknown>;
+  error_code: string | null;
+  reason: string;
+  reviewer: string;
+  created_at: string;
+}
+
+/** 单次 attempt 的聚合结果。 */
+interface AttemptAggregateView {
+  attempt_id: string;
+  case_id: string;
+  case_revision_id: string;
+  valid_sample: boolean;
+  result: "pass" | "fail" | "pending" | "excluded";
+  r_pass: number;
+  r_fail: number;
+  r_pending: number;
+  x_not_violated: number;
+  x_violated: number;
+  x_pending: number;
+  missing_binding_count: number;
+  check_failures: string[];
+  check_pending: string[];
+  reasons: string[];
+}
+
+/** 一个 case 在冻结 N/K 下的聚合结果。 */
+interface CaseAggregateView {
+  case_id: string;
+  case_revision_id: string;
+  n: number;
+  k: number;
+  valid_samples: number;
+  pass_count: number;
+  fail_count: number;
+  pending_count: number;
+  redline_violation_count: number;
+  result: "pass" | "fail" | "pending" | "exploratory";
+  reasons: string[];
 }
 
 /** 一次判定修订版及其逐项结果。 */
@@ -273,7 +368,12 @@ interface EvaluationRevisionView {
   started_at: string | null;
   finished_at: string | null;
   judgments: JudgmentView[];
+  judgment_bindings: JudgmentBindingView[];
+  effective_bindings: JudgmentBindingView[];
   checks: CheckResultView[];
+  check_reviews: CheckReviewView[];
+  attempt_aggregates: AttemptAggregateView[];
+  case_aggregates: CaseAggregateView[];
 }
 
 /** 判官 prompt 原文与版本。 */
@@ -286,7 +386,7 @@ interface JudgePromptView {
 /** 评测 API 的稳定错误响应。 */
 interface ApiErrorBody {
   error?: { code: string; message: string };
-  detail?: string;
+  detail?: unknown;
 }
 
 const connection = ref<EvaluationConnection | null>(null);
@@ -333,6 +433,20 @@ const judgeRequestBudget = ref(500);
 const judgeTimeoutSeconds = ref(60);
 const judgingBusy = ref(false);
 const judgingError = ref("");
+const judgmentViewMode = ref<"attempt" | "criterion">("attempt");
+const judgmentAttemptFilter = ref<"all" | "failed">("all");
+const focusedAttemptId = ref("");
+const judgeOverrideTarget = ref<JudgeOverrideTarget | null>(null);
+const judgeOverrideVerdict = ref("");
+const judgeOverrideReason = ref("");
+const judgeOverrideReviewer = ref("");
+const judgeOverrideBusy = ref(false);
+const judgeOverrideError = ref("");
+const checkReviewTarget = ref<CheckReviewTarget | null>(null);
+const checkReviewReason = ref("");
+const checkReviewReviewer = ref("");
+const checkReviewBusy = ref(false);
+const checkReviewError = ref("");
 const traceDetail = ref<TraceDetail | null>(null);
 const historyDetailTab = ref<"judgment" | "trace">("judgment");
 const loading = ref(true);
@@ -655,6 +769,8 @@ function statusText(status: string): string {
     pass: "通过",
     fail: "不通过",
     pending: "待定",
+    exploratory: "探索性",
+    excluded: "不计样本",
     satisfied: "满足",
     unsatisfied: "未满足",
     violated: "违规",
@@ -744,7 +860,19 @@ function checkCitationResults(
   reason: string;
   evidenceQuotes: string[];
 }> {
-  const value = check.payload.citations;
+  return citationResultsFromPayload(check.payload);
+}
+
+/** 从检查或人工复核 payload 中读取逐 block 引用结论。 */
+function citationResultsFromPayload(
+  payload: Record<string, unknown>,
+): Array<{
+  blockId: string;
+  verdict: string;
+  reason: string;
+  evidenceQuotes: string[];
+}> {
+  const value = payload.citations;
   if (!Array.isArray(value)) {
     return [];
   }
@@ -898,8 +1026,103 @@ const criterionById = computed(() => {
   return values;
 });
 
+const judgmentById = computed(() => {
+  const values = new Map<string, JudgmentView>();
+  for (const judgment of evaluationRevision.value?.judgments ?? []) {
+    values.set(judgment.judgment_id, judgment);
+  }
+  return values;
+});
+
+const effectiveJudgments = computed(() => {
+  const values: JudgmentView[] = [];
+  for (const binding of evaluationRevision.value?.effective_bindings ?? []) {
+    const judgment = judgmentById.value.get(binding.judgment_id);
+    if (judgment) {
+      values.push(judgment);
+    }
+  }
+  return values;
+});
+
+const attemptOrdinalById = computed(() => {
+  const values = new Map<string, number>();
+  const byCase = new Map<string, AttemptView[]>();
+  for (const attempt of selectedRun.value?.attempts ?? []) {
+    const attempts = byCase.get(attempt.case_revision_id) ?? [];
+    attempts.push(attempt);
+    byCase.set(attempt.case_revision_id, attempts);
+  }
+  for (const attempts of byCase.values()) {
+    attempts
+      .sort((left, right) => left.started_at.localeCompare(right.started_at))
+      .forEach((attempt, index) => values.set(attempt.attempt_id, index + 1));
+  }
+  return values;
+});
+
+const attemptJudgmentGroups = computed<AttemptJudgmentGroup[]>(() => {
+  const aggregateByAttempt = new Map(
+    (evaluationRevision.value?.attempt_aggregates ?? []).map((item) => [
+      item.attempt_id,
+      item,
+    ]),
+  );
+  const judgmentsByAttempt = new Map<string, JudgmentView[]>();
+  for (const judgment of effectiveJudgments.value) {
+    const judgments = judgmentsByAttempt.get(judgment.attempt_id) ?? [];
+    judgments.push(judgment);
+    judgmentsByAttempt.set(judgment.attempt_id, judgments);
+  }
+  const attemptIds = new Set([
+    ...judgmentsByAttempt.keys(),
+    ...aggregateByAttempt.keys(),
+  ]);
+  const groups = [...attemptIds].map((attemptId) => {
+    const attempt = selectedRun.value?.attempts.find(
+      (item) => item.attempt_id === attemptId,
+    );
+    const aggregate = aggregateByAttempt.get(attemptId);
+    const ordinal = attemptOrdinalById.value.get(attemptId) ?? 0;
+    return {
+      attemptId,
+      caseId: caseIdForAttempt(attemptId),
+      caseRevisionId: attempt?.case_revision_id ?? "",
+      sampleLabel: ordinal > 0 ? `样本 #${String(ordinal).padStart(2, "0")}` : "样本",
+      result: aggregate?.result ?? "pending",
+      aggregate,
+      judgments: judgmentsByAttempt.get(attemptId) ?? [],
+      answer: attempt?.answer ?? null,
+      traceId: attempt?.trace_id ?? null,
+      traceStatus: attempt?.trace_status ?? "missing",
+    } satisfies AttemptJudgmentGroup;
+  });
+  const priority: Record<AttemptAggregateView["result"], number> = {
+    fail: 0,
+    pending: 1,
+    excluded: 2,
+    pass: 3,
+  };
+  return groups.sort(
+    (left, right) =>
+      priority[left.result] - priority[right.result] ||
+      left.sampleLabel.localeCompare(right.sampleLabel),
+  );
+});
+
+const filteredAttemptJudgmentGroups = computed(() =>
+  judgmentAttemptFilter.value === "failed"
+    ? attemptJudgmentGroups.value.filter((group) => group.result === "fail")
+    : attemptJudgmentGroups.value,
+);
+
+const failedAttemptCount = computed(
+  () =>
+    attemptJudgmentGroups.value.filter((group) => group.result === "fail").length,
+);
+
 const judgmentGroups = computed<JudgmentGroup[]>(() => {
-  const judgments = evaluationRevision.value?.judgments ?? [];
+  const judgments = effectiveJudgments.value;
   return [
     {
       ruleType: "R",
@@ -925,6 +1148,298 @@ const judgmentGroups = computed<JudgmentGroup[]>(() => {
     },
   ];
 });
+
+const judgeOverrideVerdicts = computed(() => {
+  if (judgeOverrideTarget.value?.ruleType === "X") {
+    return [
+      { value: "not_violated", label: "无违规" },
+      { value: "violated", label: "违规" },
+      { value: "unknown", label: "不确定" },
+    ];
+  }
+  return [
+    { value: "satisfied", label: "满足" },
+    { value: "unsatisfied", label: "未满足" },
+    { value: "unknown", label: "不确定" },
+  ];
+});
+
+/** 返回指定 criterion 的当前生效绑定。 */
+function effectiveBindingFor(judgment: JudgmentView): JudgmentBindingView | undefined {
+  return evaluationRevision.value?.effective_bindings.find(
+    (binding) =>
+      binding.attempt_id === judgment.attempt_id &&
+      binding.criterion_revision_id === judgment.criterion_revision_id,
+  );
+}
+
+/** 返回指定 criterion 的全部绑定历史。 */
+function judgmentBindingHistory(judgment: JudgmentView): JudgmentBindingView[] {
+  return (
+    evaluationRevision.value?.judgment_bindings.filter(
+      (binding) =>
+        binding.attempt_id === judgment.attempt_id &&
+        binding.criterion_revision_id === judgment.criterion_revision_id,
+    ) ?? []
+  );
+}
+
+/** 判断指定 Judgment 是否为当前生效项。 */
+function isJudgmentEffective(judgment: JudgmentView): boolean {
+  return (
+    evaluationRevision.value?.effective_bindings.some(
+      (binding) =>
+        binding.judgment_id === judgment.judgment_id &&
+        binding.attempt_id === judgment.attempt_id &&
+        binding.criterion_revision_id === judgment.criterion_revision_id,
+    ) ?? false
+  );
+}
+
+/** 返回同一 attempt×criterion 的全部 Judgment。 */
+function judgmentHistory(judgment: JudgmentView): JudgmentView[] {
+  return (
+    evaluationRevision.value?.judgments.filter(
+      (item) =>
+        item.attempt_id === judgment.attempt_id &&
+        item.criterion_revision_id === judgment.criterion_revision_id,
+    ) ?? []
+  );
+}
+
+/** 返回一个 case revision 下的 attempt 聚合。 */
+function attemptAggregatesForCase(caseRevisionId: string): AttemptAggregateView[] {
+  return (
+    evaluationRevision.value?.attempt_aggregates.filter(
+      (item) => item.case_revision_id === caseRevisionId,
+    ) ?? []
+  );
+}
+
+/** 返回同一 case 内按开始时间排序的样本序号。 */
+function attemptSampleLabel(attemptId: string): string {
+  const ordinal = attemptOrdinalById.value.get(attemptId);
+  return ordinal ? `样本 #${String(ordinal).padStart(2, "0")}` : "样本";
+}
+
+/** 返回 attempt 的短 ID，完整值保留在页面标题上。 */
+function attemptShortId(attemptId: string): string {
+  return `${attemptId.slice(0, 18)}…`;
+}
+
+/** 切到按样本视图并定位指定 attempt。 */
+async function focusAttemptJudgments(attemptId: string): Promise<void> {
+  judgmentViewMode.value = "attempt";
+  judgmentAttemptFilter.value = "all";
+  focusedAttemptId.value = attemptId;
+  await nextTick();
+  document
+    .getElementById(`attempt-judgment-${attemptId}`)
+    ?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+/** 只有 LLM 语义 criterion 允许人工纠错。 */
+function canOverrideJudgment(judgment: JudgmentView): boolean {
+  return (
+    evaluationRevision.value?.status !== "running" &&
+    criterionById.value.get(judgment.criterion_revision_id)?.evaluator ===
+      "llm_judge"
+  );
+}
+
+/** 打开指定 criterion 的人工改判表单。 */
+function openJudgeOverride(judgment: JudgmentView): void {
+  const criterion = criterionById.value.get(judgment.criterion_revision_id);
+  if (!criterion || criterion.evaluator !== "llm_judge") {
+    return;
+  }
+  judgeOverrideTarget.value = {
+    attemptId: judgment.attempt_id,
+    criterionRevisionId: judgment.criterion_revision_id,
+    ruleType: criterion.rule_type,
+  };
+  judgeOverrideVerdict.value = "";
+  judgeOverrideReason.value = "";
+  judgeOverrideReviewer.value = reviewerName.value || "开发者";
+  judgeOverrideError.value = "";
+}
+
+/** 关闭人工改判表单。 */
+function closeJudgeOverride(): void {
+  judgeOverrideTarget.value = null;
+  judgeOverrideError.value = "";
+}
+
+/** 提交人工 LLM Judgment，并切换到新生效绑定。 */
+async function submitJudgeOverride(): Promise<void> {
+  const target = judgeOverrideTarget.value;
+  const revision = evaluationRevision.value;
+  if (!target || !revision) {
+    return;
+  }
+  judgeOverrideBusy.value = true;
+  judgeOverrideError.value = "";
+  try {
+    const updated = await api<EvaluationRevisionView>(
+      `/api/eval/evaluations/${encodeURIComponent(revision.revision_id)}/overrides`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          attempt_id: target.attemptId,
+          criterion_revision_id: target.criterionRevisionId,
+          verdict: judgeOverrideVerdict.value,
+          reason: judgeOverrideReason.value.trim(),
+          reviewer: judgeOverrideReviewer.value.trim(),
+        }),
+      },
+    );
+    setCurrentEvaluationRevision(updated);
+    closeJudgeOverride();
+  } catch (reason) {
+    judgeOverrideError.value = `人工改判失败：${String(reason)}`;
+  } finally {
+    judgeOverrideBusy.value = false;
+  }
+}
+
+/** 返回指定 CheckResult 的最新人工复核。 */
+function checkReviewFor(check: CheckResultView): CheckReviewView | undefined {
+  const reviews =
+    evaluationRevision.value?.check_reviews.filter(
+      (review) =>
+        review.attempt_id === check.attempt_id &&
+        review.checker_id === check.checker_id,
+    ) ?? [];
+  return reviews[reviews.length - 1];
+}
+
+/** 返回人工 CheckResult 复核人。 */
+function checkReviewReviewerText(check: CheckResultView): string {
+  return checkReviewFor(check)?.reviewer ?? "";
+}
+
+/** 返回人工 CheckResult 复核说明。 */
+function checkReviewReasonText(check: CheckResultView): string {
+  return checkReviewFor(check)?.reason ?? "";
+}
+
+/** 返回当前生效的 CheckResult 状态。 */
+function effectiveCheckResult(check: CheckResultView): "pass" | "fail" | "pending" {
+  return checkReviewFor(check)?.result ?? check.result;
+}
+
+/** 返回当前生效的逐 block 引用支持结论。 */
+function effectiveCitationResults(
+  check: CheckResultView,
+): ReturnType<typeof citationResultsFromPayload> {
+  const review = checkReviewFor(check);
+  return review
+    ? citationResultsFromPayload(review.payload)
+    : citationResultsFromPayload(check.payload);
+}
+
+/** 打开 LLM 引用支持检查的逐 block 人工复核表单。 */
+function openCheckReview(check: CheckResultView): void {
+  const integrity = evaluationRevision.value?.checks.find(
+    (item) =>
+      item.attempt_id === check.attempt_id &&
+      item.checker_id === "citation_integrity",
+  );
+  if (!integrity) {
+    checkReviewError.value = "缺少引用完整性事实，无法人工复核。";
+    return;
+  }
+  const blockIds = checkStringList(integrity, "cited_block_ids");
+  if (blockIds.length === 0) {
+    checkReviewError.value = "本次答案没有可复核的显式引用。";
+    return;
+  }
+  const current = new Map(
+    effectiveCitationResults(check).map((item) => [item.blockId, item]),
+  );
+  checkReviewTarget.value = {
+    check,
+    items: blockIds.map((blockId) => ({
+      blockId,
+      verdict:
+        current.get(blockId)?.verdict === "unsupported"
+          ? "unsupported"
+          : current.get(blockId)?.verdict === "unknown"
+            ? "unknown"
+            : "supported",
+      reason: current.get(blockId)?.reason ?? "",
+    })),
+  };
+  checkReviewReason.value = "";
+  checkReviewReviewer.value = reviewerName.value || "开发者";
+  checkReviewError.value = "";
+}
+
+/** 判断 LLM CheckResult 是否具备逐 block 人工复核条件。 */
+function canReviewLlmCheck(check: CheckResultView): boolean {
+  if (
+    evaluationRevision.value?.status === "running" ||
+    check.checker_id !== "citation_support"
+  ) {
+    return false;
+  }
+  const integrity = evaluationRevision.value?.checks.find(
+    (item) =>
+      item.attempt_id === check.attempt_id &&
+      item.checker_id === "citation_integrity",
+  );
+  return (
+    integrity?.result === "pass" &&
+    checkStringList(integrity, "cited_block_ids").length > 0
+  );
+}
+
+/** 关闭引用支持人工复核表单。 */
+function closeCheckReview(): void {
+  checkReviewTarget.value = null;
+  checkReviewError.value = "";
+}
+
+/** 提交逐 block 人工引用支持复核。 */
+async function submitCheckReview(): Promise<void> {
+  const target = checkReviewTarget.value;
+  const revision = evaluationRevision.value;
+  if (!target || !revision) {
+    return;
+  }
+  if (target.items.some((item) => !item.reason.trim())) {
+    checkReviewError.value = "每个引用 block 都必须填写复核原因。";
+    return;
+  }
+  checkReviewBusy.value = true;
+  checkReviewError.value = "";
+  try {
+    const updated = await api<EvaluationRevisionView>(
+      `/api/eval/evaluations/${encodeURIComponent(revision.revision_id)}/check-reviews`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          attempt_id: target.check.attempt_id,
+          checker_id: target.check.checker_id,
+          citations: target.items.map((item) => ({
+            block_id: item.blockId,
+            verdict: item.verdict,
+            reason: item.reason.trim(),
+            evidence_quotes: [],
+          })),
+          reason: checkReviewReason.value.trim(),
+          reviewer: checkReviewReviewer.value.trim(),
+        }),
+      },
+    );
+    setCurrentEvaluationRevision(updated);
+    closeCheckReview();
+  } catch (reason) {
+    checkReviewError.value = `引用支持复核失败：${String(reason)}`;
+  } finally {
+    checkReviewBusy.value = false;
+  }
+}
 
 const canStartJudgment = computed(() => {
   if (!selectedRun.value || !judgePrompt.value) {
@@ -1008,11 +1523,40 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   );
   if (!response.ok) {
     const body = (await response.json().catch(() => ({}))) as ApiErrorBody;
-    throw new Error(
-      body.error?.message ?? body.detail ?? `请求失败（HTTP ${response.status}）`,
-    );
+    throw new Error(apiErrorText(body, response.status));
   }
   return (await response.json()) as T;
+}
+
+/** 把 FastAPI 字符串或结构化校验错误转换成单行可读文本。 */
+function apiErrorText(body: ApiErrorBody, status: number): string {
+  if (body.error?.message) {
+    return body.error.message;
+  }
+  if (typeof body.detail === "string") {
+    return body.detail;
+  }
+  if (Array.isArray(body.detail)) {
+    const messages = body.detail.flatMap((item) => {
+      if (!item || typeof item !== "object") {
+        return [];
+      }
+      const record = item as Record<string, unknown>;
+      const location = Array.isArray(record.loc)
+        ? record.loc.map(String).join(".")
+        : "请求参数";
+      const message =
+        typeof record.msg === "string" ? record.msg : "参数校验失败";
+      return [`${location}：${message}`];
+    });
+    if (messages.length) {
+      return messages.join("；");
+    }
+  }
+  if (body.detail && typeof body.detail === "object") {
+    return JSON.stringify(body.detail);
+  }
+  return `请求失败（HTTP ${status}）`;
 }
 
 /** 按需连接评测 sidecar，并加载 suite、快照和最近运行。 */
@@ -1680,6 +2224,10 @@ async function refreshRun(): Promise<void> {
 function setCurrentEvaluationRevision(
   revision: EvaluationRevisionView | null,
 ): void {
+  if (evaluationRevision.value?.revision_id !== revision?.revision_id) {
+    closeJudgeOverride();
+    closeCheckReview();
+  }
   evaluationRevision.value = revision;
   if (revision) {
     const index = evaluationRevisions.value.findIndex(
@@ -1730,12 +2278,17 @@ async function startJudgment(): Promise<void> {
   judgingBusy.value = true;
   judgingError.value = "";
   try {
+    const normalizedConcurrency = Math.min(
+      8,
+      Math.max(1, Number(judgeConcurrency.value) || 2),
+    );
+    judgeConcurrency.value = normalizedConcurrency;
     const revision = await api<EvaluationRevisionView>(
       `/api/eval/runs/${encodeURIComponent(selectedRun.value.run_id)}/judging`,
       {
         method: "POST",
         body: JSON.stringify({
-          concurrency: judgeConcurrency.value,
+          concurrency: normalizedConcurrency,
           token_budget: judgeTokenBudget.value,
           request_budget: judgeRequestBudget.value,
           attempt_timeout_seconds: judgeTimeoutSeconds.value,
@@ -1747,7 +2300,9 @@ async function startJudgment(): Promise<void> {
     judgeReviewConfirmed.value = false;
     setCurrentEvaluationRevision(revision);
   } catch (reason) {
-    judgingError.value = `启动判定失败：${String(reason)}`;
+    judgingError.value = `启动判定失败：${
+      reason instanceof Error ? reason.message : String(reason)
+    }`;
   } finally {
     judgingBusy.value = false;
   }
@@ -2167,15 +2722,20 @@ onBeforeUnmount(() => {
             :class="{ active: selectedRun?.run_id === item.run_id }"
             @click="selectRun(item)"
           >
-            <span>{{ item.run_id.slice(0, 18) }}…</span>
+            <span class="eval-run-title">
+              {{
+                item.suite_name ??
+                (item.plan_mode === "exploratory" ? "快速试跑" : "未知用例集")
+              }}
+            </span>
             <strong>{{ statusText(item.status) }}</strong>
             <small>
+              {{ item.run_id }}
+              ·
               {{
                 item.plan_mode === "exploratory"
-                  ? "快速试跑"
-                  : `${item.suite_name ?? "未知用例集"} · 第 ${
-                      item.suite_revision_number ?? "?"
-                    } 版`
+                  ? "探索性"
+                  : `第 ${item.suite_revision_number ?? "?"} 版`
               }}
               · {{ item.totals.attempts }} 个执行样本 / 有效
               {{ item.totals.valid_samples ?? 0 }}
@@ -2817,22 +3377,35 @@ onBeforeUnmount(() => {
           <div class="eval-live-head">
             <div>
               <span class="eval-kicker">执行批次</span>
-              <h3>{{ selectedRun.run_id }}</h3>
+              <h3 class="eval-live-title">
+                <strong>
+                  {{
+                    selectedRun.suite_name ??
+                    (selectedRun.plan_mode === "exploratory"
+                      ? "快速试跑"
+                      : "未知用例集")
+                  }}
+                </strong>
+                <span>
+                  {{ formatRunDate(selectedRun.started_at ?? selectedRun.created_at) }}
+                  <template v-if="selectedRun.sealed_at">
+                    → {{ formatRunDate(selectedRun.sealed_at) }}
+                  </template>
+                </span>
+              </h3>
               <small class="eval-run-source">
+                {{ selectedRun.run_id }}
+                ·
                 {{
                   selectedRun.plan_mode === "exploratory"
-                    ? "快速试跑"
-                    : `${selectedRun.suite_name ?? "未知用例集"} · 第 ${
-                        selectedRun.suite_revision_number ?? "?"
-                      } 版 · ${selectedRun.suite_revision_id ?? ""}`
+                    ? "探索性"
+                    : `第 ${selectedRun.suite_revision_number ?? "?"} 版 · ${
+                        selectedRun.suite_revision_id ?? ""
+                      }`
                 }}
               </small>
               <small class="eval-run-time">
-                执行时间：{{ formatRunDate(selectedRun.started_at ?? selectedRun.created_at) }}
-                <template v-if="selectedRun.sealed_at">
-                  → {{ formatRunDate(selectedRun.sealed_at) }}
-                </template>
-                · 耗时 {{ runDurationText(selectedRun) }}
+                耗时 {{ runDurationText(selectedRun) }}
               </small>
             </div>
             <span class="eval-run-state" :class="selectedRun.status">
@@ -3127,6 +3700,92 @@ onBeforeUnmount(() => {
             <p v-if="judgingError || evaluationRevision.error_message" class="eval-error">
               {{ judgingError || evaluationRevision.error_message }}
             </p>
+            <section
+              v-if="evaluationRevision.case_aggregates.length"
+              class="eval-aggregate-board"
+            >
+              <header>
+                <strong>生效绑定与 N／K 聚合</strong>
+                <span>
+                  {{ evaluationRevision.effective_bindings.length }} 条生效绑定 ·
+                  {{ evaluationRevision.check_reviews.length }} 条人工检查复核
+                </span>
+              </header>
+              <article
+                v-for="caseAggregate in evaluationRevision.case_aggregates"
+                :key="caseAggregate.case_revision_id"
+                class="eval-case-aggregate"
+              >
+                <div class="eval-case-aggregate-head">
+                  <div>
+                    <strong>{{ caseAggregate.case_id }}</strong>
+                    <small>
+                      N={{ caseAggregate.n }} · K={{ caseAggregate.k }} ·
+                      有效样本 {{ caseAggregate.valid_samples }}
+                    </small>
+                  </div>
+                  <span :class="`result-${caseAggregate.result}`">
+                    {{ statusText(caseAggregate.result) }}
+                  </span>
+                </div>
+                <div class="eval-case-aggregate-counts">
+                  <span>通过 {{ caseAggregate.pass_count }}</span>
+                  <span>失败 {{ caseAggregate.fail_count }}</span>
+                  <span>待定 {{ caseAggregate.pending_count }}</span>
+                  <span>红线违规 {{ caseAggregate.redline_violation_count }}</span>
+                </div>
+                <p v-for="reason in caseAggregate.reasons" :key="reason">
+                  {{ reason }}
+                </p>
+                <details
+                  v-if="attemptAggregatesForCase(caseAggregate.case_revision_id).length"
+                >
+                  <summary>查看 attempt 聚合</summary>
+                  <div class="eval-attempt-aggregates">
+                    <article
+                      v-for="attemptAggregate in attemptAggregatesForCase(
+                        caseAggregate.case_revision_id,
+                      )"
+                      :key="attemptAggregate.attempt_id"
+                    >
+                      <div>
+                        <strong>
+                          {{ attemptAggregate.case_id }} ·
+                          {{ attemptSampleLabel(attemptAggregate.attempt_id) }}
+                        </strong>
+                        <span :class="`result-${attemptAggregate.result}`">
+                          {{ statusText(attemptAggregate.result) }}
+                        </span>
+                      </div>
+                      <small
+                        :title="attemptAggregate.attempt_id"
+                        class="eval-attempt-id"
+                      >
+                        {{ attemptShortId(attemptAggregate.attempt_id) }}
+                      </small>
+                      <small>
+                        R {{ attemptAggregate.r_pass }} 通过 /
+                        {{ attemptAggregate.r_fail }} 失败 /
+                        {{ attemptAggregate.r_pending }} 待定 · X
+                        {{ attemptAggregate.x_not_violated }} 合规 /
+                        {{ attemptAggregate.x_violated }} 违规 /
+                        {{ attemptAggregate.x_pending }} 待定
+                      </small>
+                      <p v-for="reason in attemptAggregate.reasons" :key="reason">
+                        {{ reason }}
+                      </p>
+                      <button
+                        type="button"
+                        class="eval-secondary-button"
+                        @click="focusAttemptJudgments(attemptAggregate.attempt_id)"
+                      >
+                        查看该样本判定
+                      </button>
+                    </article>
+                  </div>
+                </details>
+              </article>
+            </section>
             <div class="eval-check-guide">
               <article>
                 <strong>引用完整性</strong>
@@ -3152,8 +3811,8 @@ onBeforeUnmount(() => {
                   <strong :title="check.checker_id">
                     {{ checkerText(check.checker_id) }}
                   </strong>
-                  <span :class="`result-${check.result}`">
-                    {{ statusText(check.result) }}
+                  <span :class="`result-${effectiveCheckResult(check)}`">
+                    {{ statusText(effectiveCheckResult(check)) }}
                   </span>
                   <small>
                     {{ caseIdForAttempt(check.attempt_id) }} ·
@@ -3163,9 +3822,15 @@ onBeforeUnmount(() => {
                         : "无错误"
                     }}
                     · {{ checkExecutorVersionText(check) }}
+                    <template v-if="checkReviewFor(check)">
+                      · 人工复核：{{ checkReviewReviewerText(check) }}
+                    </template>
                   </small>
                 </summary>
                 <div class="eval-check-detail">
+                  <p v-if="checkReviewFor(check)">
+                    人工复核原因：{{ checkReviewReasonText(check) }}
+                  </p>
                   <p
                     v-if="
                       typeof check.payload.reason === 'string' &&
@@ -3198,7 +3863,7 @@ onBeforeUnmount(() => {
                   </template>
                   <template v-if="check.checker_id === 'citation_support'">
                     <article
-                      v-for="citation in checkCitationResults(check)"
+                      v-for="citation in effectiveCitationResults(check)"
                       :key="citation.blockId"
                       class="eval-citation-result"
                     >
@@ -3230,6 +3895,69 @@ onBeforeUnmount(() => {
                       </p>
                       <pre v-if="invocation.rawOutput">{{ invocation.rawOutput }}</pre>
                     </details>
+                    <button
+                      v-if="canReviewLlmCheck(check)"
+                      type="button"
+                      class="eval-secondary-button"
+                      @click="openCheckReview(check)"
+                    >
+                      人工复核逐 block 结论
+                    </button>
+                    <form
+                      v-if="
+                        checkReviewTarget?.check.check_result_id ===
+                        check.check_result_id
+                      "
+                      class="eval-review-form"
+                      @submit.prevent="submitCheckReview"
+                    >
+                      <label class="eval-field">
+                        <span>复核说明</span>
+                        <textarea
+                          v-model="checkReviewReason"
+                          rows="2"
+                          placeholder="说明本次人工复核的依据"
+                          required
+                        />
+                      </label>
+                      <label class="eval-field">
+                        <span>复核人</span>
+                        <input v-model="checkReviewReviewer" type="text" required />
+                      </label>
+                      <article
+                        v-for="item in checkReviewTarget.items"
+                        :key="item.blockId"
+                        class="eval-review-item"
+                      >
+                        <code>{{ item.blockId }}</code>
+                        <select v-model="item.verdict">
+                          <option value="supported">有证据支持</option>
+                          <option value="unsupported">无证据支持</option>
+                          <option value="unknown">不确定</option>
+                        </select>
+                        <input
+                          v-model="item.reason"
+                          type="text"
+                          placeholder="该 block 的复核原因"
+                          required
+                        />
+                      </article>
+                      <p v-if="checkReviewError" class="eval-error">
+                        {{ checkReviewError }}
+                      </p>
+                      <div class="eval-actions">
+                        <button type="submit" :disabled="checkReviewBusy">
+                          {{ checkReviewBusy ? "提交中…" : "提交人工复核" }}
+                        </button>
+                        <button
+                          type="button"
+                          :disabled="checkReviewBusy"
+                          @click="closeCheckReview"
+                        >
+                          取消
+                        </button>
+                      </div>
+                    </form>
                   </template>
                 </div>
               </details>
@@ -3237,7 +3965,195 @@ onBeforeUnmount(() => {
                 {{ citationJudgeNotice }}
               </p>
             </details>
-            <div class="eval-judgment-groups">
+            <div class="eval-judgment-viewbar">
+              <div role="tablist" aria-label="判定结果分组方式">
+                <button
+                  type="button"
+                  :class="{ active: judgmentViewMode === 'attempt' }"
+                  @click="judgmentViewMode = 'attempt'"
+                >
+                  按样本
+                </button>
+                <button
+                  type="button"
+                  :class="{ active: judgmentViewMode === 'criterion' }"
+                  @click="judgmentViewMode = 'criterion'"
+                >
+                  按判定项
+                </button>
+              </div>
+              <div v-if="judgmentViewMode === 'attempt'" class="eval-attempt-filter">
+                <button
+                  type="button"
+                  :class="{ active: judgmentAttemptFilter === 'all' }"
+                  @click="judgmentAttemptFilter = 'all'"
+                >
+                  全部 {{ attemptJudgmentGroups.length }}
+                </button>
+                <button
+                  type="button"
+                  :class="{ active: judgmentAttemptFilter === 'failed' }"
+                  @click="judgmentAttemptFilter = 'failed'"
+                >
+                  失败 {{ failedAttemptCount }}
+                </button>
+              </div>
+            </div>
+            <div
+              v-if="judgmentViewMode === 'attempt'"
+              class="eval-attempt-judgment-groups"
+            >
+              <p v-if="!filteredAttemptJudgmentGroups.length" class="eval-empty">
+                当前筛选下没有样本。
+              </p>
+              <details
+                v-for="group in filteredAttemptJudgmentGroups"
+                :id="`attempt-judgment-${group.attemptId}`"
+                :key="group.attemptId"
+                class="eval-attempt-judgment-group"
+                :class="{
+                  focused: focusedAttemptId === group.attemptId,
+                  failed: group.result === 'fail',
+                  pending: group.result === 'pending',
+                }"
+                :open="
+                  focusedAttemptId === group.attemptId || group.result !== 'pass'
+                "
+              >
+                <summary>
+                  <div>
+                    <strong>{{ group.caseId }} · {{ group.sampleLabel }}</strong>
+                    <small :title="group.attemptId">
+                      {{ attemptShortId(group.attemptId) }}
+                    </small>
+                  </div>
+                  <span :class="`result-${group.result}`">
+                    {{ statusText(group.result) }}
+                  </span>
+                </summary>
+                <div class="eval-attempt-judgment-summary">
+                  <span>
+                    R {{ group.aggregate?.r_pass ?? 0 }} 通过 /
+                    {{ group.aggregate?.r_fail ?? 0 }} 失败 /
+                    {{ group.aggregate?.r_pending ?? 0 }} 待定
+                  </span>
+                  <span>
+                    X {{ group.aggregate?.x_not_violated ?? 0 }} 合规 /
+                    {{ group.aggregate?.x_violated ?? 0 }} 违规 /
+                    {{ group.aggregate?.x_pending ?? 0 }} 待定
+                  </span>
+                </div>
+                <p
+                  v-for="reason in group.aggregate?.reasons ?? []"
+                  :key="reason"
+                  class="eval-attempt-reason"
+                >
+                  {{ reason }}
+                </p>
+                <div class="eval-attempt-detail-actions">
+                  <details class="eval-answer-view">
+                    <summary>查看答案</summary>
+                    <pre>{{ group.answer || "无答案" }}</pre>
+                  </details>
+                  <button
+                    v-if="group.traceId"
+                    type="button"
+                    class="eval-attempt-trace-action"
+                    :title="group.traceId"
+                    @click="inspectTrace(group.traceId)"
+                  >
+                    查看本样本运行轨迹 · {{ statusText(group.traceStatus) }}
+                  </button>
+                </div>
+                <div class="eval-attempt-criterion-list">
+                  <article
+                    v-for="judgment in group.judgments"
+                    :key="judgment.judgment_id"
+                  >
+                    <header>
+                      <span class="eval-rule-badge">
+                        {{
+                          criterionById.get(judgment.criterion_revision_id)?.rule_type ??
+                          "?"
+                        }}
+                      </span>
+                      <div>
+                        <strong>
+                          {{
+                            criterionById.get(judgment.criterion_revision_id)?.title ??
+                            judgment.criterion_revision_id
+                          }}
+                        </strong>
+                        <small>
+                          {{ executorText(judgment.executor) }} · {{ group.sampleLabel }}
+                        </small>
+                      </div>
+                      <span :class="`result-${judgment.normalized_result}`">
+                        {{ statusText(judgment.normalized_result) }}
+                      </span>
+                    </header>
+                    <p>
+                      {{
+                        judgment.error_code
+                          ? diagnosticErrorText(judgment.error_code)
+                          : judgment.reason ?? "无判定说明"
+                      }}
+                    </p>
+                    <p
+                      v-if="judgment.evidence.quotes?.length"
+                      class="eval-judge-quote"
+                    >
+                      “{{ judgment.evidence.quotes[0] }}”
+                    </p>
+                    <details v-if="judgment.invocations.length">
+                      <summary>
+                        判官调用 · {{ judgment.invocations.length }} 次
+                      </summary>
+                      <article
+                        v-for="invocation in judgment.invocations"
+                        :key="invocation.invocation_id"
+                        class="eval-invocation"
+                      >
+                        <span>
+                          第 {{ invocation.attempt_number }} 次 ·
+                          {{ statusText(invocation.status) }} ·
+                          {{ invocation.model_id }}
+                        </span>
+                        <small>
+                          输入 {{ invocation.input_tokens }} / 输出
+                          {{ invocation.output_tokens }} token
+                        </small>
+                        <details
+                          v-if="invocation.input_json"
+                          class="eval-invocation-payload"
+                        >
+                          <summary>查看判官输入</summary>
+                          <TraceArtifactContentViewer
+                            artifact-kind="judge.input"
+                            :content="invocation.input_json"
+                            error=""
+                            :is-loading="false"
+                          />
+                        </details>
+                        <details
+                          v-if="invocation.raw_output"
+                          class="eval-invocation-payload"
+                        >
+                          <summary>查看判官输出</summary>
+                          <TraceArtifactContentViewer
+                            artifact-kind="judge.output"
+                            :content="invocation.raw_output"
+                            error=""
+                            :is-loading="false"
+                          />
+                        </details>
+                      </article>
+                    </details>
+                  </article>
+                </div>
+              </details>
+            </div>
+            <div v-else class="eval-judgment-groups">
               <section
                 v-for="group in judgmentGroups"
                 v-show="group.items.length"
@@ -3283,6 +4199,94 @@ onBeforeUnmount(() => {
                     <p v-if="judgment.evidence.quotes?.length" class="eval-judge-quote">
                       “{{ judgment.evidence.quotes[0] }}”
                     </p>
+                    <p v-if="effectiveBindingFor(judgment)" class="eval-binding-note">
+                      当前生效：
+                      {{ executorText(effectiveBindingFor(judgment)?.executor ?? "") }} ·
+                      {{ formatRunDate(effectiveBindingFor(judgment)?.bound_at ?? "") }}
+                    </p>
+                    <button
+                      v-if="canOverrideJudgment(judgment)"
+                      type="button"
+                      class="eval-secondary-button"
+                      @click="openJudgeOverride(judgment)"
+                    >
+                      人工改判
+                    </button>
+                    <form
+                      v-if="
+                        judgeOverrideTarget?.attemptId === judgment.attempt_id &&
+                        judgeOverrideTarget.criterionRevisionId ===
+                          judgment.criterion_revision_id
+                      "
+                      class="eval-review-form"
+                      @submit.prevent="submitJudgeOverride"
+                    >
+                      <label class="eval-field">
+                        <span>人工结论</span>
+                        <select v-model="judgeOverrideVerdict" required>
+                          <option value="" disabled>请选择</option>
+                          <option
+                            v-for="option in judgeOverrideVerdicts"
+                            :key="option.value"
+                            :value="option.value"
+                          >
+                            {{ option.label }}
+                          </option>
+                        </select>
+                      </label>
+                      <label class="eval-field">
+                        <span>判定原因</span>
+                        <textarea
+                          v-model="judgeOverrideReason"
+                          rows="3"
+                          required
+                          placeholder="说明为什么不采用当前 LLM Judge 结论"
+                        />
+                      </label>
+                      <label class="eval-field">
+                        <span>复核人</span>
+                        <input v-model="judgeOverrideReviewer" type="text" required />
+                      </label>
+                      <p v-if="judgeOverrideError" class="eval-error">
+                        {{ judgeOverrideError }}
+                      </p>
+                      <div class="eval-actions">
+                        <button type="submit" :disabled="judgeOverrideBusy">
+                          {{ judgeOverrideBusy ? "提交中…" : "提交人工判定" }}
+                        </button>
+                        <button
+                          type="button"
+                          :disabled="judgeOverrideBusy"
+                          @click="closeJudgeOverride"
+                        >
+                          取消
+                        </button>
+                      </div>
+                    </form>
+                    <details
+                      v-if="judgmentHistory(judgment).length > 1"
+                      class="eval-binding-history"
+                    >
+                      <summary>
+                        判定历史 · {{ judgmentHistory(judgment).length }} 条
+                      </summary>
+                      <article
+                        v-for="historyItem in judgmentHistory(judgment)"
+                        :key="historyItem.judgment_id"
+                      >
+                        <div>
+                          <strong>{{ executorText(historyItem.executor) }}</strong>
+                          <span :class="`result-${historyItem.normalized_result}`">
+                            {{ statusText(historyItem.normalized_result) }}
+                          </span>
+                        </div>
+                        <p>{{ historyItem.reason ?? "无判定说明" }}</p>
+                        <small>
+                          {{ formatRunDate(historyItem.created_at) }} ·
+                          {{ isJudgmentEffective(historyItem) ? "当前生效" : "历史" }}
+                        </small>
+                      </article>
+                    </details>
                     <details v-if="judgment.invocations.length">
                       <summary>
                         判官调用 · {{ judgment.invocations.length }} 次
@@ -4018,6 +5022,27 @@ onBeforeUnmount(() => {
   color: #7b897e;
 }
 
+.eval-run-title {
+  overflow: hidden;
+  font-size: 0.82rem;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eval-live-title {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+
+.eval-live-title span {
+  color: #6d7b71;
+  font-size: 0.72rem;
+  font-weight: 500;
+}
+
 .eval-form-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -4298,6 +5323,146 @@ onBeforeUnmount(() => {
   font-size: 0.74rem;
 }
 
+.eval-aggregate-board {
+  display: grid;
+  gap: 9px;
+  margin-top: 12px;
+}
+
+.eval-aggregate-board > header,
+.eval-case-aggregate-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.eval-aggregate-board > header span,
+.eval-case-aggregate-head small {
+  color: #728178;
+  font-size: 0.68rem;
+}
+
+.eval-case-aggregate {
+  display: grid;
+  gap: 7px;
+  border: 1px solid #dfe8e0;
+  border-radius: 11px;
+  padding: 10px;
+  color: #52645a;
+  background: #fbfdfb;
+  font-size: 0.72rem;
+}
+
+.eval-case-aggregate-head > div {
+  display: grid;
+  gap: 2px;
+}
+
+.eval-case-aggregate-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 14px;
+}
+
+.eval-case-aggregate p,
+.eval-attempt-aggregates p {
+  margin: 0;
+}
+
+.eval-attempt-aggregates {
+  display: grid;
+  gap: 7px;
+  margin-top: 7px;
+}
+
+.eval-attempt-aggregates > article {
+  display: grid;
+  gap: 4px;
+  border-left: 3px solid #8aa894;
+  padding: 7px 9px;
+  background: #f4f8f4;
+}
+
+.eval-attempt-aggregates > article > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.eval-attempt-id {
+  overflow: hidden;
+  color: #7b897f;
+  font-family: Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eval-binding-note {
+  border-radius: 7px;
+  padding: 6px 8px;
+  color: #4f6557;
+  background: #eef5ef;
+}
+
+.eval-binding-history {
+  border-radius: 8px;
+  padding: 7px 8px;
+  background: #f6f9f6;
+}
+
+.eval-binding-history > article {
+  display: grid;
+  gap: 3px;
+  margin-top: 7px;
+  border-top: 1px solid #dfe8e0;
+  padding-top: 7px;
+}
+
+.eval-binding-history > article > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.eval-secondary-button {
+  justify-self: start;
+  border: 1px solid #9eb6a5;
+  border-radius: 8px;
+  padding: 6px 9px;
+  color: #315d3d;
+  background: #f4f9f4;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+}
+
+.eval-review-form {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #cbd9ce;
+  border-radius: 10px;
+  padding: 10px;
+  background: #f5f9f5;
+}
+
+.eval-review-form textarea,
+.eval-review-form input,
+.eval-review-form select {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.eval-review-item {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) minmax(130px, auto) minmax(180px, 1.5fr);
+  gap: 7px;
+  align-items: center;
+  border-radius: 8px;
+  padding: 7px;
+  background: #fff;
+}
+
 .eval-check-guide {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4432,6 +5597,193 @@ onBeforeUnmount(() => {
 .result-pending {
   color: #895e20;
   font-weight: 700;
+}
+
+.result-exploratory {
+  color: #6b5b2a;
+  font-weight: 700;
+}
+
+.result-excluded {
+  color: #777;
+  font-weight: 700;
+}
+
+.eval-judgment-viewbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-top: 12px;
+}
+
+.eval-judgment-viewbar > div {
+  display: flex;
+  gap: 6px;
+}
+
+.eval-judgment-viewbar button {
+  border: 1px solid #d4e0d7;
+  border-radius: 999px;
+  padding: 5px 10px;
+  color: #64746a;
+  background: #fff;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.eval-judgment-viewbar button.active {
+  border-color: #4f805d;
+  color: #fff;
+  background: #3f7450;
+}
+
+.eval-attempt-judgment-groups {
+  display: grid;
+  gap: 9px;
+  margin-top: 9px;
+}
+
+.eval-attempt-judgment-group {
+  border: 1px solid #dfe8e0;
+  border-left: 4px solid #6d9878;
+  border-radius: 11px;
+  padding: 9px 10px;
+  background: #fbfdfb;
+}
+
+.eval-attempt-judgment-group.failed {
+  border-left-color: #b04a4a;
+  background: #fffafa;
+}
+
+.eval-attempt-judgment-group.pending {
+  border-left-color: #b48a45;
+  background: #fffdf7;
+}
+
+.eval-attempt-judgment-group.focused {
+  outline: 2px solid #7da489;
+  outline-offset: 2px;
+}
+
+.eval-attempt-judgment-group > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  cursor: pointer;
+  color: #3e5747;
+}
+
+.eval-attempt-judgment-group > summary > div {
+  display: grid;
+  gap: 2px;
+}
+
+.eval-attempt-judgment-group > summary small {
+  color: #79867d;
+  font-size: 0.65rem;
+}
+
+.eval-attempt-judgment-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 16px;
+  margin-top: 8px;
+  color: #5f6f64;
+  font-size: 0.7rem;
+}
+
+.eval-attempt-reason {
+  margin: 7px 0 0;
+  color: #7a4c4c;
+  font-size: 0.7rem;
+}
+
+.eval-attempt-detail-actions {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.eval-attempt-trace-action {
+  border: 1px solid #b8cbbb;
+  border-radius: 8px;
+  padding: 6px 9px;
+  color: #315d3d;
+  background: #f6faf6;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.eval-answer-view {
+  flex: 1 1 100%;
+  border-radius: 8px;
+  padding: 7px 8px;
+  background: #f4f8f4;
+}
+
+.eval-answer-view > summary {
+  cursor: pointer;
+  color: #52675a;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.eval-answer-view pre {
+  max-height: 240px;
+  overflow: auto;
+  margin: 7px 0 0;
+  border-radius: 7px;
+  padding: 8px;
+  color: #48574d;
+  background: #fff;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-size: 0.7rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.eval-attempt-criterion-list {
+  display: grid;
+  gap: 7px;
+  margin-top: 9px;
+}
+
+.eval-attempt-criterion-list > article {
+  display: grid;
+  gap: 5px;
+  border: 1px solid #e1e9e2;
+  border-radius: 9px;
+  padding: 8px;
+  color: #52645a;
+  background: #fff;
+  font-size: 0.72rem;
+}
+
+.eval-attempt-criterion-list > article > header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.eval-attempt-criterion-list > article > header > div {
+  display: grid;
+  gap: 2px;
+}
+
+.eval-attempt-criterion-list > article > header small {
+  color: #78877d;
+  font-size: 0.64rem;
 }
 
 .eval-judgment-groups {
@@ -4780,6 +6132,10 @@ onBeforeUnmount(() => {
   }
 
   .eval-check-guide {
+    grid-template-columns: 1fr;
+  }
+
+  .eval-review-item {
     grid-template-columns: 1fr;
   }
 

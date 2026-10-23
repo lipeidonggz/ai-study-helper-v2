@@ -545,6 +545,83 @@ class EvalJudgeInvocationRow(EvaluationBase):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class EvalJudgmentBindingRow(EvaluationBase):
+    """把一条 Judgment 显式绑定为当前生效判定。"""
+
+    __tablename__ = "eval_judgment_bindings"
+
+    binding_order: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    binding_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    evaluation_revision_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("eval_evaluation_revisions.revision_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    attempt_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("eval_attempts.attempt_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    criterion_revision_id: Mapped[str] = mapped_column(
+        String(96),
+        ForeignKey("eval_criterion_revisions.revision_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    judgment_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("eval_judgments.judgment_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    bound_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+    )
+
+
+class EvalCheckReviewRow(EvaluationBase):
+    """人工对 LLM 型 CheckResult 的可追加复核结果。"""
+
+    __tablename__ = "eval_check_reviews"
+
+    review_order: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    review_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    evaluation_revision_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("eval_evaluation_revisions.revision_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    attempt_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("eval_attempts.attempt_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    checker_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    source_check_result_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("eval_check_results.check_result_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    result: Mapped[str] = mapped_column(String(16), nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(96))
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    reviewer: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+    )
+
+
 class EvalSchemaVersionRow(EvaluationBase):
     """评测数据库 schema 的幂等初始化标记。"""
 

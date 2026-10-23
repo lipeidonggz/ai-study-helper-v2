@@ -8,7 +8,7 @@
 
 - 阶段：实现阶段，023A 程序 Checker 与 LLM Judge 已完成。
 - 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付、检索与 Agent 运行链、流式问答、本地 trace 诊断和逐 criterion 评测判定已实现。
-- 当前工作：022A／022B／023A 已完成；下一步进入 023B。
+- 当前工作：022A／022B／023A／023B 已完成；下一步进入结果矩阵与基线比较。
 
 ## 设计基线
 
@@ -95,6 +95,8 @@
 - [022B · 评测用例与用例集编写人工验收清单（已完成）](development/manual-tests/022B-evaluation-authoring.md)
 - [023A · 程序 Checker 与 LLM Judge（已完成）](development/slices/023A-evaluation-judgment.md)
 - [023A · 程序 Checker 与 LLM Judge 人工验收清单（已完成）](development/manual-tests/023A-evaluation-judgment.md)
+- [023B · 生效判定绑定与 N/K 聚合（已完成）](development/slices/023B-evaluation-aggregation.md)
+- [023B · 生效判定绑定与 N/K 聚合人工验收清单（已完成）](development/manual-tests/023B-evaluation-aggregation.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库

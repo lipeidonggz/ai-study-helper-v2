@@ -63,7 +63,8 @@ class _FakeRuntime:
         if emit is not None:
             emit(AgentEvent(event_type="answer_delta", payload={"delta": "答"}))
         try:
-            await asyncio.sleep(0.005)
+            delay = self._owner.attempt_delays.pop(0) if self._owner.attempt_delays else 0.005
+            await asyncio.sleep(delay)
             if self._owner.block_first and not self._owner.has_blocked:
                 self._owner.has_blocked = True
                 self._owner.entered.set()
@@ -103,12 +104,14 @@ class _FakeExecutionService:
         *,
         block_first: bool = False,
         fail_first_with: str | None = None,
+        attempt_delays: list[float] | None = None,
     ) -> None:
         self.calls: list[tuple[str, str | None]] = []
         self.settings_overrides: list[RuntimeSettingsResponse] = []
         self.prompt_overrides: list[PromptBundle | None] = []
         self.block_first = block_first
         self.fail_first_with = fail_first_with
+        self.attempt_delays = list(attempt_delays or [])
         self.has_blocked = False
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
@@ -344,7 +347,7 @@ def test_schema_v1_upgrades_plan_facts_without_rewriting_them(tmp_path: Path) ->
         )
     finally:
         connection.close()
-    assert database.schema_version() == 4
+    assert database.schema_version() == 5
     assert (source_n, source_k) == (10, 9)
     assert mode == "formal"
     assert suite_statuses == {"sr_old": "retired", "sr_new": "active"}
@@ -569,6 +572,43 @@ def test_runner_uses_global_attempt_concurrency(tmp_path: Path) -> None:
                 == "sealed_complete"
             )
             assert execution.max_active == 3
+            finished = repository.get_run(run.run_id)
+            assert finished.totals["attempts"] == 4
+            assert finished.totals["valid_samples"] == 4
+            assert finished.totals["infrastructure_failures"] == 0
+        finally:
+            await runner.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_runner_waits_for_inflight_attempts_before_sealing(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        database = EvaluationDatabase(tmp_path)
+        repository = EvaluationRepository(database)
+        suite_revision_id = _add_test_suite(database, n=10)
+        plan_id = _create_plan(
+            database,
+            repository,
+            suite_revision_id,
+            concurrency=8,
+        )
+        execution = _FakeExecutionService(
+            attempt_delays=[0.001, 0.001, 0.001, *([0.05] * 20)],
+        )
+        runner = EvaluationRunner(repository, execution)  # type: ignore[arg-type]
+        try:
+            run = await runner.start(plan_id)
+            assert (
+                await _wait_for_status(repository, run.run_id, {"sealed_complete"})
+                == "sealed_complete"
+            )
+            finished = repository.get_run(run.run_id)
+            assert finished.totals["attempts"] == 10
+            assert finished.totals["valid_samples"] == 10
+            assert finished.totals["infrastructure_failures"] == 0
         finally:
             await runner.shutdown()
 

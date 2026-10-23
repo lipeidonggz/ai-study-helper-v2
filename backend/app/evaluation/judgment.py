@@ -3,15 +3,17 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import func, select
 
+from app.evaluation.aggregation import build_aggregates
 from app.evaluation.citation_prompt import (
     CITATION_SUPPORT_PROMPT_HASH,
     CITATION_SUPPORT_PROMPT_VERSION,
@@ -37,10 +39,15 @@ from app.evaluation.models import (
     AttemptView,
     CaseRevisionView,
     CheckResultView,
+    CheckReviewRequest,
+    CheckReviewView,
     CriterionView,
+    EffectiveJudgmentBindingView,
     EvaluationRevisionView,
     JudgeInvocationView,
+    JudgeOverrideRequest,
     JudgmentView,
+    PlanCaseView,
     RunView,
     StartJudgmentRequest,
 )
@@ -48,9 +55,13 @@ from app.evaluation.outcomes import is_product_sample
 from app.evaluation.repository import EvaluationRepository
 from app.evaluation.storage_models import (
     EvalAttemptRow,
+    EvalCaseRevisionCriterionRow,
     EvalCheckResultRow,
+    EvalCheckReviewRow,
+    EvalCriterionRevisionRow,
     EvalEvaluationRevisionRow,
     EvalJudgeInvocationRow,
+    EvalJudgmentBindingRow,
     EvalJudgmentRow,
 )
 from app.providers.chat import (
@@ -259,6 +270,16 @@ class EvaluationJudgmentService:
                 .where(EvalCheckResultRow.evaluation_revision_id == revision_id)
                 .order_by(EvalCheckResultRow.created_at, EvalCheckResultRow.check_result_id)
             ).all()
+            binding_rows = session.scalars(
+                select(EvalJudgmentBindingRow)
+                .where(EvalJudgmentBindingRow.evaluation_revision_id == revision_id)
+                .order_by(EvalJudgmentBindingRow.binding_order)
+            ).all()
+            review_rows = session.scalars(
+                select(EvalCheckReviewRow)
+                .where(EvalCheckReviewRow.evaluation_revision_id == revision_id)
+                .order_by(EvalCheckReviewRow.review_order)
+            ).all()
             invocation_rows = session.scalars(
                 select(EvalJudgeInvocationRow)
                 .where(
@@ -297,6 +318,118 @@ class EvaluationJudgmentService:
                         ),
                     )
                 )
+            judgment_views = [
+                JudgmentView(
+                    judgment_id=judgment.judgment_id,
+                    attempt_id=judgment.attempt_id,
+                    criterion_revision_id=judgment.criterion_revision_id,
+                    executor=judgment.executor,
+                    executor_ref=judgment.executor_ref,
+                    verdict=judgment.verdict,
+                    normalized_result=judgment.normalized_result,
+                    reason=judgment.reason,
+                    evidence=json.loads(judgment.evidence_json),
+                    error_code=judgment.error_code,
+                    created_at=utc_iso(judgment.created_at),
+                    invocations=invocations_by_judgment.get(
+                        judgment.judgment_id,
+                        [],
+                    ),
+                )
+                for judgment in judgments
+            ]
+            judgments_by_id = {judgment.judgment_id: judgment for judgment in judgment_views}
+            latest_bindings = {
+                (binding.attempt_id, binding.criterion_revision_id): binding
+                for binding in binding_rows
+            }
+            latest_binding_ids = {binding.binding_id for binding in latest_bindings.values()}
+            binding_history_views = []
+            for binding in binding_rows:
+                judgment = judgments_by_id.get(binding.judgment_id)
+                if judgment is None:
+                    raise RuntimeError(
+                        f"binding references missing judgment: {binding.judgment_id}"
+                    )
+                binding_history_views.append(
+                    EffectiveJudgmentBindingView(
+                        binding_id=binding.binding_id,
+                        attempt_id=binding.attempt_id,
+                        criterion_revision_id=binding.criterion_revision_id,
+                        judgment_id=binding.judgment_id,
+                        executor=judgment.executor,
+                        verdict=judgment.verdict,
+                        normalized_result=cast(Any, judgment.normalized_result),
+                        is_effective=binding.binding_id in latest_binding_ids,
+                        bound_at=utc_iso(binding.bound_at),
+                    )
+                )
+            binding_views = [binding for binding in binding_history_views if binding.is_effective]
+            check_views = [
+                CheckResultView(
+                    check_result_id=check.check_result_id,
+                    attempt_id=check.attempt_id,
+                    checker_id=check.checker_id,
+                    checker_version=check.checker_version,
+                    result=_expect_check_result(check.result),
+                    payload=json.loads(check.payload_json),
+                    error_code=check.error_code,
+                    created_at=utc_iso(check.created_at),
+                )
+                for check in checks
+            ]
+            review_views = [
+                CheckReviewView(
+                    review_id=review.review_id,
+                    attempt_id=review.attempt_id,
+                    checker_id=review.checker_id,
+                    source_check_result_id=review.source_check_result_id,
+                    result=_expect_check_result(review.result),
+                    payload=json.loads(review.payload_json),
+                    error_code=review.error_code,
+                    reason=review.reason,
+                    reviewer=review.reviewer,
+                    created_at=utc_iso(review.created_at),
+                )
+                for review in review_rows
+            ]
+            run = self._repository.get_run(row.execution_run_id)
+            case_revision_ids = list(
+                dict.fromkeys(attempt.case_revision_id for attempt in run.attempts)
+            )
+            case_views = {
+                case.revision_id: case
+                for case in self._repository.get_case_revisions(case_revision_ids)
+            }
+            try:
+                plan_cases = self._repository.get_plan(run.plan_id).cases
+            except (KeyError, ValueError):
+                plan_cases = []
+            planned_revision_ids = {plan_case.case_revision_id for plan_case in plan_cases}
+            for case in case_views.values():
+                if case.revision_id in planned_revision_ids:
+                    continue
+                plan_cases.append(
+                    PlanCaseView(
+                        case_revision_id=case.revision_id,
+                        case_id=case.case_id,
+                        question=case.question,
+                        n=case.n,
+                        k=case.k,
+                        source_n=case.n,
+                        source_k=case.k,
+                        resolved_targets=[],
+                        execution_policy=case.execution_policy,
+                    )
+                )
+            attempt_aggregates, case_aggregates = build_aggregates(
+                run=run,
+                plan_cases=plan_cases,
+                cases=case_views,
+                bindings=binding_views,
+                checks=check_views,
+                reviews=review_views,
+            )
             return EvaluationRevisionView(
                 revision_id=row.revision_id,
                 execution_run_id=row.execution_run_id,
@@ -310,40 +443,180 @@ class EvaluationJudgmentService:
                 created_at=utc_iso(row.created_at),
                 started_at=None if row.started_at is None else utc_iso(row.started_at),
                 finished_at=None if row.finished_at is None else utc_iso(row.finished_at),
-                judgments=[
-                    JudgmentView(
-                        judgment_id=judgment.judgment_id,
-                        attempt_id=judgment.attempt_id,
-                        criterion_revision_id=judgment.criterion_revision_id,
-                        executor=judgment.executor,
-                        executor_ref=judgment.executor_ref,
-                        verdict=judgment.verdict,
-                        normalized_result=judgment.normalized_result,
-                        reason=judgment.reason,
-                        evidence=json.loads(judgment.evidence_json),
-                        error_code=judgment.error_code,
-                        created_at=utc_iso(judgment.created_at),
-                        invocations=invocations_by_judgment.get(
-                            judgment.judgment_id,
-                            [],
-                        ),
-                    )
-                    for judgment in judgments
-                ],
-                checks=[
-                    CheckResultView(
-                        check_result_id=check.check_result_id,
-                        attempt_id=check.attempt_id,
-                        checker_id=check.checker_id,
-                        checker_version=check.checker_version,
-                        result=_expect_check_result(check.result),
-                        payload=json.loads(check.payload_json),
-                        error_code=check.error_code,
-                        created_at=utc_iso(check.created_at),
-                    )
-                    for check in checks
-                ],
+                judgments=judgment_views,
+                judgment_bindings=binding_history_views,
+                effective_bindings=binding_views,
+                check_reviews=review_views,
+                checks=check_views,
+                attempt_aggregates=attempt_aggregates,
+                case_aggregates=case_aggregates,
             )
+
+    def override_judgment(
+        self,
+        revision_id: str,
+        request: JudgeOverrideRequest,
+    ) -> EvaluationRevisionView:
+        """追加人工语义 Judgment，并绑定为当前生效判定。"""
+
+        with self._database.session() as session, session.begin():
+            revision = session.get(EvalEvaluationRevisionRow, revision_id)
+            if revision is None:
+                raise KeyError(revision_id)
+            if revision.status == "running":
+                raise ValueError("cannot override a running evaluation revision")
+            attempt = session.get(EvalAttemptRow, request.attempt_id)
+            if attempt is None or attempt.run_id != revision.execution_run_id:
+                raise ValueError("attempt does not belong to this evaluation run")
+            criterion = session.get(
+                EvalCriterionRevisionRow,
+                request.criterion_revision_id,
+            )
+            link = session.get(
+                EvalCaseRevisionCriterionRow,
+                (attempt.case_revision_id, request.criterion_revision_id),
+            )
+            if criterion is None or link is None:
+                raise ValueError("criterion does not belong to this attempt")
+            if criterion.evaluator != "llm_judge":
+                raise ValueError("only llm_judge criteria can be manually overridden")
+            normalized_result = _normalize_human_verdict(
+                criterion.rule_type,
+                request.verdict,
+            )
+            judgment_id = f"judgment_{uuid4().hex}"
+            session.add(
+                EvalJudgmentRow(
+                    judgment_id=judgment_id,
+                    evaluation_revision_id=revision_id,
+                    attempt_id=attempt.attempt_id,
+                    criterion_revision_id=criterion.revision_id,
+                    executor="human",
+                    executor_ref=request.reviewer,
+                    verdict=request.verdict,
+                    normalized_result=normalized_result,
+                    reason=request.reason,
+                    evidence_json=_json({"reviewer": request.reviewer}),
+                    error_code=None,
+                )
+            )
+            session.flush()
+            session.add(
+                EvalJudgmentBindingRow(
+                    binding_id=f"binding_{uuid4().hex}",
+                    evaluation_revision_id=revision_id,
+                    attempt_id=attempt.attempt_id,
+                    criterion_revision_id=criterion.revision_id,
+                    judgment_id=judgment_id,
+                    bound_at=utc_now(),
+                )
+            )
+        self._refresh_effective_revision_state(revision_id)
+        return self.get_revision(revision_id)
+
+    def review_llm_check(
+        self,
+        revision_id: str,
+        request: CheckReviewRequest,
+    ) -> EvaluationRevisionView:
+        """追加人工逐 block 引用支持复核，并重新计算有效检查结果。"""
+
+        if request.checker_id != "citation_support":
+            raise ValueError("only citation_support check results can be reviewed")
+        with self._database.session() as session, session.begin():
+            revision = session.get(EvalEvaluationRevisionRow, revision_id)
+            if revision is None:
+                raise KeyError(revision_id)
+            if revision.status == "running":
+                raise ValueError("cannot review a running evaluation revision")
+            attempt = session.get(EvalAttemptRow, request.attempt_id)
+            if attempt is None or attempt.run_id != revision.execution_run_id:
+                raise ValueError("attempt does not belong to this evaluation run")
+            source = session.scalar(
+                select(EvalCheckResultRow)
+                .where(
+                    EvalCheckResultRow.evaluation_revision_id == revision_id,
+                    EvalCheckResultRow.attempt_id == request.attempt_id,
+                    EvalCheckResultRow.checker_id == request.checker_id,
+                )
+                .order_by(EvalCheckResultRow.created_at.desc())
+            )
+            integrity = session.scalar(
+                select(EvalCheckResultRow).where(
+                    EvalCheckResultRow.evaluation_revision_id == revision_id,
+                    EvalCheckResultRow.attempt_id == request.attempt_id,
+                    EvalCheckResultRow.checker_id == "citation_integrity",
+                )
+            )
+            if source is None or integrity is None:
+                raise ValueError("citation support check facts are incomplete")
+            if integrity.result != "pass":
+                raise ValueError("citation integrity must pass before support review")
+            expected_ids = set(json.loads(integrity.payload_json).get("cited_block_ids", []))
+            submitted_ids = [item.block_id for item in request.citations]
+            if len(submitted_ids) != len(set(submitted_ids)):
+                raise ValueError("citation review contains duplicate block ids")
+            if set(submitted_ids) != expected_ids:
+                raise ValueError("citation review block set does not match the answer")
+            if "unsupported" in {item.verdict for item in request.citations}:
+                result = "fail"
+                error_code = "citation_not_supported"
+            elif "unknown" in {item.verdict for item in request.citations}:
+                result = "pending"
+                error_code = "citation_support_unknown"
+            else:
+                result = "pass"
+                error_code = None
+            session.add(
+                EvalCheckReviewRow(
+                    review_id=f"review_{uuid4().hex}",
+                    evaluation_revision_id=revision_id,
+                    attempt_id=request.attempt_id,
+                    checker_id=request.checker_id,
+                    source_check_result_id=source.check_result_id,
+                    result=result,
+                    payload_json=_json(
+                        {
+                            "citations": [
+                                item.model_dump(mode="json") for item in request.citations
+                            ],
+                            "reviewer": request.reviewer,
+                            "reason": request.reason,
+                        }
+                    ),
+                    error_code=error_code,
+                    reason=request.reason,
+                    reviewer=request.reviewer,
+                    created_at=utc_now(),
+                )
+            )
+        self._refresh_effective_revision_state(revision_id)
+        return self.get_revision(revision_id)
+
+    def _refresh_effective_revision_state(self, revision_id: str) -> None:
+        """按当前绑定与人工复核重算进度，不修改底层历史记录。"""
+
+        revision = self.get_revision(revision_id)
+        counts = Counter(binding.normalized_result for binding in revision.effective_bindings)
+        is_incomplete = counts["pending"] > 0 or any(
+            item.result == "pending" for item in revision.attempt_aggregates
+        )
+        with self._database.session() as session, session.begin():
+            row = session.get(EvalEvaluationRevisionRow, revision_id)
+            if row is None:
+                raise KeyError(revision_id)
+            row.status = "incomplete" if is_incomplete else "complete"
+            row.summary_json = _json(
+                {
+                    "total": len(revision.effective_bindings),
+                    "pass": counts["pass"],
+                    "fail": counts["fail"],
+                    "pending": counts["pending"],
+                }
+            )
+            if not is_incomplete:
+                row.error_code = None
+                row.error_message = None
 
     def list_run_revisions(self, run_id: str) -> list[EvaluationRevisionView]:
         """返回一个 run 的全部判定修订版，按创建时间倒序。"""
@@ -958,6 +1231,16 @@ class EvaluationJudgmentService:
                 )
             )
             session.flush()
+            session.add(
+                EvalJudgmentBindingRow(
+                    binding_id=f"binding_{uuid4().hex}",
+                    evaluation_revision_id=revision_id,
+                    attempt_id=outcome.attempt_id,
+                    criterion_revision_id=outcome.criterion.revision_id,
+                    judgment_id=judgment_id,
+                    bound_at=utc_now(),
+                )
+            )
             for invocation in outcome.invocations:
                 session.add(
                     EvalJudgeInvocationRow(
@@ -1276,6 +1559,19 @@ def _normalize_verdict(rule_type: str, verdict: str) -> str:
     if verdict == "unknown":
         return "pending"
     raise ValueError(f"unsupported judge verdict: {rule_type}/{verdict}")
+
+
+def _normalize_human_verdict(rule_type: str, verdict: str) -> str:
+    """校验人工 verdict 必须与 R／X 方向一致。"""
+
+    allowed = (
+        {"satisfied", "unsatisfied", "unknown"}
+        if rule_type == "R"
+        else {"violated", "not_violated", "unknown"}
+    )
+    if verdict not in allowed:
+        raise ValueError(f"unsupported judge verdict: {rule_type}/{verdict}")
+    return _normalize_verdict(rule_type, verdict)
 
 
 def replace_invocation(
