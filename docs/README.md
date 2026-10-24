@@ -46,6 +46,7 @@
 
 - [实现待办](development/backlog.md)
 - [对外文章草稿](publishing/README.md)
+- [对外文章写作规范](publishing/writing-guide.md)
 - [0001 · 文档与实现记录结构](decisions/0001-documentation-and-record-structure.md)
 - [0002 · 使用 PyInstaller one-folder 分发后端](decisions/0002-package-backend-as-pyinstaller-directory.md)
 - [0003 · Windows 按用户安装与本地数据根](decisions/0003-windows-installer-and-data-root.md)
