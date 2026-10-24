@@ -209,15 +209,22 @@ function copyLabel(key: string): string {
                 {{
                   entry.kind === "assistant"
                     ? "Assistant 输出"
-                    : entry.kind === "observation"
-                      ? "工具 Observation"
-                      : "其他历史内容"
+                    : entry.kind === "tool_result"
+                      ? "Harness 工具结果"
+                      : entry.kind === "protocol_error"
+                        ? "Harness 协议错误"
+                        : entry.kind === "observation"
+                          ? "旧版工具 Observation"
+                          : "其他历史内容"
                 }}
               </summary>
               <template v-if="entry.output">
-                <section class="output-section">
-                  <h4>模型说明</h4>
-                  <pre>{{ entry.output.thought }}</pre>
+                <section
+                  v-if="entry.output.decisionSummary"
+                  class="output-section"
+                >
+                  <h4>决策摘要</h4>
+                  <pre>{{ entry.output.decisionSummary }}</pre>
                 </section>
                 <section
                   v-if="entry.output.kind === 'finish'"
@@ -301,7 +308,10 @@ function copyLabel(key: string): string {
         <span>判定结论</span>
         <strong>{{ judgeVerdictLabel(judgeOutput.verdict) }}</strong>
       </div>
-      <section class="output-section">
+      <section
+        v-if="modelOutput && modelOutput.decisionSummary"
+        class="output-section"
+      >
         <h4>判定原因</h4>
         <pre>{{ judgeOutput.reason }}</pre>
       </section>
@@ -309,8 +319,8 @@ function copyLabel(key: string): string {
 
     <div v-else-if="modelOutput" class="model-output-view">
       <section class="output-section">
-        <h4>模型说明</h4>
-        <pre>{{ modelOutput.thought }}</pre>
+        <h4>决策摘要</h4>
+        <pre>{{ modelOutput.decisionSummary }}</pre>
       </section>
       <section
         v-if="modelOutput.kind === 'finish'"

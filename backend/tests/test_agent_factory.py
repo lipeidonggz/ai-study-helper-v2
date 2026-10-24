@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from app.agent.factory import AgentExecutionService
@@ -40,7 +41,18 @@ def test_agent_execution_service_accepts_frozen_evaluation_settings(
         settings_provider=lambda: RuntimeSettingsResponse(),
         trace_store=None,
         embedding_provider_factory=FakeEmbeddingProvider,
-        chat_provider_factory=lambda _key: FakeChatProvider(["Thought: 完成\nAction: Finish[ok]"]),
+        chat_provider_factory=lambda _key: FakeChatProvider(
+            [
+                json.dumps(
+                    {
+                        "type": "finish",
+                        "answer": "ok",
+                        "decision_summary": "直接回答。",
+                    },
+                    ensure_ascii=False,
+                )
+            ]
+        ),
     )
     frozen_settings = RuntimeSettingsResponse(
         top_k=9,

@@ -75,7 +75,7 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 | 2 | **输入** | 只暴露 Agent 该决定的（查询、范围：篇／节）；top-k、预算这类不该由 LLM 决定，由工具内部定 |
 | 3 | **输出** | 返回块引用、完整正文、文档展示标题和来源；检索分数只进 trace，不返回给 Agent，也不在工具层截断正文 |
 | 4 | **空结果与失败** | 明确区分合法空结果、参数无效、范围不存在、collection 不可用和上游检索失败，不能返回空列表让 Agent 猜 |
-| 5 | **预算归属** | 工具返回范围内全部业务结果，自身不计算 token 也不做预算判断；Harness 对最终 Observation 统一计算 `result_tokens`，并在结果进入 History 前做唯一一次准入，不做分页和第二道截断 |
+| 5 | **预算归属** | 工具返回范围内全部业务结果，自身不计算 token 也不做预算判断；Harness 对最终 `tool_result` 统一计算 `result_tokens`，并在结果进入 History 前做唯一一次准入，不做分页和第二道截断 |
 | 6 | **确定性** | 同样输入给同样结果（排序稳定），否则一致性与复现都无从谈起 |
 | 7 | **描述与示例** | 写清"什么时候用、什么时候别用"——这本身是提示词的一部分 |
 | 8 | **可观测** | 每次调用进 trace：参数、返回数、Harness 计算的 `result_tokens`、耗时、空结果／错误原因和检索排名分数 |
@@ -93,7 +93,7 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 
 **工具公共错误仍放在 payload 中**：Harness 成功派发后 `harness_status=ok`；工具用统一结构 `{"error":{"code":"...","message":"...","retryable":false}}` 表示业务、依赖或工具内部失败。公共错误码至少包括 `invalid_argument`（必填项为空、参数类型／范围非法）、`scope_not_found`（指定 doc／section 不存在）、`collection_unavailable`（无可用快照）、`upstream_unavailable`（embedding 等上游失败且重试无效）和 `tool_internal_error`。合法但无内容的结果仍用各工具的空结果字段表达，不能升格为错误；Harness 自身的异常属于外层 `harness_internal_error`，不能和工具错误混用。
 
-**公共块返回形态**：凡返回正文块，至少携带 `block_id / doc_id / doc_title / source_label / section_path / text`。内部字符偏移和检索分数不返回给模型；`doc_title` 与 `source_label` 用于消歧和最终引用展示，`block_id` 是全局唯一机器可核验键（其生成已包含 `doc_id`），并必须与返回中的 `doc_id` 一致。工具不返回 `result_tokens`；Harness 对最终 Observation 统一按本次请求固定的对话模型 tokenizer／估算器计算，用于上下文准入，不是 embedding 模型 token 数。
+**公共块返回形态**：凡返回正文块，至少携带 `block_id / doc_id / doc_title / source_label / section_path / text`。内部字符偏移和检索分数不返回给模型；`doc_title` 与 `source_label` 用于消歧和最终引用展示，`block_id` 是全局唯一机器可核验键（其生成已包含 `doc_id`），并必须与返回中的 `doc_id` 一致。工具不返回 `result_tokens`；Harness 对最终 `tool_result` 统一按本次请求固定的对话模型 tokenizer／估算器计算，用于上下文准入，不是 embedding 模型 token 数。
 
 工具约束中标 **【质量属性·X】** 的条目来自 §9 的局部预检，不是工具自身功能。
 
@@ -109,7 +109,7 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 
 **五个工具**（每个都带"给模型的工具说明"与返回示例）
 
-**工具只负责取全，Harness 负责计数与预算准入**：`list_blocks`／`scan_term` 始终返回当前范围的全部业务结果；Harness 生成最终 Observation 后统一计算 `result_tokens`，并在把结果加入 History 前检查上下文与累计预算，超界时不再发起下一次模型调用。工具自身不计算 token，也不做预算判断。`search_blocks` 仍按相关度取 Top-5。
+**工具只负责取全，Harness 负责计数与预算准入**：`list_blocks`／`scan_term` 始终返回当前范围的全部业务结果；Harness 生成最终 `tool_result` 后统一计算 `result_tokens`，并在把结果加入 History 前检查上下文与累计预算，超界时不再发起下一次模型调用。工具自身不计算 token，也不做预算判断。`search_blocks` 仍按相关度取 Top-5。
 
 ### T1 list_documents
 
@@ -123,9 +123,9 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 
 **输入**：`doc_ids: string[]`<br> **调用示例**：`{"doc_ids":["doc_a5","doc_o2"]}`<br> **输出**：`documents[]`，按 doc 分组——每项含 `doc_id / doc_title / source_label` ＋ `sections`［path[]、ordinal、title、depth、`own_blocks`、`own_context_tokens`、`subtree_blocks`、`subtree_context_tokens`、first_line］；doc 不存在时该项返回公共 `error`；**无章节文档**（未识别出任何章节标题）返回根节（`path: []`、title＝文档标题、`depth: 0`）<br> **返回示例**：`{"documents":[{"doc_id":"doc_a5","doc_title":"How we contain Claude","source_label":"Anthropic","sections":[{"path":["Patterns for containing agents","Pattern 3: The local VM"],"ordinal":"3.3","title":"Pattern 3: The local VM (Claude Cowork)","depth":2,"own_blocks":3,"own_context_tokens":540,"subtree_blocks":5,"subtree_context_tokens":980,"first_line":"Claude Cowork runs on a user's desktop…"}]},{"doc_id":"doc_o2","doc_title":"Harness engineering","source_label":"OpenAI","sections":[{"path":["…"],"ordinal":"1","title":"…","depth":1,"own_blocks":4,"own_context_tokens":700,"subtree_blocks":6,"subtree_context_tokens":1100,"first_line":"…"}]}]}`<br>doc 不存在：`{"documents":[{"doc_id":"doc_missing","error":{"code":"scope_not_found","message":"doc not found","retryable":false}}]}`<br>无章节文档：`{"documents":[{"doc_id":"doc_x","doc_title":"Untitled","source_label":"Local","sections":[{"path":[],"title":"Untitled","depth":0,"own_blocks":12,"own_context_tokens":3200,"subtree_blocks":12,"subtree_context_tokens":3200,"first_line":"…"}]}]}`<br> **约束**：**【质量属性·可靠性】**doc 不存在按 doc 返回公共错误；`documents[]` 保持输入 `doc_ids` 顺序，重复 id 取首次；`own_*` 只统计该节直属块，`subtree_*` 统计该节及全部后代；无章节文档返回根节（`path: []`、title＝文档标题、`depth: 0`）；重名标题 path 唯一化；章节顺序按原文；不做摘要、不返回 block id。
 
-**token 字段口径**：`own_context_tokens`／`subtree_context_tokens` 是由固定 `ChunkSizingEstimator` 聚合的近似提示，用于让 Agent 判断范围大小，不是当前对话模型的精确 token 数；Harness 另行对最终 Observation 计算 `result_tokens`。
+**token 字段口径**：`own_context_tokens`／`subtree_context_tokens` 是由固定 `ChunkSizingEstimator` 聚合的近似提示，用于让 Agent 判断范围大小，不是当前对话模型的精确 token 数；Harness 另行对最终 `tool_result` 计算 `result_tokens`。
 
-**拆分表格的返回上下文**：如果 block 来自被拆分的表格，返回中可附带 `table_context`（caption、表头、行组序号）。它不是正文证据，也不参与 `text` 的字符偏移和引用；但会进入最终 Observation，并计入 Harness 计算的 `result_tokens`。
+**拆分表格的返回上下文**：如果 block 来自被拆分的表格，返回中可附带 `table_context`（caption、表头、行组序号）。它不是正文证据，也不参与 `text` 的字符偏移和引用；但会进入最终 `tool_result`，并计入 Harness 计算的 `result_tokens`。
 
 **关键词索引口径**：`search_blocks` 的关键词路径使用 doc_title／section_path／table_context／block.text 组装的 search_text，经固定 analyzer 建 BM25 倒排；`scan_term` 则绕过 analyzer，直接对 block.text 做 NFC＋大小写折叠后的字面扫描。关键词索引零命中不能代替 `scan_term` 的证否。
 
@@ -159,7 +159,7 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 
 **工具说明同时承担局部选择规则**：每个工具写清自身能力、何时使用、何时不应使用及返回物性质。只有跨工具的协作规则与停止语义放在系统提示词里，避免同一规则两处重复。
 
-**初版没有独立的 evidence assembler。**Harness 将工具返回的完整 payload 原样转换为 Observation 并追加 History，由模型在 Thought 中判断证据是否足够、哪些块支持结论。这里不额外做跨调用重排、合并或摘要；等失败样本证明上下文冗余成为主要问题时，再按 §10 的后备路径设计证据组装。
+**初版没有独立的 evidence assembler。**Harness 将工具返回的完整 payload 原样转换为 `tool_result` 并追加 History，由模型在 `decision_summary` 中判断证据是否足够、哪些块支持结论。这里不额外做跨调用重排、合并或摘要；等失败样本证明上下文冗余成为主要问题时，再按 §10 的后备路径设计证据组装。
 
 ### 覆盖检查
 
@@ -188,14 +188,14 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 
 ### 8.1 Agent 循环：运行时控制流
 
->  **职责边界**<br> **模型**：根据当前问题和 History 产生一个 Thought，再输出一个 Action。<br> **Harness**：注入工具、解析 Action、执行工具、把结果转换为 Observation、维护 History，并判断循环是否结束。<br> **工具**：执行一个具体动作并返回结果；不负责决定下一轮做什么，也不负责停止循环。
+>  **职责边界**<br> **模型**：根据当前问题和结构化 History 输出一个 `tool_call` 或 `finish` JSON 对象。<br> **Harness**：注入工具、校验 JSON、执行工具、追加 Runtime-only `tool_result`、维护 History，并判断循环是否结束。<br> **工具**：执行一个具体动作并返回结果；不负责决定下一轮做什么，也不负责停止循环。
 
 **状态**
 
 - `question`：本次用户问题。
-- `history`：本次请求内已有的 Thought、Action 和 Observation 轨迹，不包含跨请求状态。
-- `finished`：是否已经收到 `Finish`。
-- `agent_turns`：模型产生决策的次数；每次输出一个 Action（包括 `Finish`）记为一次。
+- `history`：本次请求内已有的结构化 `tool_call`、Harness `tool_result` 和协议错误记录，不包含跨请求状态。
+- `finished`：是否已经收到 `type=finish`。
+- `agent_turns`：模型产生决策的次数；每次输出一个 `tool_call` 或 `finish` 记为一次。
 - `tool_calls`：模型请求执行并实际派发的**逻辑工具动作数**；初版上限 `max_tool_calls = 8`。一个工具调用是一轮 Agent 决策中的可选动作，不单独构成一个循环。
 - `model_calls`：实际发给模型的请求次数，包括自动重试；用于成本、Trace 与故障定位，不另设固定次数上限。
 - `context_tokens`：下一次模型调用预计携带的上下文 token；用户可配置 `max_context_tokens`，默认 `100000`。
@@ -208,12 +208,12 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 
 1. 每轮开始先检查预算：若 `tool_calls` 达到上限，`used_tokens` 已达到 `max_request_tokens` 扣除最终回答预留后的额度，或预计下一次调用的 `context_tokens` 超过 `max_context_tokens`，则停止继续调用工具。上下文超界进入终结轮；累计预算不足时优先进入终结轮，连终结轮也放不下则返回带“内容未完”声明的部分回答。
 2. 将系统提示词、当前 collection 快照状态、用户问题和当前可用工具交给模型；终结轮不提供工具。
-3. 模型输出一个 Thought 和一个 Action，并累计本轮模型调用消耗的 token。
-4. Harness 解析 Action：
-  - **工具调用**：执行该工具并取得完整业务结果；Harness 将其转换为最终 Observation，统一计算 `result_tokens`。若加入当前 History 后仍不超过用户上下文与累计预算，则追加 Observation；否则不追加结果，返回 `context_budget_exceeded` 或 `request_budget_exceeded`。
-  - **Finish**：提取最终答案，结束循环。
-  - **无法解析**：将协议错误作为 Observation 追加，进入下一轮；预算耗尽时终止。
-5. 终结轮向系统提示词注入 `finalization_mode`：禁用工具，要求直接输出短而闭合的 `Finish`，只保留核心要点并声明内容未完。若模型输出被截断在 `Finish[...]` 中间，Harness 保留已经流出的正文、补齐确定性的“内容未完”声明并返回 partial，而不是丢弃正文或记为 failed。预算已经不足、无法再发起终结调用时，也返回同一类确定性部分回答。
+3. 模型只输出一个 `tool_call` 或 `finish` JSON，并累计本轮模型调用消耗的 token。
+4. Harness 严格校验 JSON：
+  - **tool_call**：校验工具名和参数后执行；Harness 追加 Runtime-only `tool_result`，统一计算 `result_tokens`。若加入当前 History 后超过上下文或累计预算，则不追加业务结果，并记录明确预算错误。
+  - **finish**：提取最终答案，结束循环。
+  - **无法解析或伪造 Harness 类型**：追加 Runtime-only `protocol_error`。第 2 次协议错误关闭工具并进入 finalization；finalization 仍非法时以 `agent_protocol_loop` 作为产品失败结束。
+5. 终结轮向系统提示词注入 `finalization_mode`：禁用工具，要求直接输出一个 `{"type":"finish","answer":"..."}`。若答案字符串被输出长度截断，Harness 保留已经流出的正文、补齐确定性的“内容未完”声明并返回 partial，而不是丢弃正文或记为 failed。预算已经不足、无法再发起终结调用时，也返回同一类确定性部分回答。
 
 **可观测边界**：Agent 循环只通过统一的 `TraceEmitter` 发出请求、轮次、模型、工具和预算事件，**不直接写文件、不等待 trace 落地，也不因 trace 写入失败重试或终止**。有界队列、后台 writer、丢弃与 flush 策略统一归 §9.4.2，避免把存储 I/O 混进 Agent 的决策与控制流。
 
@@ -222,7 +222,7 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 | 错误类型 | Harness 行为 | 是否计入预算 |
 | --- | --- | --- |
 | **工具业务结果**：doc 不存在、无匹配、范围为空 | 作为正常 payload 返回给模型；不自动重试 | 只计本次工具调用的 token |
-| **协议错误**：Action 格式错误、JSON 无法解析、出现多个 Action | 追加 `protocol_error` Observation，让模型下一轮修正；它不是传输重试 | 模型调用 token 正常计入 |
+| **协议错误**：非单一 JSON、schema 非法或伪造 Harness 类型 | 追加 Runtime-only `protocol_error`；第 2 次后强制 finalization，再失败则以 `agent_protocol_loop` 结束 | 模型调用 token 正常计入 |
 | **瞬时工具错误**：超时、临时基础设施失败 | 同一操作最多自动重试 1 次；仍失败则在工具 payload 中返回 `tool_internal_error` 或 `upstream_unavailable` | 模型重试产生的 token 计入 `max_request_tokens`；不设独立“重试预算” |
 | **瞬时模型错误**：超时、限流 | 同一调用最多自动重试 1 次；仍失败则停止循环并返回明确错误 | 所有实际 token 都累计到 `max_request_tokens` |
 | **上下文／请求预算耗尽** | 不重试；返回 `context_budget_exceeded` 或 `request_budget_exceeded` | 已发生的调用照常计入 |
@@ -231,17 +231,17 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 
 **重试规则**：`max_retries_per_operation = 1`。自动重试不增加逻辑上的 `tool_calls`，但每次实际尝试都要进 trace；不存在独立的“重试预算”，所有实际模型 token 仍受 `max_request_tokens` 限制，实际工具尝试仍受上下文预算限制。
 
-**边界**：不设置前置分类器；不在工具调用之外增加单独的生成阶段；循环本身不判断跨源覆盖、枚举完整性、来源归属等内容质量。这些判断属于模型在 Thought 中的任务决策，以及后续的确定性检查。
+**边界**：不设置前置分类器；不在工具调用之外增加单独的生成阶段；循环本身不判断跨源覆盖、枚举完整性、来源归属等内容质量。这些判断属于模型在 `decision_summary` 中的任务决策，以及后续的确定性检查。
 
-### 8.2 执行契约：Observation 与 Action 解析
+### 8.2 执行契约：工具结果与结构化动作
 
-#### 8.2.1 Observation
+#### 8.2.1 Tool Result
 
-Observation 只定义 Harness 与工具之间的公共 envelope，不重复定义各工具的返回字段。工具的业务语义全部放在 `payload` 中，具体 schema 由 §7 对应的工具契约决定。
+`tool_result` 只定义 Harness 与工具之间的公共 envelope，不重复定义各工具的返回字段。工具的业务语义全部放在 `payload` 中，具体 schema 由 §7 对应的工具契约决定。模型不得生成该类型。
 
 ```text
-Observation:
 {
+  "type": "tool_result",
   "harness_status": "ok",
   "tool": "<tool_name>",
   "payload": { "...按 §7 的工具返回契约..." },
@@ -254,7 +254,7 @@ Observation:
 | 状态 | 含义 |
 | --- | --- |
 | `ok` | Action 已成功解析并派发，工具返回了 payload；不代表 payload 的业务结果一定成功。 |
-| `protocol_error` | Thought／Action 缺失、格式错误、JSON 无法解析或出现多个 Action。 |
+| `protocol_error` | 模型响应不是合法的单一 `tool_call`／`finish` JSON，或伪造 Harness 专用类型。 |
 | `tool_unavailable` | Action 指向当前不可用的工具。 |
 | `context_budget_exceeded` | 下一次模型调用预计超过用户设置的 `max_context_tokens`，Harness 停止继续调用模型。 |
 | `request_budget_exceeded` | 本次请求累计消耗的对话模型 token 超过用户设置的 `max_request_tokens`，Harness 停止继续调用对话模型。 |
@@ -265,30 +265,38 @@ Observation:
 - `harness_status` 表达 Harness 是否成功解析和派发；
 - `payload` 原样承载工具返回，其空结果、业务错误、部分失败和完整性字段均由各工具契约定义。
 
-#### 8.2.2 Action 解析
+#### 8.2.2 结构化动作解析
 
-模型响应必须包含且只包含一个 Thought 和一个 Action：
+模型响应必须且只能是一个 JSON 对象：
 
-```text
-Thought: ...
-Action: tool_name[{"参数":"值"}]
-
-或
-
-Thought: ...
-Action: Finish[最终答案]
+```json
+{
+  "type": "tool_call",
+  "decision_summary": "为什么需要这一步",
+  "tool": "search_blocks",
+  "arguments": {"query": "MCP"}
+}
 ```
 
-1. `Thought:` 必须出现；可以跨多行，到下一条以 `Action:` 开头的行结束。
-2. 整次响应只能有一个 `Action:`。
-3. 工具 Action 必须在一行内，工具名必须来自当前 `{tools}`，参数必须是合法 JSON object。
-4. `Finish[...]` 可以跨多行；解析器取 `Finish[` 后到最后一个非空 `]` 之间的内容作为最终答案。
-5. 模型不得自行输出 `Observation`。
-6. 缺少 Thought、多个 Action、非法 JSON、未知工具、Finish 后继续输出内容等均产生 `harness_status=protocol_error` 或 `tool_unavailable` 的 Observation，不执行工具，并消耗 token 预算。
+或：
+
+```json
+{
+  "type": "finish",
+  "answer": "最终答案"
+}
+```
+
+1. `type` 只能是 `tool_call` 或 `finish`。
+2. `tool_call.decision_summary` 必须非空；`finish.decision_summary` 可选。
+3. 每轮最多一个工具调用；工具名必须来自当前 `{tools}`，`arguments` 必须是合法 JSON object。
+4. 不允许 Markdown 围栏、第二个 JSON、JSON 后正文、重复键、`NaN` 或伪造 `tool_result`／`protocol_error`。
+5. `finish.answer` 必须是字符串；流式展示只提取该字段，不展示 JSON 外壳。
+6. 任一协议违规都记录 `protocol_error`；未知工具记录 `tool_unavailable`，不执行工具，并消耗 token 预算。
 
 ### 8.3 初版系统提示词：ReAct ＋ 产品约束
 
-下面是模型可见的初版提示词草案，采用文本 ReAct 协议。外层引擎负责注入工具、解析 Thought 与 Action、执行工具并追加 Observation；收到 Finish 后停止循环。`response_protocol`、`observation_protocol`、`scope`、`evidence`、`coverage`、`citation`、`answer`、`termination` 各自只承担一类规则，工具自身的局部选择条件放在工具描述中。
+下面是模型可见的提示词骨架，采用结构化 ReAct 协议。外层引擎负责注入工具、校验 JSON、执行工具并追加 Runtime-only `tool_result`；收到 `finish` 后停止循环。`response_protocol`、`tool_result_protocol`、`scope`、`evidence`、`coverage`、`citation`、`answer`、`termination` 各自只承担一类规则，工具自身的局部选择条件放在工具描述中。完整发布文本以代码中的 `chat-v4` 为准，并受 [ADR 0011](../decisions/0011-structured-react-response-protocol.md) 约束。
 
 `{collection_status}` 由 Harness 从请求开始时固定的 collection 快照注入，模型不能修改。其结构为 `{"snapshot_id":"...","completeness":"complete|partial","failed_documents":[{"doc_id":"...","title":"...","reason":"..."}]}`；`complete` 时列表为空，`partial` 时必须列出未成功入库的文档，供模型执行遗漏透明。
 
@@ -306,29 +314,26 @@ Action: Finish[最终答案]
 </collection_status>
 
 <response_protocol>
-每次响应必须在“工具调用”和“Finish”两种形式中二选一，不得输出其他形式。
+每次响应必须且只能输出一个 JSON 对象，在“工具调用”和“结束”两种 schema 中二选一。
 
 调用工具：
-Thought: 对照当前用户问题和已有 Observation，判断当前信息是否足够、还缺什么，以及下一步应做什么。
-Action: tool_name[{"参数":"值"}]
+{"type":"tool_call","decision_summary":"为什么需要这一步","tool":"tool_name","arguments":{"参数":"值"}}
 
 结束：
-Thought: 对照当前用户问题和已有 Observation，判断当前是否足以回答或需要澄清。
-Action: Finish[最终答案]
+{"type":"finish","answer":"最终答案"}
 
 附加约束：
-1. 每轮只能输出一个 Action。
-2. 调用工具时，工具名必须准确，参数必须是合法 JSON 对象，并符合 `{tools}` 中对应工具的输入 schema。
-3. Observation 由系统执行 Action 后追加，不得自行编造或输出 Observation。
-4. Finish 表示当前循环结束，方括号内是最终回答。
-5. Finish 之后不再调用工具。
-6. 不要用普通正文代替 Finish，也不要在 Finish 之外输出最终答案。
+1. `type` 只能是 `tool_call` 或 `finish`。
+2. 每轮只能有一个工具调用，不得输出工具调用数组。
+3. 工具调用的 `decision_summary` 必须非空；`finish.decision_summary` 可选。
+4. 不得输出 Markdown 围栏、第二个 JSON、JSON 后正文或 Harness 专用类型。
 </response_protocol>
 
-<observation_protocol>
-工具执行后，系统会以 Observation 追加到 History：
+<tool_result_protocol>
+工具执行后，系统会追加一个仅由 Harness 生成的工具结果对象：
 
 {
+  "type": "tool_result",
   "harness_status": "ok | protocol_error | tool_unavailable | context_budget_exceeded | request_budget_exceeded | harness_internal_error",
   "tool": "<工具名或 null>",
   "payload": {...} 或 null,
@@ -338,18 +343,18 @@ Action: Finish[最终答案]
 规则：
 1. harness_status=ok 只表示 Harness 成功解析并派发了 Action，不代表工具业务结果成功；必须继续检查 payload。
 2. payload 的字段结构由对应工具定义决定。
-3. protocol_error 表示 Action 格式错误，应修正下一轮输出，不能把它当成检索证据。
-4. tool_unavailable 表示当前工具不可用，应改用可用工具或 Finish，不能据此判断文档内容不存在。
+3. protocol_error 表示上一轮模型输出不符合结构化协议，应修正下一轮输出，不能把它当成检索证据。
+4. tool_unavailable 表示当前工具不可用，应改用可用工具或 finish，不能据此判断文档内容不存在。
 5. context_budget_exceeded 表示下一次模型调用的上下文超过用户上限；Harness 不得继续发起该模型调用，应返回明确超界错误。
 6. request_budget_exceeded 表示本次请求累计 token 超过用户上限；Harness 不得继续调用模型，应返回明确超界错误。
 7. harness_internal_error 表示 Harness 异常，应返回失败状态并报告无法继续。
-8. 模型不得自行生成 Observation。
-</observation_protocol>
+8. 模型不得输出 `type=tool_result`、`type=protocol_error` 或其他 Harness 专用对象。
+</tool_result_protocol>
 
 <scope>
 1. 只回答学习方面的知识问题。
 2. 不制定学习计划，不替用户安排学习路径，不执行代码或文件操作。
-3. 请求越界时，直接通过 Finish 说明能力边界，不调用工具。
+3. 请求越界时，直接通过 `finish.answer` 说明能力边界，不调用工具。
 </scope>
 
 <evidence>
@@ -381,13 +386,13 @@ Action: Finish[最终答案]
 </answer>
 
 <termination>
-满足以下任一条件时停止检索并输出 Finish：
+满足以下任一条件时停止检索并输出 `type=finish`：
 1. 当前问题所需证据已经足够。
 2. 必需证据无法取得，或结果无法进入上下文，但已经能说明缺口。
 3. 重复尝试没有产生新的有效证据，继续调用工具没有明确目的。
 4. 目标对象无法唯一确定，需要用户澄清。
-5. 输出预算不足，内容尚未讲完；此时必须声明“内容未完”。
-6. 收到 context_budget_exceeded、request_budget_exceeded，或逻辑工具调用数达到 max_tool_calls 时，直接输出 Finish，并说明因运行预算停止而未完成的部分；若 Harness 无法再发起模型调用，则由 Harness 直接返回错误。
+5. 输出预算不足，内容尚未讲完；此时必须在 `answer` 中声明“内容未完”。
+6. 收到 context_budget_exceeded、request_budget_exceeded，或逻辑工具调用数达到 max_tool_calls 时，直接输出 `finish`，并说明因运行预算停止而未完成的部分；若 Harness 无法再发起模型调用，则由 Harness 直接返回错误。
 </termination>
 
 <question>
@@ -395,7 +400,7 @@ Action: Finish[最终答案]
 </question>
 
 <history>
-本次请求内已有的 Thought、Action 和 Observation 轨迹：
+本次请求内已有的结构化模型输出与 Harness 工具结果：
 {history}
 </history>
 ```
@@ -427,12 +432,12 @@ Action: Finish[最终答案]
 | **Q4 诚实性** | 文档事实必须有块、模型补充不得冒充原文；来源区分有明确触发条件 | ✅ 闭合 | 未测 | 待判官设计“来源归属”和“无证据文档声称”两类检查，并用反例回归；模型自报来源不能作为通过依据。 |
 | **Q5 一致性** | 工具全序排序、固定预算、固定工具上限 | ✅ 闭合 | 未测 | Agentic 路径仍有随机性；需用 03 的 N＝10／K＝9 观察翻转和失败类型。 |
 | **Q6 表达合适** | 提示词按问题形态组织答案；模板结构稳定 | ✅ 闭合 | 未测 | 逐题验证定义、因果、步骤、比较、清单和换形态回答。 |
-| **Q7 边界合规** | `scope`、越界走 `Finish`、歧义走澄清 | ✅ 闭合 | 未测 | 用 cf-001／cf-002 及其他越界样本验证。 |
+| **Q7 边界合规** | `scope`、越界走 `finish`、歧义走澄清 | ✅ 闭合 | 未测 | 用 cf-001／cf-002 及其他越界样本验证。 |
 | **Q8 响应速度** | 快车道 H1、工具调用上限、用户可配置 100k 单次上下文与 400k 请求累计 token | ✅ 闭合 | 未测 | 首字延迟尚无实测；复杂题的预算收口和最终回答预留也要跑批确认。 |
 | **成本** | 8 次工具调用、单块默认约 450 token 目标（固定 sizing estimator）、用户可配置 100k／400k 预算 | ✅ 闭合 | 未测 | 当前数值是按 8 轮估算；需用实际 N、tokenizer、工具结果分布校准。 |
 | **安全** | Harness 工具白名单＋工具只读＋工具返回内容作为不可信资料；无写文件、代码执行和外部网络能力 | ✅ 闭合 | 未测 | 验证注入样本不会扩大工具权限、改变用户范围或伪造来源；验证未入白名单工具返回 `tool_unavailable`。 |
 | **隐私／数据主权** | 按 04 当前自用、公开语料前提 | ➖ 忽略 | 不适用 | 若改为面向他人或使用外部模型，必须重新评估模型通道和数据留存。 |
-| **可靠性／降级** | 业务错误不重试；协议错误转 Observation；瞬时工具／模型错误最多重试 1 次；预算错误直接终止；部分来源失败允许带缺口回答；终结轮失败返回确定性错误 | ✅ 闭合 | 未测 | 验证超时、限流、错误重试、部分来源失败和终结轮失败的行为；不单设“重试预算”。 |
+| **可靠性／降级** | 业务错误不重试；协议错误转 Runtime-only `protocol_error`；瞬时工具／模型错误最多重试 1 次；预算错误直接终止；部分来源失败允许带缺口回答；终结轮失败返回确定性错误 | ✅ 闭合 | 未测 | 验证超时、限流、错误重试、部分来源失败和终结轮失败的行为；不单设“重试预算”。 |
 | **可观测性** | §9.4 定义本地 trace／artifact 契约、检索与预算诊断字段、直接读取的本地 viewer，以及有界队列＋后台 writer 的非阻塞写入边界；诊断包与 OTLP／Langfuse 都是可选的非本地主路径 | ✅ 闭合 | 未测 | 实现后验证：成功与失败 trace 可还原，检索 rank／score 与预算拒绝字段齐全；本地 viewer 不依赖导入；队列满或写入失败时主回答仍成功。保留天数和容量默认值待样本测量后校准。 |
 | **可测试／可评估** | 18 条用例、金标准、工具可 mock、执行契约明确 | ✅ 闭合 | 未测 | 还缺实际 prompt／loop 的逐例回归与报告口径。 |
 | **可复现性** | §9.5 运行版本清单：app／prompt bundle／循环／执行与工具契约／模型参数／collection 快照；提示词采用发布基线＋本地实验注册表；版本号＋内容 hash；证据复现、检索重放与如实降级 | ✅ 闭合 | 未测 | 实现版本清单、发布 prompt bundle 与本地实验注册表；验证同一代码可切换实验 bundle、trace 来源可追溯、候选经人工复核后才提升，以及完整证据重建、检索重放与如实降级。collection 快照保留数量归入库侧设计。 |
@@ -468,7 +473,7 @@ Action: Finish[最终答案]
 
 100k 不是模型的物理上限。即使模型支持 1M，100k 仍是产品为成本、等待时间和注意力质量设置的用户预算；用户可以调高，但预算越高，费用和上下文噪声也越高。
 
->  **第一版怎么处理**<br> **① 用户买单，预算可调。**`max_context_tokens` 管“一次对话模型调用最多带多少上下文”，默认 100k；`max_request_tokens` 管“本次问题所有对话调用累计花多少 token”，默认 400k；embedding 成本另记。<br> **② 工具不自设预算，Harness 不透传超界结果。**工具返回范围内全部业务结果；Harness 对最终 Observation 统一计算 `result_tokens`，在加入 History 前检查额度，超界则丢弃结果并返回明确错误与缩小范围建议。<br> **③ 超界是明确错误。**单次上下文放不下返回 `context_budget_exceeded`；整次请求累计预算用尽返回 `request_budget_exceeded`。用户可据此提高预算、缩小范围或分次处理。<br> **④ 不引入分页。**分页只能绕开单次返回大小，不能减少最终进入上下文的内容总量；如果完整结果放不下，分页后仍放不下。需要处理更大范围时应提高预算、缩小范围，或引入真正的逐段提取／摘要机制，而不是 cursor。<br> **⑤ Summary／Wiki 不是第一阶段依赖，而且“经常撞预算”只是证据线索，不是结论。**真实请求经常触发 100k／400k 上限，只能说明“每次直接读全文”的成本确实成了问题；它仍可能通过提高预算或缩小范围解决。只有比较同一批问题上的“直接读原文”和“读摘要页”，确认 token／延迟明显下降且完整性、事实准确性没有变差，才值得引入 Summary／Wiki，并且必须保留原文回查能力。
+>  **第一版怎么处理**<br> **① 用户买单，预算可调。**`max_context_tokens` 管“一次对话模型调用最多带多少上下文”，默认 100k；`max_request_tokens` 管“本次问题所有对话调用累计花多少 token”，默认 400k；embedding 成本另记。<br> **② 工具不自设预算，Harness 不透传超界结果。**工具返回范围内全部业务结果；Harness 对最终 `tool_result` 统一计算 `result_tokens`，在加入 History 前检查额度，超界则丢弃结果并返回明确错误与缩小范围建议。<br> **③ 超界是明确错误。**单次上下文放不下返回 `context_budget_exceeded`；整次请求累计预算用尽返回 `request_budget_exceeded`。用户可据此提高预算、缩小范围或分次处理。<br> **④ 不引入分页。**分页只能绕开单次返回大小，不能减少最终进入上下文的内容总量；如果完整结果放不下，分页后仍放不下。需要处理更大范围时应提高预算、缩小范围，或引入真正的逐段提取／摘要机制，而不是 cursor。<br> **⑤ Summary／Wiki 不是第一阶段依赖，而且“经常撞预算”只是证据线索，不是结论。**真实请求经常触发 100k／400k 上限，只能说明“每次直接读全文”的成本确实成了问题；它仍可能通过提高预算或缩小范围解决。只有比较同一批问题上的“直接读原文”和“读摘要页”，确认 token／延迟明显下降且完整性、事实准确性没有变差，才值得引入 Summary／Wiki，并且必须保留原文回查能力。
 
 **什么情况下推翻当前选择**：如果大量合法单篇／章节结果在默认预算内都被 Harness 拒绝，应评估逐段提取、摘要或提高预算；分页本身不是解决方向。如果用户频繁提高预算但仍觉得成本不可接受，再评估预摘要；如果摘要导致明显遗漏或来源失真，则必须退回原始块路径。
 
@@ -510,18 +515,18 @@ Action: Finish[最终答案]
 | --- | --- | --- |
 | **Trace 根记录** | `trace_id`／`schema_version`／`app_version`／开始与结束时间；请求固定的 `collection_snapshot_id`、`snapshot_status` 与 `completeness`；最终状态和 `termination_reason`；`agent_turns`／`tool_calls`／`model_calls`、重试次数、对话／embedding token 和预算状态；`trace_status=complete\|partial\|dropped` 与丢弃事件数；用户问题 artifact 引用及最多 80 个字符的展示预览（`metadata` 模式只记 artifact hash，不保存完整问题） | 从一次请求回看整体结果，区分正常完成、预算终止、协议失败和内部错误 |
 | **Span 公共字段** | `trace_id`／`span_id`／`parent_span_id`／名称／类型／开始与结束时间／`ok\|error`／错误码；产品扩展字段统一用 `app.*` | 构成可查询、可导出的调用树，而不是一堆互不关联的日志行 |
-| **`agent.turn`** | `turn_index`；Thought／Action 的 artifact 引用（`metadata` 模式只记类型和 hash）；本轮的模型调用 span、工具 span 和预算检查结果 | 回答“Agent 为什么在这一轮选了这个工具／为什么在这里结束” |
+| **`agent.turn`** | `turn_index`；结构化 `tool_call`／`finish` 的 artifact 引用（`metadata` 模式只记类型和 hash）；本轮的模型调用 span、工具 span 和预算检查结果 | 回答“Agent 为什么在这一轮选了这个工具／为什么在这里结束” |
 | **`llm.call`** | 实际尝试序号；provider／model／模型快照或版本；温度等采样参数；输入、输出、缓存 token；`finish_reason`；耗时；完整渲染提示词和模型原始输出的 artifact 引用（`metadata` 模式只记 hash） | 区分是提示词、模型、截断、协议解析还是预算导致的失败；支撑成本与复现 |
 | **`tool.call`** | 工具名；规范化参数；实际尝试序号；Harness 状态；`payload` artifact 引用；返回数／`total`／`count`／Harness 计算的 `result_tokens`；耗时（`metadata` 模式对参数和 payload 只记 hash／计数） | 判断是选错工具、参数不对、结果为空、结果过大还是工具执行失败 |
 | **工具诊断属性** | `search_blocks` 记录 `search_mode`／`top_k`／`empty_reason`、query embedding 的 provider／model／request ID／token usage，以及每个返回结果的 `block_id`／`rank`／`score`；`list_blocks`／`scan_term` 记录范围与 `total`／`count`；`result_tokens` 由 Harness 统一记录；所有工具记录公共 `error.code` | 不仅知道返回了什么，还能解释“为什么是这些块、为什么是这个顺序、为什么为空” |
 | **`budget.check` 事件** | 作为 `agent.turn`／`tool.call` 上的 span event 记录：`phase=pre_turn\|post_tool\|finalization`、`limit_kind=context\|request`、`limit_tokens`、`observed_tokens`、`remaining_tokens`、`decision=admit\|reject\|terminate`、关联的轮次和工具调用 | 预算失败时能直接定位是哪一步、按什么额度和实际数量被拒绝，不只留下最终错误码 |
-| **`artifact`** | `artifact_id`（内容 hash）／类型／MIME／字节数／可选压缩方式／内容或外部引用；只在 `full` 模式生成 | 保存完整用户问题、渲染提示词、Thought／Action、工具 payload 和最终回答；span 只挂引用，不重复塞正文 |
+| **`artifact`** | `artifact_id`（内容 hash）／类型／MIME／字节数／可选压缩方式／内容或外部引用；只在 `full` 模式生成 | 保存完整用户问题、渲染提示词、结构化模型输出、工具 payload 和最终回答；span 只挂引用，不重复塞正文 |
 
 **artifact 引用必须能解释“缺失”**：`metadata` 模式不生成正文 artifact，但 span 仍保留内容 hash 和 `artifact_state=omitted`，不能留下一个看起来可打开、实际悬空的引用。`full` 模式才要求所有引用都指向真实文件并通过 checksum。
 
 **运行版本必须随根记录落一次**：提示词版本与 hash、Agent 循环版本、工具契约版本、执行契约版本、collection／文档版本、模型版本和关键参数。它们不是“可观测性的附带信息”，而是从 trace 走向可复现运行的必要字段。
 
-**Observation 不单造一个重复对象。**工具 span 已记录 Harness 状态和 payload；下一轮 `llm.call` 保存的完整渲染提示词，则精确表示模型实际收到了什么 Observation。这样既能回放原貌，也避免三份正文互相漂移。
+**Tool Result 不单造一个重复对象。**工具 span 已记录 Harness 状态和 payload；下一轮 `llm.call` 保存的完整渲染提示词，则精确表示模型实际收到了什么 `tool_result`。这样既能回放原貌，也避免三份正文互相漂移。
 
 **9.4.2 本地存储：一个请求一个 trace 目录**
 
@@ -620,7 +625,7 @@ trace manifest 同时记录 `replay_scope=metadata|evidence|retrieval`：`metada
 | --- | --- | --- |
 | **应用** | `app_version`、build ID 或 Git commit | 运行的是哪一版产品代码 |
 | **提示词** | `bundle_source=release\|experiment`；bundle ID／版本／内容 hash／父版本（若有）；每个模板的 ID／版本／hash；工具描述 bundle 的版本与 hash；每次实际渲染提示词的 hash | 模型看到的行为规则和工具说明来自发布基线还是实验版本，具体是哪一版 |
-| **Agent 控制** | 循环版本、Action／Observation 执行契约版本、工具契约版本、工具白名单版本 | 循环语义、协议解析和允许能力是哪一版 |
+| **Agent 控制** | 循环版本、结构化动作／`tool_result` 执行契约版本、工具契约版本、工具白名单版本 | 循环语义、协议解析和允许能力是哪一版 |
 | **模型（两套）** | **对话**：provider＝DeepSeek，请求模型＝最新 Flash，供应商返回的模型版本／fingerprint（若有）、温度、top-p、max output tokens、seed、request ID；**embedding**：provider＝阿里云百炼，model ID＝`qwen3.7-text-embedding`，1024 维，dense 输出，记录模型版本、归一化方式和 request ID | 分别说明生成答案和生成向量用的是哪个模型服务；实现时固定实际 model ID，不能只记录市场名称 |
 | **语料与索引** | `collection_snapshot_id`；doc 版本；chunker；固定 sizing estimator；embedding 模型、版本与 tokenizer；索引 schema | 检索基于哪一份语料和哪一种索引实现；运行时结果预算由当前对话模型实测；块大小和 embedding 输入按各自版本解析 |
 | **运行配置** | 上下文／请求预算、最终回答预留、trace 模式及其他可能影响结果的开关 | 同一运行是否受到不同用户配置影响 |
@@ -633,7 +638,7 @@ trace manifest 同时记录 `replay_scope=metadata|evidence|retrieval`：`metada
 - **发布基线**随源码和安装包分发，按只读 bundle 保存；它是正式运行和回滚的默认版本。发布 bundle 从创建起不可原地修改。
 - **本地实验注册表**位于产品数据目录，按独立 `bundle_id` 保存候选提示词及其 manifest。它允许同一版应用代码加载多个实验版本，用于批量测试、A/B、失败诊断和快速回滚，不需要每改一句提示词就提交一次产品代码。
 - 实验 bundle 一旦用于正式评测或诊断运行也立即冻结；继续修改必须创建新 `bundle_id`／版本。删除实验 bundle 前必须确认不再有需要它的运行；`full` trace 的渲染提示词 artifact 只能用于证据复现，不能替代候选 bundle 的可重复加载。
-- 一个 **prompt bundle** 包含同次发布使用的系统提示词模板、Action／Observation 协议文案及其他参与渲染的固定模板；工具描述属于注入内容，由工具契约版本和实际渲染 hash 一并固定。
+- 一个 **prompt bundle** 包含同次发布使用的系统提示词模板、结构化动作／`tool_result` 协议文案及其他参与渲染的固定模板；工具描述属于注入内容，由工具契约版本和实际渲染 hash 一并固定。
 - 任何可能改变模型行为、协议或输出形态的文案变化都必须生成新版本和新 hash；排版修正也要有新 hash。
 - trace 根记录保存 `bundle_source / bundle_id / version / hash`；`full` trace 保存每次**渲染后**的完整提示词。这样既能区分发布基线与实验版本，也能还原模型当时实际收到的原文。
 - **提升不是复制到“当前提示词”即可。**实验胜出后，候选必须经过人工复核，作为新的不可变发布 bundle 进入源码／发布包；原实验记录保留，便于追溯它相对于哪个父版本产生了什么变化。AI 可以生成和分析候选，但不能自行把候选提升为发布基线。
@@ -675,7 +680,7 @@ trace manifest 同时记录 `replay_scope=metadata|evidence|retrieval`：`metada
 **9.6.1 版本与兼容边界**
 
 - **prompt bundle**：任何内容变化都产生新 bundle；已使用或已发布的 bundle 不原地修改。行为变化按发布级变更处理，不能因为“只改了文案”绕过回归。
-- **Agent 循环、Action／Observation 协议、工具契约**：三者一起决定模型与 Harness 的交互。修改工具参数、payload 或协议语义时必须显式提升相应契约版本，并检查提示词中的工具说明是否同步；不能只改实现不升契约。
+- **Agent 循环、结构化动作／`tool_result` 协议、工具契约**：三者一起决定模型与 Harness 的交互。修改工具参数、payload 或协议语义时必须显式提升相应契约版本，并检查提示词中的工具说明是否同步；不能只改实现不升契约。
 - **配置 schema**：新增可选配置属于兼容变更；删除、重命名或改变既有默认语义属于破坏性变更，必须提供迁移或明确使用新默认。
 - **文档／块／索引 schema**：兼容的附加字段可以原地演进；会改变块身份、检索结果或解释方式的变更必须生成新的 collection 快照。当前应用若要承诺旧快照“可检索重放”，必须仍能读取该快照的 `index_schema_version`；否则 viewer 如实降级，不能声称可重检。
 - **trace schema**：只追加、不改写历史 trace。升级后的 viewer 至少应读取仍在 trace 保留期内的旧 schema，通过版本适配器解释；无法解释时明确显示“不支持该版本”，不能静默丢弃字段后假装完整。
@@ -698,7 +703,7 @@ trace manifest 同时记录 `replay_scope=metadata|evidence|retrieval`：`metada
 | **仅 trace／日志实现，已确认不影响答案** | trace 结构、降级和本地 viewer 回归 | 不要求全量答案回归，但需有证据证明执行路径未被改变 |
 | **全局系统提示词** | 全部 18 条用例及四条红线 | 人工复核提示词；报告 N 次抖动与失败类型 |
 | **单个工具描述或实现** | 直接使用该工具的用例 ＋ 已知跨工具协作／失败探针 | 若改变参数、返回或状态语义，同时按工具契约变更处理 |
-| **Agent 循环或 Action／Observation 协议** | 全部 18 条用例 ＋ 预算、重试、协议错误和终止路径 | 基础件人工复核；验证 trace 能定位每个分支 |
+| **Agent 循环或结构化动作／`tool_result` 协议** | 全部 18 条用例 ＋ 预算、重试、协议错误和终止路径 | 基础件人工复核；验证 trace 能定位每个分支 |
 | **切分、embedding、索引或 collection 构建** | 检索、枚举、覆盖、引用和跨源对应用例 ＋ 历史失败探针 | 新快照与旧快照分别记录可复现能力 |
 | **模型或关键采样参数** | 全部 18 条用例 | N 次运行报告通过率、翻转项和生成／判定归因 |
 | **配置 schema** | 旧配置迁移、新默认值和失败回退 | 无法迁移时必须明确报错，不能静默重置用户设置 |
@@ -855,7 +860,7 @@ trace manifest 同时记录 `replay_scope=metadata|evidence|retrieval`：`metada
 | **文档身份与消歧** | 稳定 `doc_id`、规范标题 `title`、用户可读 `source_label`、非规范 `aliases[]`、语言和文档版本；别名不得改变规范身份 | `list_documents` 支持自然语言定位；多个候选不能唯一确定时向用户澄清；引用展示层由 doc_id 解析回标题 |
 | **章节树与范围** | 唯一且稳定的 `section_path[]`、`parent_path[]`、ordinal、depth、原文顺序、first_line；每节的直属与子树块／token 统计 | `get_outline` 支持选择范围；一个 section_path 选择该节及全部后代；重叠范围取并集；不存在的路径返回 `scope_not_found` |
 | **块身份与原文** | 稳定 `block_id`、`doc_id`、`section_path`、`block_index`、完整 `text`、原文 `char_start/char_end`、`content_hash`、语言；块 id 生成规则必须版本化 | 全文返回、精确扫描、按原文顺序枚举、字符级溯源、去重与版本核对 |
-| **token 口径** | 固定的 `context_token_estimate`；Harness 在运行时对最终 Observation 计算 `result_tokens`；embedding 构建期 token 预检与实际 usage 另行记录 | `context_token_estimate` 只作范围提示；`result_tokens` 只由 Harness 用于工具结果大小与预算；Qwen 批处理与计费使用 API 返回的实际 usage，禁止混算 |
+| **token 口径** | 固定的 `context_token_estimate`；Harness 在运行时对最终 `tool_result` 计算 `result_tokens`；embedding 构建期 token 预检与实际 usage 另行记录 | `context_token_estimate` 只作范围提示；`result_tokens` 只由 Harness 用于工具结果大小与预算；Qwen 批处理与计费使用 API 返回的实际 usage，禁止混算 |
 | **向量索引** | embedding 的 provider、实际 model ID、模型版本、维度、距离度量、归一化方式、query/document 输入格式；向量索引与 collection 快照一一绑定 | `search_blocks` 用同一 embedding 模型生成 query 向量；上游失败返回 `upstream_unavailable`；更换 embedding 模型必须新建快照 |
 | **关键词索引与原文** | 保留未改写原文；可重建的倒排／关键词索引；索引 schema 与构建参数进入快照 manifest | `scan_term` 在原文上做 NFC＋英文大小写折叠后的子串扫描；混合检索的精确路可回查原文 |
 | **排序与检索常数** | RRF 参数、候选深度、Top-K 等查询时参数纳入 RetrievalProfile／ExecutionPlan 与 trace；相同快照下输入与参数一致时结果稳定 | 结果按 RRF 降序；平局按 `doc_id → block_index → block_id`；支持检索重放与版本差异定位 |
@@ -882,7 +887,7 @@ trace manifest 同时记录 `replay_scope=metadata|evidence|retrieval`：`metada
 - **验证门槛 H1**：简单类首字延迟 P50／P90 ≤ 10s，且通过率满足 N＝10、K＝9；两条都过就不加快车道。
 - **初版运行预算**：最多 8 次工具调用；`max_context_tokens`／`max_request_tokens` 用户可配置，默认 100k／400k（预留 4k 给最终回答）；超界由 Harness 返回明确错误。
 - **检索执行契约**：请求固定 collection 快照；工具共用参数错误／空结果／上游失败语义；章节范围包含后代；初版不另做 evidence assembler。
-- **token 口径**：入库时只存固定 estimator 的 `context_token_estimate`；Harness 在运行时对最终 Observation 计算 `result_tokens`；embedding 输入限制与成本单独预检，三者不混算。
+- **token 口径**：入库时只存固定 estimator 的 `context_token_estimate`；Harness 在运行时对最终 `tool_result` 计算 `result_tokens`；embedding 输入限制与成本单独预检，三者不混算。
 - **入库接口**：§11.4 汇总了快照发布、文档消歧、章节树、块身份、token 口径、索引、完整性、生命周期与引用展示要求。
 - **下一步**：按 §11.4 的接口契约进入**入库侧设计**，确定解析、切分、文档／章节结构、上下文 profile、embedding 输入、索引、快照发布与后台任务；入库设计完成并回检质量属性后，再做桌面壳、内置索引、安装器等具体技术选型与实现。
 - **尚未回答**：入库侧设计；提示词最终文案与逐例回归、预算实测、超时／重试、trace 与版本清单实现及默认值校准、兼容迁移与回滚实现、安装包与内部组件技术选型、安装验收、工具契约实现。
