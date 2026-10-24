@@ -369,6 +369,7 @@ class RunView(BaseModel):
     run_id: str
     plan_id: str
     plan_mode: Literal["formal", "exploratory"]
+    run_type: RunType = "quality"
     suite_id: str | None
     suite_name: str | None
     suite_revision_id: str | None
@@ -665,3 +666,90 @@ class EvaluationHealthResponse(BaseModel):
     status: Literal["ok"]
     service: str
     schema_version: int
+
+
+class SetBaselineRequest(BaseModel):
+    """人工把一个完整正式评测设为当前基线。"""
+
+    evaluation_revision_id: str = Field(min_length=1)
+    reviewer: str = Field(min_length=1, max_length=128)
+    reason: str = Field(min_length=1, max_length=4_000)
+
+
+class BaselineView(BaseModel):
+    """一个不可变评测基线及其冻结的质量汇总。"""
+
+    baseline_id: str
+    suite_id: str
+    suite_name: str
+    scope_id: str
+    run_type: RunType
+    suite_revision_id: str
+    collection_snapshot_id: str
+    execution_run_id: str
+    evaluation_revision_id: str
+    case_revision_ids: list[str]
+    aggregate_rule_version: str
+    totals: ResultMatrixTotalsView
+    run_started_at: str | None
+    run_sealed_at: str | None
+    reviewer: str
+    reason: str
+    created_at: str
+    is_current: bool
+
+
+class BaselineCaseDeltaView(BaseModel):
+    """同一 case identity 在基线与目标 run 中的结果和资源差异。"""
+
+    case_id: str
+    category: str
+    baseline_case_revision_id: str | None
+    target_case_revision_id: str | None
+    baseline_result: Literal["pass", "fail", "pending", "exploratory"] | None
+    target_result: Literal["pass", "fail", "pending", "exploratory"] | None
+    change: Literal["new", "removed", "improved", "regressed", "changed", "unchanged"]
+    revision_changed: bool
+    valid_samples_delta: int
+    pass_count_delta: int
+    fail_count_delta: int
+    pending_count_delta: int
+    redline_violation_count_delta: int
+    input_tokens_delta: int
+    output_tokens_delta: int
+    model_calls_delta: int
+    tool_calls_delta: int
+    duration_ms_delta: int
+
+
+class BaselineComparisonSummaryView(BaseModel):
+    """目标 run 相对基线的 run 级差异。"""
+
+    case_pass_count_delta: int
+    case_fail_count_delta: int
+    case_pending_count_delta: int
+    case_exploratory_count_delta: int
+    valid_samples_delta: int
+    redline_violation_count_delta: int
+    input_tokens_delta: int
+    output_tokens_delta: int
+    model_calls_delta: int
+    tool_calls_delta: int
+    duration_ms_delta: int
+    newly_passing_count: int
+    newly_failing_count: int
+
+
+class BaselineComparisonView(BaseModel):
+    """一个完整 run 与当前基线的只读比较结果。"""
+
+    baseline: BaselineView
+    target_run_id: str
+    target_evaluation_revision_id: str
+    target_suite_revision_id: str
+    target_collection_snapshot_id: str
+    target_totals: ResultMatrixTotalsView
+    comparable: bool
+    incompatibility_reasons: list[str]
+    summary: BaselineComparisonSummaryView
+    cases: list[BaselineCaseDeltaView]

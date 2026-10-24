@@ -30,7 +30,7 @@ def test_evaluation_api_exposes_seeded_suite_without_product_routes(
         ) as client:
             health = await client.get("/api/eval/health")
             assert health.status_code == 200
-            assert health.json()["schema_version"] == 5
+            assert health.json()["schema_version"] == 7
             assert (await client.get("/api/eval/suites")).status_code == 401
             preflight = await client.options(
                 "/api/eval/cases/c1-001/draft",
@@ -68,6 +68,18 @@ def test_evaluation_api_exposes_seeded_suite_without_product_routes(
             )
             assert citation_prompt.status_code == 200
             assert citation_prompt.json()["version"] == "citation-rubric-v2"
+            current_baseline = await client.get(
+                "/api/eval/baselines/current?suite_id=design03&run_type=quality",
+                headers={"x-launch-token": TOKEN},
+            )
+            assert current_baseline.status_code == 200
+            assert current_baseline.json() is None
+            baseline_history = await client.get(
+                "/api/eval/baselines?suite_id=design03&run_type=quality",
+                headers={"x-launch-token": TOKEN},
+            )
+            assert baseline_history.status_code == 200
+            assert baseline_history.json() == []
 
             assert (await client.get("/health")).status_code == 404
             assert (await client.get("/api/agent/run")).status_code == 404

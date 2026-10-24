@@ -1764,6 +1764,7 @@ class EvaluationRepository:
             run_id=row.run_id,
             plan_id=row.plan_id,
             plan_mode=cast(Any, plan.mode),
+            run_type=cast(Any, plan.run_type),
             suite_id=None if suite is None else suite.suite_id,
             suite_name=None if suite is None else (suite.name or suite.suite_id),
             suite_revision_id=plan.suite_revision_id,

@@ -188,6 +188,7 @@ interface RunView {
   run_id: string;
   plan_id: string;
   plan_mode: "formal" | "exploratory";
+  run_type: "quality" | "latency";
   suite_id: string | null;
   suite_name: string | null;
   suite_revision_id: string | null;
@@ -439,6 +440,81 @@ interface EvaluationResultMatrixView {
   categories: ResultMatrixCategoryView[];
 }
 
+/** 一个人工确认且冻结结果投影的评测基线。 */
+interface BaselineView {
+  baseline_id: string;
+  suite_id: string;
+  suite_name: string;
+  scope_id: string;
+  run_type: "quality" | "latency";
+  suite_revision_id: string;
+  collection_snapshot_id: string;
+  execution_run_id: string;
+  evaluation_revision_id: string;
+  case_revision_ids: string[];
+  aggregate_rule_version: string;
+  totals: ResultMatrixTotalsView;
+  run_started_at: string | null;
+  run_sealed_at: string | null;
+  reviewer: string;
+  reason: string;
+  created_at: string;
+  is_current: boolean;
+}
+
+/** 一个 case 在基线与目标 run 之间的差异。 */
+interface BaselineCaseDeltaView {
+  case_id: string;
+  category: string;
+  baseline_case_revision_id: string | null;
+  target_case_revision_id: string | null;
+  baseline_result: "pass" | "fail" | "pending" | "exploratory" | null;
+  target_result: "pass" | "fail" | "pending" | "exploratory" | null;
+  change: "new" | "removed" | "improved" | "regressed" | "changed" | "unchanged";
+  revision_changed: boolean;
+  valid_samples_delta: number;
+  pass_count_delta: number;
+  fail_count_delta: number;
+  pending_count_delta: number;
+  redline_violation_count_delta: number;
+  input_tokens_delta: number;
+  output_tokens_delta: number;
+  model_calls_delta: number;
+  tool_calls_delta: number;
+  duration_ms_delta: number;
+}
+
+/** 目标 run 相对基线的 run 级差异。 */
+interface BaselineComparisonSummaryView {
+  case_pass_count_delta: number;
+  case_fail_count_delta: number;
+  case_pending_count_delta: number;
+  case_exploratory_count_delta: number;
+  valid_samples_delta: number;
+  redline_violation_count_delta: number;
+  input_tokens_delta: number;
+  output_tokens_delta: number;
+  model_calls_delta: number;
+  tool_calls_delta: number;
+  duration_ms_delta: number;
+  newly_passing_count: number;
+  newly_failing_count: number;
+}
+
+/** 一个完整 run 与当前基线的比较投影。 */
+interface BaselineComparisonView {
+  baseline: BaselineView;
+  target_run_id: string;
+  target_evaluation_revision_id: string;
+  target_suite_revision_id: string;
+  target_collection_snapshot_id: string;
+  target_totals: ResultMatrixTotalsView;
+  comparable: boolean;
+  incompatibility_reasons: string[];
+  summary: BaselineComparisonSummaryView;
+  cases: BaselineCaseDeltaView[];
+}
+
 /** 一次判定修订版及其逐项结果。 */
 interface EvaluationRevisionView {
   revision_id: string;
@@ -540,7 +616,15 @@ const matrixTraceAttempt = ref<ResultMatrixAttemptView | null>(null);
 const matrixTraceDetail = ref<TraceDetail | null>(null);
 const matrixTraceLoading = ref(false);
 const matrixTraceError = ref("");
-const historyDetailTab = ref<"matrix" | "judgment" | "trace">("matrix");
+const baselineHistory = ref<BaselineView[]>([]);
+const currentBaseline = ref<BaselineView | null>(null);
+const baselineComparison = ref<BaselineComparisonView | null>(null);
+const baselineLoading = ref(false);
+const baselineError = ref("");
+const isBaselineFormOpen = ref(false);
+const baselineReason = ref("");
+const baselineBusy = ref(false);
+const historyDetailTab = ref<"matrix" | "baseline" | "judgment" | "trace">("matrix");
 const loading = ref(true);
 const busy = ref(false);
 const error = ref("");
@@ -737,6 +821,49 @@ const failedChecks = computed(
 const activeRun = computed(() =>
   ["planned", "running", "paused"].includes(selectedRun.value?.status ?? ""),
 );
+
+const selectedRunIsCurrentBaseline = computed(
+  () =>
+    currentBaseline.value?.execution_run_id === selectedRun.value?.run_id &&
+    currentBaseline.value?.evaluation_revision_id ===
+      evaluationRevision.value?.revision_id,
+);
+
+const baselineEligibility = computed<{ eligible: boolean; reason: string }>(() => {
+  const run = selectedRun.value;
+  const revision = evaluationRevision.value;
+  if (!run || !run.suite_id) {
+    return { eligible: false, reason: "当前 run 没有 suite 身份，不能设置基线。" };
+  }
+  if (run.plan_mode !== "formal") {
+    return { eligible: false, reason: "探索性快速试跑不能成为基线。" };
+  }
+  if (run.status !== "sealed_complete") {
+    return { eligible: false, reason: "只有完整封存的 run 可以成为基线。" };
+  }
+  if (!revision || revision.status !== "complete" || !revision.result_matrix) {
+    return { eligible: false, reason: "判定尚未完整结束，不能成为基线。" };
+  }
+  const incomplete = revision.result_matrix.categories
+    .flatMap((category) => category.cases)
+    .find(
+      (item) =>
+        item.result === "pending" ||
+        item.result === "exploratory" ||
+        item.pending_count > 0 ||
+        item.valid_samples !== item.n,
+    );
+  if (incomplete) {
+    return {
+      eligible: false,
+      reason: `${incomplete.case_id} 仍缺少有效样本或待定判定，不能成为基线。`,
+    };
+  }
+  if (selectedRunIsCurrentBaseline.value) {
+    return { eligible: false, reason: "当前 run 已是这个范围的基线。" };
+  }
+  return { eligible: true, reason: "" };
+});
 
 const historyRuns = computed(() =>
   runs.value.filter(
@@ -1492,6 +1619,7 @@ async function submitJudgeOverride(): Promise<void> {
     );
     setCurrentEvaluationRevision(updated);
     closeJudgeOverride();
+    await refreshBaselineContext();
   } catch (reason) {
     judgeOverrideError.value = `人工改判失败：${String(reason)}`;
   } finally {
@@ -1631,6 +1759,7 @@ async function submitCheckReview(): Promise<void> {
     );
     setCurrentEvaluationRevision(updated);
     closeCheckReview();
+    await refreshBaselineContext();
   } catch (reason) {
     checkReviewError.value = `引用支持复核失败：${String(reason)}`;
   } finally {
@@ -2467,6 +2596,132 @@ async function loadEvaluations(runId: string): Promise<void> {
   }
 }
 
+/** 读取当前 run 的基线历史和同场比较结果。 */
+async function refreshBaselineContext(): Promise<void> {
+  const run = selectedRun.value;
+  if (!run?.suite_id) {
+    baselineHistory.value = [];
+    currentBaseline.value = null;
+    baselineComparison.value = null;
+    return;
+  }
+  baselineLoading.value = true;
+  baselineError.value = "";
+  const query = `suite_id=${encodeURIComponent(run.suite_id)}&run_type=${encodeURIComponent(run.run_type)}`;
+  try {
+    const [history, current] = await Promise.all([
+      api<BaselineView[]>(`/api/eval/baselines?${query}`),
+      api<BaselineView | null>(`/api/eval/baselines/current?${query}`),
+    ]);
+    baselineHistory.value = history;
+    currentBaseline.value = current;
+    const revision = evaluationRevision.value;
+    baselineComparison.value =
+      current &&
+      revision?.status === "complete" &&
+      (baselineEligibility.value.eligible || selectedRunIsCurrentBaseline.value)
+        ? await api<BaselineComparisonView | null>(
+            `/api/eval/runs/${encodeURIComponent(run.run_id)}/comparison?revision_id=${encodeURIComponent(revision.revision_id)}`,
+          )
+        : null;
+  } catch (reason) {
+    baselineError.value = `读取基线失败：${String(reason)}`;
+    baselineHistory.value = [];
+    currentBaseline.value = null;
+    baselineComparison.value = null;
+  } finally {
+    baselineLoading.value = false;
+  }
+}
+
+/** 打开基线设置表单。 */
+function openBaselineForm(): void {
+  baselineReason.value = "";
+  baselineError.value = "";
+  isBaselineFormOpen.value = true;
+}
+
+/** 关闭基线设置表单。 */
+function closeBaselineForm(): void {
+  isBaselineFormOpen.value = false;
+  baselineReason.value = "";
+}
+
+/** 人工把当前完整正式 run 设为 scope 的当前基线。 */
+async function submitBaseline(): Promise<void> {
+  const run = selectedRun.value;
+  const revision = evaluationRevision.value;
+  const reason = baselineReason.value.trim();
+  if (!run || !revision || !reason) {
+    return;
+  }
+  baselineBusy.value = true;
+  baselineError.value = "";
+  try {
+    currentBaseline.value = await api<BaselineView>(
+      `/api/eval/runs/${encodeURIComponent(run.run_id)}/baseline`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          evaluation_revision_id: revision.revision_id,
+          reviewer: reviewerName.value.trim() || "开发者",
+          reason,
+        }),
+      },
+    );
+    closeBaselineForm();
+    message.value = "当前基线已更新。";
+    await refreshBaselineContext();
+  } catch (errorValue) {
+    baselineError.value = `设置基线失败：${String(errorValue)}`;
+  } finally {
+    baselineBusy.value = false;
+  }
+}
+
+/** 把整数变化格式化为带符号文本。 */
+function signedNumber(value: number): string {
+  return value > 0 ? `+${formatTokens(value)}` : formatTokens(value);
+}
+
+/** 把比较中的稳定性字段转换成中文说明。 */
+function baselineChangeText(change: BaselineCaseDeltaView["change"]): string {
+  const labels: Record<BaselineCaseDeltaView["change"], string> = {
+    new: "新增 case",
+    removed: "移除 case",
+    improved: "转好",
+    regressed: "转差",
+    changed: "其他变化",
+    unchanged: "未变化",
+  };
+  return labels[change];
+}
+
+/** 把比较现场不一致代码转换成可操作说明。 */
+function baselineIncompatibilityText(reason: string): string {
+  const labels: Record<string, string> = {
+    suite_revision_changed: "suite revision 不同",
+    case_revision_set_changed: "case revision 集合不同",
+    collection_snapshot_changed: "collection snapshot 不同",
+    run_policy_changed: "运行策略不同",
+    aggregate_rule_changed: "聚合规则版本不同",
+  };
+  return labels[reason] ?? reason;
+}
+
+watch(
+  () => [
+    selectedRun.value?.run_id,
+    evaluationRevision.value?.revision_id,
+    evaluationRevision.value?.status,
+  ],
+  () => {
+    if (selectedRun.value?.suite_id) {
+      void refreshBaselineContext();
+    }
+  },
+);
+
 /** 启动逐 criterion 判定。 */
 async function startJudgment(): Promise<void> {
   if (!selectedRun.value || !judgeReviewConfirmed.value) {
@@ -2583,7 +2838,9 @@ async function inspectTrace(traceId: string | null): Promise<void> {
 }
 
 /** 切换到历史详情页签；首次进入轨迹时自动打开第一条可用 trace。 */
-function selectHistoryDetailTab(tab: "matrix" | "judgment" | "trace"): void {
+function selectHistoryDetailTab(
+  tab: "matrix" | "baseline" | "judgment" | "trace",
+): void {
   historyDetailTab.value = tab;
   if (tab === "trace" && !traceDetail.value) {
     const attempt = selectedRun.value?.attempts.find((item) => item.trace_id);
@@ -2628,6 +2885,11 @@ function selectRun(run: RunView): void {
   isJudgmentFormOpen.value = false;
   judgeReviewConfirmed.value = false;
   traceDetail.value = null;
+  baselineHistory.value = [];
+  currentBaseline.value = null;
+  baselineComparison.value = null;
+  baselineError.value = "";
+  isBaselineFormOpen.value = false;
   closeMatrixJudgment();
   closeMatrixTrace();
   historyDetailTab.value = "matrix";
@@ -3722,6 +3984,13 @@ onBeforeUnmount(() => {
             </button>
             <button
               type="button"
+              :class="{ active: historyDetailTab === 'baseline' }"
+              @click="selectHistoryDetailTab('baseline')"
+            >
+              基线比较
+            </button>
+            <button
+              type="button"
               :class="{ active: historyDetailTab === 'judgment' }"
               @click="selectHistoryDetailTab('judgment')"
             >
@@ -3943,6 +4212,290 @@ onBeforeUnmount(() => {
               </div>
             </section>
           </template>
+        </section>
+
+        <section
+          v-show="
+            evaluationTab === 'history' &&
+            selectedRun &&
+            historyDetailTab === 'baseline'
+          "
+          class="eval-panel eval-baseline-panel"
+        >
+          <div class="eval-panel-heading">
+            <div>
+              <span class="eval-kicker">基线与比较</span>
+              <h3>确认稳定现场并比较版本变化</h3>
+            </div>
+            <span class="eval-count">
+              {{ baselineLoading ? "读取中" : currentBaseline ? "已有基线" : "尚无基线" }}
+            </span>
+          </div>
+          <p v-if="baselineError" class="eval-error">{{ baselineError }}</p>
+
+          <section v-if="currentBaseline" class="eval-baseline-current">
+            <header>
+              <div>
+                <span class="eval-kicker">当前基线</span>
+                <h4>
+                  {{ currentBaseline.suite_name }}
+                  · {{ runTypeText(currentBaseline.run_type) }}
+                </h4>
+              </div>
+              <span class="eval-baseline-current-badge">当前</span>
+            </header>
+            <dl>
+              <div>
+                <dt>Run</dt>
+                <dd :title="currentBaseline.execution_run_id">
+                  {{ currentBaseline.execution_run_id.slice(0, 22) }}…
+                </dd>
+              </div>
+              <div>
+                <dt>判定修订版</dt>
+                <dd :title="currentBaseline.evaluation_revision_id">
+                  {{ currentBaseline.evaluation_revision_id.slice(-12) }}
+                </dd>
+              </div>
+              <div>
+                <dt>Snapshot</dt>
+                <dd>{{ currentBaseline.collection_snapshot_id }}</dd>
+              </div>
+              <div>
+                <dt>设置人 / 时间</dt>
+                <dd>
+                  {{ currentBaseline.reviewer }} ·
+                  {{ formatRunDate(currentBaseline.created_at) }}
+                </dd>
+              </div>
+              <div class="eval-baseline-reason">
+                <dt>原因</dt>
+                <dd>{{ currentBaseline.reason }}</dd>
+              </div>
+            </dl>
+            <div class="eval-baseline-metrics">
+              <span>通过 {{ currentBaseline.totals.case_pass_count }}</span>
+              <span>失败 {{ currentBaseline.totals.case_fail_count }}</span>
+              <span>X 红线 {{ currentBaseline.totals.redline_violation_count }}</span>
+              <span>
+                Token
+                {{
+                  formatTokens(
+                    currentBaseline.totals.input_tokens +
+                      currentBaseline.totals.output_tokens,
+                  )
+                }}
+              </span>
+              <span>
+                模型 / 工具 {{ currentBaseline.totals.model_calls }} /
+                {{ currentBaseline.totals.tool_calls }}
+              </span>
+            </div>
+          </section>
+          <p v-else-if="!baselineLoading" class="eval-empty">
+            {{ selectedRun?.suite_name || selectedRun?.suite_id || "当前范围" }} 还没有当前基线。
+          </p>
+
+          <section class="eval-baseline-action">
+            <template v-if="selectedRunIsCurrentBaseline">
+              <strong>当前 run 就是这个范围的基线</strong>
+              <small>基线结果已在设置时冻结，后续改判不会反写这份快照。</small>
+            </template>
+            <template v-else-if="isBaselineFormOpen">
+              <label class="eval-field">
+                <span>设置人</span>
+                <input v-model="reviewerName" maxlength="128" />
+              </label>
+              <label class="eval-field">
+                <span>设置原因</span>
+                <textarea
+                  v-model="baselineReason"
+                  rows="3"
+                  maxlength="4000"
+                  placeholder="说明为什么选择这次 run 作为新基线"
+                />
+              </label>
+              <div class="eval-baseline-form-actions">
+                <button
+                  type="button"
+                  class="eval-primary"
+                  :disabled="baselineBusy || !baselineReason.trim()"
+                  @click="submitBaseline"
+                >
+                  {{ baselineBusy ? "设置中…" : "确认设为当前基线" }}
+                </button>
+                <button type="button" :disabled="baselineBusy" @click="closeBaselineForm">
+                  取消
+                </button>
+              </div>
+            </template>
+            <template v-else>
+              <button
+                type="button"
+                class="eval-primary"
+                :disabled="!baselineEligibility.eligible"
+                @click="openBaselineForm"
+              >
+                设为当前基线
+              </button>
+              <small :class="{ 'eval-error-text': !baselineEligibility.eligible }">
+                {{
+                  baselineEligibility.eligible
+                    ? "设置后冻结当前结果，后续比较以这份快照为基准。"
+                    : baselineEligibility.reason
+                }}
+              </small>
+            </template>
+          </section>
+
+          <details v-if="baselineHistory.length" class="eval-baseline-history">
+            <summary>基线历史 · {{ baselineHistory.length }}</summary>
+            <article
+              v-for="item in baselineHistory"
+              :key="item.baseline_id"
+              :class="{ current: item.is_current }"
+            >
+              <div>
+                <strong>{{ formatRunDate(item.created_at) }}</strong>
+                <span v-if="item.is_current">当前</span>
+              </div>
+              <small :title="item.execution_run_id">{{ item.execution_run_id }}</small>
+              <p>{{ item.reviewer }} · {{ item.reason }}</p>
+            </article>
+          </details>
+
+          <section v-if="baselineComparison" class="eval-comparison">
+            <header>
+              <div>
+                <span class="eval-kicker">目标相对基线</span>
+                <h4>
+                  {{
+                    baselineComparison.comparable
+                      ? "同场比较：差异可用于版本判断"
+                      : "环境已变化：仅供排查，不可直接归因"
+                  }}
+                </h4>
+              </div>
+              <span :class="baselineComparison.comparable ? 'result-pass' : 'result-pending'">
+                {{ baselineComparison.comparable ? "可直接比较" : "不可直接归因" }}
+              </span>
+            </header>
+            <ul
+              v-if="baselineComparison.incompatibility_reasons.length"
+              class="eval-comparison-warning"
+            >
+              <li
+                v-for="reason in baselineComparison.incompatibility_reasons"
+                :key="reason"
+              >
+                {{ baselineIncompatibilityText(reason) }}
+              </li>
+            </ul>
+            <p v-if="!baselineComparison.comparable" class="eval-comparison-note">
+              目标 run 与基线的 suite revision、case 集合、知识库快照、运行策略或聚合规则至少有一项不同。
+              页面仍展示差异用于排查，但不能据此判断“是模型或 Agent 改动导致了变化”。
+            </p>
+            <div class="eval-comparison-summary">
+              <article>
+                <span>Case 通过</span>
+                <strong>{{ signedNumber(baselineComparison.summary.case_pass_count_delta) }}</strong>
+                <small>
+                  {{ baselineComparison.summary.newly_passing_count }} 个转好 ·
+                  {{ baselineComparison.summary.newly_failing_count }} 个转差
+                </small>
+              </article>
+              <article>
+                <span>Case 失败</span>
+                <strong>{{ signedNumber(baselineComparison.summary.case_fail_count_delta) }}</strong>
+                <small>正数表示失败数增加</small>
+              </article>
+              <article>
+                <span>X 红线</span>
+                <strong>
+                  {{ signedNumber(baselineComparison.summary.redline_violation_count_delta) }}
+                </strong>
+                <small>红线变化不从数量上抵消</small>
+              </article>
+              <article>
+                <span>Token</span>
+                <strong>
+                  {{
+                    signedNumber(
+                      baselineComparison.summary.input_tokens_delta +
+                        baselineComparison.summary.output_tokens_delta,
+                    )
+                  }}
+                </strong>
+                <small>目标减基线</small>
+              </article>
+              <article>
+                <span>模型 / 工具</span>
+                <strong>
+                  {{ signedNumber(baselineComparison.summary.model_calls_delta) }} /
+                  {{ signedNumber(baselineComparison.summary.tool_calls_delta) }}
+                </strong>
+                <small>目标减基线</small>
+              </article>
+              <article>
+                <span>耗时</span>
+                <strong>
+                  {{ signedNumber(baselineComparison.summary.duration_ms_delta) }} ms
+                </strong>
+                <small>目标减基线</small>
+              </article>
+            </div>
+            <div class="eval-comparison-cases">
+              <p
+                v-if="
+                  !baselineComparison.cases.some((item) => item.change !== 'unchanged')
+                "
+                class="eval-empty"
+              >
+                所有 case 结果与基线一致。
+              </p>
+              <article
+                v-for="item in baselineComparison.cases.filter(
+                  (candidate) => candidate.change !== 'unchanged',
+                )"
+                :key="item.case_id"
+                class="eval-comparison-case"
+                :class="`comparison-${item.change}`"
+              >
+                <div>
+                  <strong>{{ item.case_id }}</strong>
+                  <small>{{ item.category }}</small>
+                </div>
+                <span>
+                  {{ item.baseline_result ? statusText(item.baseline_result) : "不存在" }}
+                </span>
+                <span>→</span>
+                <span>
+                  {{ item.target_result ? statusText(item.target_result) : "不存在" }}
+                </span>
+                <strong>{{ baselineChangeText(item.change) }}</strong>
+                <small>
+                  pass {{ signedNumber(item.pass_count_delta) }} ·
+                  fail {{ signedNumber(item.fail_count_delta) }} ·
+                  X {{ signedNumber(item.redline_violation_count_delta) }}
+                </small>
+                <small>
+                  token
+                  {{ signedNumber(item.input_tokens_delta + item.output_tokens_delta) }}
+                  · 模型 {{ signedNumber(item.model_calls_delta) }}
+                  · 工具 {{ signedNumber(item.tool_calls_delta) }}
+                </small>
+              </article>
+            </div>
+          </section>
+          <p
+            v-else-if="currentBaseline && !baselineLoading && !baselineEligibility.eligible"
+            class="eval-empty"
+          >
+            当前目标尚不能比较：{{ baselineEligibility.reason }}
+          </p>
+          <p v-else-if="!currentBaseline && !baselineLoading" class="eval-empty">
+            设置当前基线后，才能比较其他 run。
+          </p>
         </section>
 
         <section
@@ -6831,6 +7384,251 @@ onBeforeUnmount(() => {
   gap: 12px;
 }
 
+.eval-baseline-panel {
+  display: grid;
+  gap: 13px;
+}
+
+.eval-baseline-current,
+.eval-baseline-action,
+.eval-comparison {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #d9e5db;
+  border-radius: 12px;
+  padding: 12px;
+  background: #f7faf7;
+}
+
+.eval-baseline-current > header,
+.eval-comparison > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.eval-baseline-current h4,
+.eval-comparison h4 {
+  margin: 3px 0 0;
+  color: #294c35;
+}
+
+.eval-baseline-current-badge {
+  border-radius: 999px;
+  padding: 4px 9px;
+  color: #fff;
+  background: #326947;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.eval-baseline-current dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px 14px;
+  margin: 0;
+}
+
+.eval-baseline-current dl > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.eval-baseline-current dt {
+  color: #75847a;
+  font-size: 0.66rem;
+  font-weight: 700;
+}
+
+.eval-baseline-current dd {
+  overflow: hidden;
+  margin: 0;
+  color: #42574a;
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eval-baseline-current .eval-baseline-reason {
+  grid-column: 1 / -1;
+}
+
+.eval-baseline-current .eval-baseline-reason dd {
+  white-space: normal;
+}
+
+.eval-baseline-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 14px;
+  color: #5d7064;
+  font-size: 0.69rem;
+}
+
+.eval-baseline-action {
+  justify-items: start;
+}
+
+.eval-baseline-action small {
+  color: #6f7e74;
+  line-height: 1.5;
+}
+
+.eval-baseline-action .eval-field {
+  width: min(620px, 100%);
+}
+
+.eval-baseline-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.eval-error-text {
+  color: #8f4141 !important;
+}
+
+.eval-baseline-history {
+  border: 1px solid #dce7de;
+  border-radius: 10px;
+  padding: 9px 11px;
+}
+
+.eval-baseline-history > summary {
+  color: #486050;
+  cursor: pointer;
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.eval-baseline-history > article {
+  display: grid;
+  gap: 3px;
+  margin-top: 8px;
+  border-top: 1px solid #e1e9e2;
+  padding-top: 8px;
+  color: #607166;
+  font-size: 0.69rem;
+}
+
+.eval-baseline-history > article.current {
+  border-left: 3px solid #4f8660;
+  padding-left: 8px;
+}
+
+.eval-baseline-history > article > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.eval-baseline-history > article > div span {
+  border-radius: 999px;
+  padding: 2px 6px;
+  color: #fff;
+  background: #3d7350;
+  font-size: 0.61rem;
+}
+
+.eval-baseline-history p {
+  margin: 0;
+}
+
+.eval-comparison {
+  border-color: #cfdfd2;
+  background: #fbfdfb;
+}
+
+.eval-comparison-warning {
+  margin: 0;
+  border-radius: 9px;
+  padding: 8px 10px 8px 28px;
+  color: #805d20;
+  background: #fff7e2;
+  font-size: 0.71rem;
+}
+
+.eval-comparison-note {
+  margin: 0;
+  border-radius: 9px;
+  padding: 9px 11px;
+  color: #586b5e;
+  background: #eef4ef;
+  font-size: 0.71rem;
+  line-height: 1.6;
+}
+
+.eval-comparison-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.eval-comparison-summary article {
+  display: grid;
+  gap: 2px;
+  border-radius: 9px;
+  padding: 9px 10px;
+  background: #f0f6f1;
+}
+
+.eval-comparison-summary span,
+.eval-comparison-summary small {
+  color: #6b7c70;
+  font-size: 0.67rem;
+}
+
+.eval-comparison-summary strong {
+  color: #2d543a;
+  font-size: 0.92rem;
+}
+
+.eval-comparison-cases {
+  display: grid;
+  gap: 6px;
+}
+
+.eval-comparison-case {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.4fr) auto auto auto auto minmax(180px, 1fr);
+  align-items: center;
+  gap: 6px 9px;
+  border-left: 3px solid #93a397;
+  border-radius: 8px;
+  padding: 8px 9px;
+  color: #617066;
+  background: #f6f9f6;
+  font-size: 0.68rem;
+}
+
+.eval-comparison-case.comparison-improved {
+  border-left-color: #4e8b61;
+  background: #f2f8f3;
+}
+
+.eval-comparison-case.comparison-regressed {
+  border-left-color: #a94343;
+  background: #fff7f7;
+}
+
+.eval-comparison-case.comparison-changed,
+.eval-comparison-case.comparison-new,
+.eval-comparison-case.comparison-removed {
+  border-left-color: #b28742;
+  background: #fffaf1;
+}
+
+.eval-comparison-case > div {
+  display: grid;
+  gap: 2px;
+}
+
+.eval-comparison-case small {
+  color: #78867c;
+}
+
 .eval-matrix-summary {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -7125,6 +7923,14 @@ onBeforeUnmount(() => {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .eval-comparison-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .eval-comparison-case {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .eval-matrix-case > summary,
   .eval-matrix-attempt {
     grid-template-columns: minmax(160px, 1fr) repeat(2, auto);
@@ -7156,7 +7962,10 @@ onBeforeUnmount(() => {
 
   .eval-matrix-summary,
   .eval-matrix-case > summary,
-  .eval-matrix-attempt {
+  .eval-matrix-attempt,
+  .eval-baseline-current dl,
+  .eval-comparison-summary,
+  .eval-comparison-case {
     grid-template-columns: 1fr;
   }
 

@@ -5,14 +5,16 @@ import secrets
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.agent.factory import AgentExecutionService
 from app.collections.models import CurrentCollectionResponse
 from app.collections.service import CollectionSnapshotService
+from app.evaluation.baseline import EvaluationBaselineService
 from app.evaluation.citation_prompt import (
     CITATION_SUPPORT_PROMPT_HASH,
     CITATION_SUPPORT_PROMPT_VERSION,
@@ -26,6 +28,8 @@ from app.evaluation.judge_prompt import (
 )
 from app.evaluation.judgment import EvaluationJudgmentService
 from app.evaluation.models import (
+    BaselineComparisonView,
+    BaselineView,
     CaseCatalogItem,
     CaseDraftView,
     CaseRevisionView,
@@ -41,9 +45,11 @@ from app.evaluation.models import (
     PublishSuiteDraftRequest,
     QuickPlanRequest,
     ReviewRevisionRequest,
+    RunType,
     RunView,
     SaveCaseDraftRequest,
     SaveSuiteDraftRequest,
+    SetBaselineRequest,
     StartDraftRequest,
     StartJudgmentRequest,
     StartRunRequest,
@@ -117,6 +123,11 @@ def create_eval_app(
         trace_catalog=trace_catalog,
         credentials=credentials,
         chat_provider_factory=chat_provider_factory,
+    )
+    baseline_service = EvaluationBaselineService(
+        database=database,
+        repository=repository,
+        revision_loader=judgment_service.get_revision,
     )
 
     @asynccontextmanager
@@ -522,6 +533,60 @@ def create_eval_app(
         """读取判定进度、Judgment、checker 和 invocation 历史。"""
 
         return judgment_service.get_revision(revision_id)
+
+    @app.post(
+        "/api/eval/runs/{run_id}/baseline",
+        response_model=BaselineView,
+        status_code=status.HTTP_201_CREATED,
+        dependencies=protected,
+    )
+    async def set_evaluation_baseline(
+        run_id: str,
+        request: SetBaselineRequest,
+    ) -> BaselineView:
+        """把一个完整正式 run 人工设为当前基线。"""
+
+        return baseline_service.set_baseline(run_id, request)
+
+    @app.get(
+        "/api/eval/baselines",
+        response_model=list[BaselineView],
+        dependencies=protected,
+    )
+    async def list_evaluation_baselines(
+        suite_id: Annotated[str, Query(min_length=1)],
+        run_type: Annotated[RunType, Query()],
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    ) -> list[BaselineView]:
+        """返回一个 suite＋run type 的基线历史。"""
+
+        return baseline_service.list_baselines(suite_id, run_type, limit=limit)
+
+    @app.get(
+        "/api/eval/baselines/current",
+        response_model=BaselineView | None,
+        dependencies=protected,
+    )
+    async def current_evaluation_baseline(
+        suite_id: Annotated[str, Query(min_length=1)],
+        run_type: Annotated[RunType, Query()],
+    ) -> BaselineView | None:
+        """返回一个 suite＋run type 的当前基线。"""
+
+        return baseline_service.current_baseline(suite_id, run_type)
+
+    @app.get(
+        "/api/eval/runs/{run_id}/comparison",
+        response_model=BaselineComparisonView | None,
+        dependencies=protected,
+    )
+    async def compare_evaluation_run(
+        run_id: str,
+        revision_id: Annotated[str, Query(min_length=1)],
+    ) -> BaselineComparisonView | None:
+        """比较目标 run 与同范围当前基线。"""
+
+        return baseline_service.compare(run_id, revision_id)
 
     @app.post(
         "/api/eval/evaluations/{revision_id}/overrides",

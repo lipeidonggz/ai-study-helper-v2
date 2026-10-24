@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.storage.models import utc_now
@@ -619,6 +619,92 @@ class EvalCheckReviewRow(EvaluationBase):
         DateTime(timezone=True),
         nullable=False,
         default=utc_now,
+    )
+
+
+class EvalBaselineRow(EvaluationBase):
+    """人工确认且不可变的评测基线，同时冻结比较所需的结果投影。"""
+
+    __tablename__ = "eval_baselines"
+    __table_args__ = (
+        UniqueConstraint(
+            "suite_id",
+            "run_type",
+            "execution_run_id",
+            "evaluation_revision_id",
+            "result_matrix_hash",
+            name="uq_eval_baseline_result_state",
+        ),
+    )
+
+    baseline_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    suite_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("eval_suites.suite_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    scope_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    run_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    suite_revision_id: Mapped[str] = mapped_column(
+        String(96),
+        ForeignKey("eval_suite_revisions.revision_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    collection_snapshot_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    plan_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("eval_execution_plans.plan_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    execution_run_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("eval_execution_runs.run_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    evaluation_revision_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("eval_evaluation_revisions.revision_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    case_revision_ids_json: Mapped[str] = mapped_column(Text, nullable=False)
+    run_policy_json: Mapped[str] = mapped_column(Text, nullable=False)
+    aggregate_rule_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    result_matrix_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    result_matrix_json: Mapped[str] = mapped_column(Text, nullable=False)
+    run_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    run_sealed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewer: Mapped[str] = mapped_column(String(128), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+    )
+
+
+class EvalBaselinePointerRow(EvaluationBase):
+    """每个 suite 与 run type 当前采用的基线指针。"""
+
+    __tablename__ = "eval_baseline_pointers"
+
+    suite_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("eval_suites.suite_id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    run_type: Mapped[str] = mapped_column(String(16), primary_key=True)
+    baseline_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("eval_baselines.baseline_id", ondelete="RESTRICT"),
+        unique=True,
+        nullable=False,
+    )
+    updated_by: Mapped[str] = mapped_column(String(128), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+        onupdate=utc_now,
     )
 
 

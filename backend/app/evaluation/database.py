@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.evaluation.storage_models import EvalSchemaVersionRow
 
-EVALUATION_SCHEMA_VERSION = 5
+EVALUATION_SCHEMA_VERSION = 7
 
 
 def _migrations_directory() -> Path:
@@ -175,6 +175,20 @@ class EvaluationDatabase:
             BEFORE UPDATE ON eval_plan_cases
             BEGIN
                 SELECT RAISE(ABORT, 'execution plan cases are immutable');
+            END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS eval_baselines_no_update
+            BEFORE UPDATE ON eval_baselines
+            BEGIN
+                SELECT RAISE(ABORT, 'eval baselines are append-only');
+            END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS eval_baselines_no_delete
+            BEFORE DELETE ON eval_baselines
+            BEGIN
+                SELECT RAISE(ABORT, 'eval baselines are append-only');
             END
             """,
         )
