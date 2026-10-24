@@ -353,6 +353,92 @@ interface CaseAggregateView {
   reasons: string[];
 }
 
+/** 结果矩阵中的一次执行样本及其成本和证据入口。 */
+interface ResultMatrixAttemptView {
+  attempt_id: string;
+  sample_ordinal: number;
+  execution_status: string;
+  outcome_class: AttemptView["outcome_class"];
+  valid_sample: boolean;
+  result: AttemptAggregateView["result"];
+  redline_violated: boolean;
+  trace_id: string | null;
+  trace_status: AttemptView["trace_status"];
+  started_at: string;
+  finished_at: string | null;
+  duration_ms: number | null;
+  input_tokens: number;
+  output_tokens: number;
+  model_calls: number;
+  tool_calls: number;
+  reasons: string[];
+}
+
+/** 结果矩阵中的一个 case 及其 attempt 明细。 */
+interface ResultMatrixCaseView {
+  case_id: string;
+  case_revision_id: string;
+  category: string;
+  question: string;
+  n: number;
+  k: number;
+  attempt_count: number;
+  valid_samples: number;
+  excluded_count: number;
+  pass_count: number;
+  fail_count: number;
+  pending_count: number;
+  redline_violation_count: number;
+  result: CaseAggregateView["result"];
+  input_tokens: number;
+  output_tokens: number;
+  model_calls: number;
+  tool_calls: number;
+  duration_ms: number;
+  reasons: string[];
+  attempts: ResultMatrixAttemptView[];
+}
+
+/** 结果矩阵中类别或整个 run 的汇总。 */
+interface ResultMatrixTotalsView {
+  case_count: number;
+  case_pass_count: number;
+  case_fail_count: number;
+  case_pending_count: number;
+  case_exploratory_count: number;
+  attempt_count: number;
+  valid_samples: number;
+  excluded_attempts: number;
+  infrastructure_failures: number;
+  canceled_attempts: number;
+  unknown_attempts: number;
+  redline_violation_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  model_calls: number;
+  tool_calls: number;
+  duration_ms: number;
+}
+
+/** 按冻结 category 分组的结果矩阵。 */
+interface ResultMatrixCategoryView {
+  category: string;
+  totals: ResultMatrixTotalsView;
+  cases: ResultMatrixCaseView[];
+}
+
+/** 从执行与判定事实重建的四层只读矩阵。 */
+interface EvaluationResultMatrixView {
+  run_id: string;
+  run_status: RunView["status"];
+  plan_mode: RunView["plan_mode"];
+  suite_name: string | null;
+  suite_revision_id: string | null;
+  suite_revision_number: number | null;
+  totals: ResultMatrixTotalsView;
+  categories: ResultMatrixCategoryView[];
+}
+
 /** 一次判定修订版及其逐项结果。 */
 interface EvaluationRevisionView {
   revision_id: string;
@@ -374,6 +460,7 @@ interface EvaluationRevisionView {
   check_reviews: CheckReviewView[];
   attempt_aggregates: AttemptAggregateView[];
   case_aggregates: CaseAggregateView[];
+  result_matrix: EvaluationResultMatrixView | null;
 }
 
 /** 判官 prompt 原文与版本。 */
@@ -448,13 +535,19 @@ const checkReviewReviewer = ref("");
 const checkReviewBusy = ref(false);
 const checkReviewError = ref("");
 const traceDetail = ref<TraceDetail | null>(null);
-const historyDetailTab = ref<"judgment" | "trace">("judgment");
+const matrixJudgmentAttemptId = ref("");
+const matrixTraceAttempt = ref<ResultMatrixAttemptView | null>(null);
+const matrixTraceDetail = ref<TraceDetail | null>(null);
+const matrixTraceLoading = ref(false);
+const matrixTraceError = ref("");
+const historyDetailTab = ref<"matrix" | "judgment" | "trace">("matrix");
 const loading = ref(true);
 const busy = ref(false);
 const error = ref("");
 const message = ref("");
 let pollTimer: number | undefined;
 let judgmentPollTimer: number | undefined;
+let matrixTraceRequestSequence = 0;
 
 const selectedSuite = computed(
   () =>
@@ -1000,6 +1093,9 @@ function executorText(executor: string): string {
 }
 
 const runStatusLabel = computed(() => statusText(selectedRun.value?.status ?? ""));
+const resultMatrix = computed(
+  () => evaluationRevision.value?.result_matrix ?? null,
+);
 
 const caseById = computed(() => {
   const values = new Map<string, CaseRevisionView>();
@@ -1110,6 +1206,32 @@ const attemptJudgmentGroups = computed<AttemptJudgmentGroup[]>(() => {
   );
 });
 
+const matrixJudgmentGroup = computed(
+  () =>
+    attemptJudgmentGroups.value.find(
+      (group) => group.attemptId === matrixJudgmentAttemptId.value,
+    ) ?? null,
+);
+
+const matrixJudgmentQuestion = computed(() => {
+  const group = matrixJudgmentGroup.value;
+  if (!group) {
+    return "";
+  }
+  const matrixCase = resultMatrix.value?.categories
+    .flatMap((category) => category.cases)
+    .find((item) => item.case_revision_id === group.caseRevisionId);
+  return (
+    matrixCase?.question ??
+    caseById.value.get(group.caseRevisionId)?.question ??
+    "问题原文不可用"
+  );
+});
+
+const hasOpenMatrixModal = computed(
+  () => Boolean(matrixJudgmentGroup.value || matrixTraceAttempt.value),
+);
+
 const filteredAttemptJudgmentGroups = computed(() =>
   judgmentAttemptFilter.value === "failed"
     ? attemptJudgmentGroups.value.filter((group) => group.result === "fail")
@@ -1216,6 +1338,80 @@ function attemptAggregatesForCase(caseRevisionId: string): AttemptAggregateView[
   );
 }
 
+/** 返回指定 attempt 的全部跨判定项检查。 */
+function checksForAttempt(attemptId: string): CheckResultView[] {
+  return (
+    evaluationRevision.value?.checks.filter(
+      (check) => check.attempt_id === attemptId,
+    ) ?? []
+  );
+}
+
+/** 在结果矩阵中打开样本判定弹窗，不切换当前分析上下文。 */
+function openMatrixJudgment(attempt: ResultMatrixAttemptView): void {
+  matrixJudgmentAttemptId.value = attempt.attempt_id;
+}
+
+/** 关闭结果矩阵中的样本判定弹窗。 */
+function closeMatrixJudgment(): void {
+  matrixJudgmentAttemptId.value = "";
+}
+
+/** 在结果矩阵中加载并打开指定 attempt 的 trace 弹窗。 */
+async function openMatrixTrace(attempt: ResultMatrixAttemptView): Promise<void> {
+  matrixTraceAttempt.value = attempt;
+  matrixTraceDetail.value = null;
+  matrixTraceError.value = "";
+  if (!attempt.trace_id) {
+    matrixTraceError.value = "该样本没有可用的运行轨迹。";
+    matrixTraceLoading.value = false;
+    return;
+  }
+  const requestSequence = ++matrixTraceRequestSequence;
+  matrixTraceLoading.value = true;
+  try {
+    const detail = await api<TraceDetail>(
+      `/api/eval/traces/${encodeURIComponent(attempt.trace_id)}`,
+    );
+    if (requestSequence !== matrixTraceRequestSequence) {
+      return;
+    }
+    matrixTraceDetail.value = detail;
+  } catch (reason) {
+    if (requestSequence === matrixTraceRequestSequence) {
+      matrixTraceError.value = `读取运行轨迹失败：${String(reason)}`;
+    }
+  } finally {
+    if (requestSequence === matrixTraceRequestSequence) {
+      matrixTraceLoading.value = false;
+    }
+  }
+}
+
+/** 关闭结果矩阵中的 trace 弹窗，并让未完成请求失效。 */
+function closeMatrixTrace(): void {
+  matrixTraceRequestSequence += 1;
+  matrixTraceAttempt.value = null;
+  matrixTraceDetail.value = null;
+  matrixTraceLoading.value = false;
+  matrixTraceError.value = "";
+}
+
+let previousBodyOverflow = "";
+let previousDocumentOverflow = "";
+
+watch(hasOpenMatrixModal, (isOpen) => {
+  if (isOpen) {
+    previousBodyOverflow = document.body.style.overflow;
+    previousDocumentOverflow = document.documentElement.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
+    return;
+  }
+  document.body.style.overflow = previousBodyOverflow;
+  document.documentElement.style.overflow = previousDocumentOverflow;
+});
+
 /** 返回同一 case 内按开始时间排序的样本序号。 */
 function attemptSampleLabel(attemptId: string): string {
   const ordinal = attemptOrdinalById.value.get(attemptId);
@@ -1229,6 +1425,7 @@ function attemptShortId(attemptId: string): string {
 
 /** 切到按样本视图并定位指定 attempt。 */
 async function focusAttemptJudgments(attemptId: string): Promise<void> {
+  historyDetailTab.value = "judgment";
   judgmentViewMode.value = "attempt";
   judgmentAttemptFilter.value = "all";
   focusedAttemptId.value = attemptId;
@@ -2386,7 +2583,7 @@ async function inspectTrace(traceId: string | null): Promise<void> {
 }
 
 /** 切换到历史详情页签；首次进入轨迹时自动打开第一条可用 trace。 */
-function selectHistoryDetailTab(tab: "judgment" | "trace"): void {
+function selectHistoryDetailTab(tab: "matrix" | "judgment" | "trace"): void {
   historyDetailTab.value = tab;
   if (tab === "trace" && !traceDetail.value) {
     const attempt = selectedRun.value?.attempts.find((item) => item.trace_id);
@@ -2431,7 +2628,9 @@ function selectRun(run: RunView): void {
   isJudgmentFormOpen.value = false;
   judgeReviewConfirmed.value = false;
   traceDetail.value = null;
-  historyDetailTab.value = "judgment";
+  closeMatrixJudgment();
+  closeMatrixTrace();
+  historyDetailTab.value = "matrix";
   stopJudgmentPolling();
   schedulePolling();
   void loadEvaluations(run.run_id);
@@ -2446,6 +2645,17 @@ function durationLabel(attempt: AttemptView): string {
     new Date(attempt.finished_at).getTime() -
     new Date(attempt.started_at).getTime();
   return `${(milliseconds / 1000).toFixed(1)}s`;
+}
+
+/** 把结果矩阵记录的毫秒耗时格式化为紧凑文本。 */
+function durationMsLabel(milliseconds: number | null): string {
+  if (milliseconds === null) {
+    return "运行中";
+  }
+  if (milliseconds < 1_000) {
+    return `${milliseconds}ms`;
+  }
+  return `${(milliseconds / 1_000).toFixed(1)}s`;
 }
 
 /** 把首个正文 token 与请求开始时间之差格式化。 */
@@ -2519,6 +2729,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   stopPolling();
   stopJudgmentPolling();
+  document.body.style.overflow = previousBodyOverflow;
+  document.documentElement.style.overflow = previousDocumentOverflow;
 });
 </script>
 
@@ -3503,6 +3715,13 @@ onBeforeUnmount(() => {
           >
             <button
               type="button"
+              :class="{ active: historyDetailTab === 'matrix' }"
+              @click="selectHistoryDetailTab('matrix')"
+            >
+              结果矩阵
+            </button>
+            <button
+              type="button"
               :class="{ active: historyDetailTab === 'judgment' }"
               @click="selectHistoryDetailTab('judgment')"
             >
@@ -3516,6 +3735,214 @@ onBeforeUnmount(() => {
               运行轨迹
             </button>
           </nav>
+        </section>
+
+        <section
+          v-show="
+            evaluationTab === 'history' &&
+            selectedRun &&
+            historyDetailTab === 'matrix'
+          "
+          class="eval-panel eval-result-matrix"
+        >
+          <div class="eval-panel-heading">
+            <div>
+              <span class="eval-kicker">结果矩阵</span>
+              <h3>从批次、类别和样本定位结果</h3>
+            </div>
+            <span class="eval-count">
+              {{ evaluationRevision ? statusText(evaluationRevision.status) : "尚未判定" }}
+            </span>
+          </div>
+
+          <p v-if="!evaluationRevision" class="eval-empty">
+            当前运行尚未生成判定结果。先完成判定，才能查看 case 与 attempt 的质量矩阵；
+            token、工具和耗时仍可在上方执行信息中查看。
+          </p>
+          <p v-else-if="!resultMatrix" class="eval-empty">
+            结果矩阵正在生成。
+          </p>
+          <template v-else>
+            <div class="eval-matrix-summary">
+              <article>
+                <span>Run 结论</span>
+                <strong>
+                  {{ resultMatrix.totals.case_pass_count }} 通过 /
+                  {{ resultMatrix.totals.case_fail_count }} 失败 /
+                  {{ resultMatrix.totals.case_pending_count }} 待定
+                </strong>
+                <small>
+                  {{ resultMatrix.totals.case_exploratory_count }} 条探索性 ·
+                  共 {{ resultMatrix.totals.case_count }} 个 case
+                </small>
+              </article>
+              <article>
+                <span>有效样本</span>
+                <strong>
+                  {{ resultMatrix.totals.valid_samples }} /
+                  {{ resultMatrix.totals.attempt_count }}
+                </strong>
+                <small>
+                  基础设施失败 {{ resultMatrix.totals.infrastructure_failures }} ·
+                  未知 {{ resultMatrix.totals.unknown_attempts }} ·
+                  取消 {{ resultMatrix.totals.canceled_attempts }}
+                </small>
+              </article>
+              <article :class="{ warning: resultMatrix.totals.redline_violation_count > 0 }">
+                <span>X 红线样本</span>
+                <strong>{{ resultMatrix.totals.redline_violation_count }}</strong>
+                <small>任一违规都不能被通过样本抵消</small>
+              </article>
+              <article>
+                <span>Token</span>
+                <strong>
+                  {{ formatTokens(resultMatrix.totals.input_tokens + resultMatrix.totals.output_tokens) }}
+                </strong>
+                <small>
+                  输入 {{ formatTokens(resultMatrix.totals.input_tokens) }} ·
+                  输出 {{ formatTokens(resultMatrix.totals.output_tokens) }}
+                </small>
+              </article>
+              <article>
+                <span>模型 / 工具调用</span>
+                <strong>
+                  {{ resultMatrix.totals.model_calls }} /
+                  {{ resultMatrix.totals.tool_calls }}
+                </strong>
+                <small>按全部 attempt 统计，不混入有效 N</small>
+              </article>
+              <article>
+                <span>样本累计耗时</span>
+                <strong>{{ durationMsLabel(resultMatrix.totals.duration_ms) }}</strong>
+                <small>各 attempt 起止时间之和</small>
+              </article>
+            </div>
+
+            <p v-if="!resultMatrix.categories.length" class="eval-empty">
+              当前运行没有可展示的用例。
+            </p>
+            <section
+              v-for="category in resultMatrix.categories"
+              :key="category.category"
+              class="eval-matrix-category"
+            >
+              <header>
+                <div>
+                  <span class="eval-kicker">问题类别</span>
+                  <h4>{{ category.category }}</h4>
+                </div>
+                <div class="eval-matrix-category-counts">
+                  <span>{{ category.totals.case_count }} 个 case</span>
+                  <span>通过 {{ category.totals.case_pass_count }}</span>
+                  <span>失败 {{ category.totals.case_fail_count }}</span>
+                  <span>待定 {{ category.totals.case_pending_count }}</span>
+                  <span>探索性 {{ category.totals.case_exploratory_count }}</span>
+                  <span>X 红线 {{ category.totals.redline_violation_count }}</span>
+                  <span>
+                    token
+                    {{
+                      formatTokens(
+                        category.totals.input_tokens + category.totals.output_tokens,
+                      )
+                    }}
+                  </span>
+                  <span>
+                    模型 / 工具 {{ category.totals.model_calls }} /
+                    {{ category.totals.tool_calls }}
+                  </span>
+                  <span>耗时 {{ durationMsLabel(category.totals.duration_ms) }}</span>
+                </div>
+              </header>
+              <div class="eval-matrix-cases">
+                <details
+                  v-for="matrixCase in category.cases"
+                  :key="matrixCase.case_revision_id"
+                  class="eval-matrix-case"
+                  :class="`matrix-result-${matrixCase.result}`"
+                >
+                  <summary>
+                    <div class="eval-matrix-case-title">
+                      <strong>{{ matrixCase.case_id }}</strong>
+                      <small :title="matrixCase.question">{{ matrixCase.question }}</small>
+                    </div>
+                    <span :class="`result-${matrixCase.result}`">
+                      {{ statusText(matrixCase.result) }}
+                    </span>
+                    <span>有效样本 {{ matrixCase.valid_samples }} / {{ matrixCase.n }}</span>
+                    <span>
+                      通过 {{ matrixCase.pass_count }} · 失败 {{ matrixCase.fail_count }} ·
+                      待定 {{ matrixCase.pending_count }}
+                    </span>
+                    <span>X 红线 {{ matrixCase.redline_violation_count }}</span>
+                    <span>
+                      {{ formatTokens(matrixCase.input_tokens + matrixCase.output_tokens) }} token
+                    </span>
+                    <span>
+                      模型 / 工具 {{ matrixCase.model_calls }} /
+                      {{ matrixCase.tool_calls }}
+                    </span>
+                    <span>{{ durationMsLabel(matrixCase.duration_ms) }}</span>
+                  </summary>
+                  <div class="eval-matrix-case-detail">
+                    <p
+                      v-for="reason in matrixCase.reasons"
+                      :key="reason"
+                      class="eval-matrix-reason"
+                    >
+                      {{ reason }}
+                    </p>
+                    <p v-if="!matrixCase.attempts.length" class="eval-empty">
+                      该 case 没有执行样本。
+                    </p>
+                    <article
+                      v-for="attempt in matrixCase.attempts"
+                      :key="attempt.attempt_id"
+                      class="eval-matrix-attempt"
+                      :class="`matrix-result-${attempt.result}`"
+                    >
+                      <div class="eval-matrix-attempt-title">
+                        <strong>样本 #{{ String(attempt.sample_ordinal).padStart(2, "0") }}</strong>
+                        <small :title="attempt.attempt_id">{{ attemptShortId(attempt.attempt_id) }}</small>
+                      </div>
+                      <span :class="`result-${attempt.result}`">
+                        {{ statusText(attempt.result) }}
+                      </span>
+                      <span>
+                        {{ statusText(attempt.execution_status) }} ·
+                        {{ outcomeClassText(attempt.outcome_class) }}
+                      </span>
+                      <span v-if="attempt.redline_violated" class="eval-matrix-redline">
+                        X 红线
+                      </span>
+                      <span v-else>无红线</span>
+                      <span>
+                        {{ formatTokens(attempt.input_tokens + attempt.output_tokens) }} token
+                      </span>
+                      <span>模型 {{ attempt.model_calls }} · 工具 {{ attempt.tool_calls }}</span>
+                      <span>{{ durationMsLabel(attempt.duration_ms) }}</span>
+                      <div class="eval-matrix-attempt-actions">
+                        <button
+                          type="button"
+                          class="eval-secondary-button"
+                          @click="openMatrixJudgment(attempt)"
+                        >
+                          查看判定
+                        </button>
+                        <button
+                          type="button"
+                          class="eval-secondary-button"
+                          :disabled="!attempt.trace_id"
+                          @click="openMatrixTrace(attempt)"
+                        >
+                          运行轨迹 · {{ statusText(attempt.trace_status) }}
+                        </button>
+                      </div>
+                    </article>
+                  </div>
+                </details>
+              </div>
+            </section>
+          </template>
         </section>
 
         <section
@@ -4365,6 +4792,255 @@ onBeforeUnmount(() => {
           <span class="eval-kicker">历史结果</span>
           <h3>从左侧选择一个历史执行批次</h3>
           <p>历史页展示已完成、已取消或已封存批次及其运行轨迹。</p>
+        </section>
+      </div>
+
+      <div
+        v-if="matrixJudgmentGroup"
+        class="eval-modal-backdrop"
+        @click.self="closeMatrixJudgment"
+      >
+        <section
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="matrix-judgment-modal-title"
+          class="eval-modal eval-modal-wide"
+        >
+          <header class="eval-modal-header">
+            <div>
+              <span class="eval-kicker">样本判定</span>
+              <h3 id="matrix-judgment-modal-title">
+                {{ matrixJudgmentGroup.caseId }} ·
+                {{ matrixJudgmentGroup.sampleLabel }}
+                <span :class="`result-${matrixJudgmentGroup.result}`">
+                  {{ statusText(matrixJudgmentGroup.result) }}
+                </span>
+              </h3>
+              <small :title="matrixJudgmentGroup.attemptId">
+                {{ matrixJudgmentGroup.attemptId }}
+              </small>
+            </div>
+            <button
+              type="button"
+              class="eval-modal-close"
+              aria-label="关闭样本判定"
+              @click="closeMatrixJudgment"
+            >
+              关闭
+            </button>
+          </header>
+          <div
+            class="eval-modal-body"
+            @wheel.stop
+            @touchmove.stop
+          >
+            <section class="eval-modal-question">
+              <span>本次问题</span>
+              <p>{{ matrixJudgmentQuestion }}</p>
+            </section>
+            <div class="eval-attempt-judgment-summary">
+              <span>
+                R {{ matrixJudgmentGroup.aggregate?.r_pass ?? 0 }} 通过 /
+                {{ matrixJudgmentGroup.aggregate?.r_fail ?? 0 }} 失败 /
+                {{ matrixJudgmentGroup.aggregate?.r_pending ?? 0 }} 待定
+              </span>
+              <span>
+                X {{ matrixJudgmentGroup.aggregate?.x_not_violated ?? 0 }} 合规 /
+                {{ matrixJudgmentGroup.aggregate?.x_violated ?? 0 }} 违规 /
+                {{ matrixJudgmentGroup.aggregate?.x_pending ?? 0 }} 待定
+              </span>
+            </div>
+            <p
+              v-for="reason in matrixJudgmentGroup.aggregate?.reasons ?? []"
+              :key="reason"
+              class="eval-attempt-reason"
+            >
+              {{ reason }}
+            </p>
+            <details class="eval-answer-view">
+              <summary>查看答案</summary>
+              <pre>{{ matrixJudgmentGroup.answer || "无答案" }}</pre>
+            </details>
+            <section class="eval-modal-section">
+              <h4>R／X 判定</h4>
+              <p v-if="!matrixJudgmentGroup.judgments.length" class="eval-empty">
+                当前样本尚无 criterion 判定。
+              </p>
+              <article
+                v-for="judgment in matrixJudgmentGroup.judgments"
+                :key="judgment.judgment_id"
+                class="eval-modal-judgment"
+              >
+                <header>
+                  <span class="eval-rule-badge">
+                    {{
+                      criterionById.get(judgment.criterion_revision_id)?.rule_type ??
+                      "?"
+                    }}
+                  </span>
+                  <div>
+                    <strong>
+                      {{
+                        criterionById.get(judgment.criterion_revision_id)?.title ??
+                        judgment.criterion_revision_id
+                      }}
+                    </strong>
+                    <small>
+                      {{ executorText(judgment.executor) }} ·
+                      {{ statusText(judgment.verdict) }}
+                    </small>
+                  </div>
+                  <span :class="`result-${judgment.normalized_result}`">
+                    {{ statusText(judgment.normalized_result) }}
+                  </span>
+                </header>
+                <section class="eval-modal-criterion-rule">
+                  <span>金标准</span>
+                  <p>
+                    {{
+                      criterionById.get(judgment.criterion_revision_id)?.rule_text ??
+                      "当前 revision 的 criterion 原文不可用"
+                    }}
+                  </p>
+                </section>
+                <p>
+                  {{
+                    judgment.error_code
+                      ? diagnosticErrorText(judgment.error_code)
+                      : judgment.reason ?? "无判定说明"
+                  }}
+                </p>
+                <p v-if="judgment.evidence.quotes?.length" class="eval-judge-quote">
+                  “{{ judgment.evidence.quotes[0] }}”
+                </p>
+                <details v-if="judgment.invocations.length">
+                  <summary>判官调用 · {{ judgment.invocations.length }} 次</summary>
+                  <article
+                    v-for="invocation in judgment.invocations"
+                    :key="invocation.invocation_id"
+                    class="eval-invocation"
+                  >
+                    <span>
+                      第 {{ invocation.attempt_number }} 次 ·
+                      {{ statusText(invocation.status) }} ·
+                      {{ invocation.model_id }}
+                    </span>
+                    <small>
+                      输入 {{ invocation.input_tokens }} / 输出
+                      {{ invocation.output_tokens }} token
+                    </small>
+                    <details
+                      v-if="invocation.input_json"
+                      class="eval-invocation-payload"
+                    >
+                      <summary>查看判官输入</summary>
+                      <TraceArtifactContentViewer
+                        artifact-kind="judge.input"
+                        :content="invocation.input_json"
+                        error=""
+                        :is-loading="false"
+                      />
+                    </details>
+                    <details
+                      v-if="invocation.raw_output"
+                      class="eval-invocation-payload"
+                    >
+                      <summary>查看判官输出</summary>
+                      <TraceArtifactContentViewer
+                        artifact-kind="judge.output"
+                        :content="invocation.raw_output"
+                        error=""
+                        :is-loading="false"
+                      />
+                    </details>
+                  </article>
+                </details>
+              </article>
+            </section>
+            <section class="eval-modal-section">
+              <h4>通用跨判定项检查</h4>
+              <p v-if="!checksForAttempt(matrixJudgmentGroup.attemptId).length" class="eval-empty">
+                当前样本没有跨判定项检查。
+              </p>
+              <article
+                v-for="check in checksForAttempt(matrixJudgmentGroup.attemptId)"
+                :key="check.check_result_id"
+                class="eval-modal-check"
+              >
+                <div>
+                  <strong>{{ checkerText(check.checker_id) }}</strong>
+                  <span :class="`result-${effectiveCheckResult(check)}`">
+                    {{ statusText(effectiveCheckResult(check)) }}
+                  </span>
+                </div>
+                <small>
+                  {{ check.error_code ? diagnosticErrorText(check.error_code) : "无错误" }}
+                  · {{ checkExecutorVersionText(check) }}
+                </small>
+                <p v-if="checkReviewFor(check)">
+                  人工复核：{{ checkReviewReviewerText(check) }} ·
+                  {{ checkReviewReasonText(check) }}
+                </p>
+                <p
+                  v-else-if="typeof check.payload.reason === 'string' && check.payload.reason"
+                >
+                  {{ check.payload.reason }}
+                </p>
+              </article>
+            </section>
+          </div>
+        </section>
+      </div>
+
+      <div
+        v-if="matrixTraceAttempt"
+        class="eval-modal-backdrop"
+        @click.self="closeMatrixTrace"
+      >
+        <section
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="matrix-trace-modal-title"
+          class="eval-modal eval-modal-trace"
+        >
+          <header class="eval-modal-header">
+            <div>
+              <span class="eval-kicker">样本运行轨迹</span>
+              <h3 id="matrix-trace-modal-title">
+                样本 #{{ String(matrixTraceAttempt.sample_ordinal).padStart(2, "0") }}
+                · {{ matrixTraceAttempt.attempt_id.slice(0, 18) }}…
+              </h3>
+              <small>
+                {{ statusText(matrixTraceAttempt.trace_status) }}
+                <template v-if="matrixTraceAttempt.trace_id">
+                  · {{ matrixTraceAttempt.trace_id }}
+                </template>
+              </small>
+            </div>
+            <button
+              type="button"
+              class="eval-modal-close"
+              aria-label="关闭运行轨迹"
+              @click="closeMatrixTrace"
+            >
+              关闭
+            </button>
+          </header>
+          <div
+            class="eval-modal-body"
+            @wheel.stop
+            @touchmove.stop
+          >
+            <p v-if="matrixTraceLoading" class="eval-empty">正在读取运行轨迹…</p>
+            <p v-else-if="matrixTraceError" class="eval-error">
+              {{ matrixTraceError }}
+            </p>
+            <TraceDetailViewer
+              v-else-if="matrixTraceDetail"
+              :trace="matrixTraceDetail"
+              :load-artifact="loadTraceArtifactContent"
+            />
+          </div>
         </section>
       </div>
     </div>
@@ -5991,6 +6667,340 @@ onBeforeUnmount(() => {
   background: #fff1f1;
 }
 
+.eval-modal-backdrop {
+  position: fixed;
+  z-index: 900;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  padding: 28px;
+  background: rgba(22, 38, 28, 0.42);
+  backdrop-filter: blur(5px);
+}
+
+.eval-modal {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(1050px, 100%);
+  max-height: min(88vh, 920px);
+  overflow: hidden;
+  border: 1px solid #cddbcf;
+  border-radius: 17px;
+  background: #fbfdfb;
+  box-shadow: 0 26px 70px rgba(17, 39, 24, 0.25);
+}
+
+.eval-modal-wide {
+  width: min(1120px, 100%);
+}
+
+.eval-modal-trace {
+  width: min(1320px, 100%);
+}
+
+.eval-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid #dce7de;
+  padding: 16px 18px;
+  background: #f4f8f4;
+}
+
+.eval-modal-header h3 {
+  margin: 3px 0 4px;
+  color: #203f2b;
+  font-size: 1rem;
+}
+
+.eval-modal-header small {
+  display: block;
+  overflow: hidden;
+  color: #728177;
+  font-family: Consolas, monospace;
+  font-size: 0.67rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eval-modal-close {
+  flex: 0 0 auto;
+  border: 1px solid #b9cbbd;
+  border-radius: 8px;
+  padding: 6px 11px;
+  color: #35553f;
+  background: #fff;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.eval-modal-body {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 16px 18px 20px;
+}
+
+.eval-modal-question,
+.eval-modal-criterion-rule {
+  display: grid;
+  gap: 4px;
+  border-radius: 10px;
+  padding: 9px 11px;
+  color: #4d6254;
+  background: #eef5ef;
+  font-size: 0.72rem;
+}
+
+.eval-modal-question > span,
+.eval-modal-criterion-rule > span {
+  color: #6a7c70;
+  font-size: 0.65rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.eval-modal-question p,
+.eval-modal-criterion-rule p {
+  margin: 0;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.eval-modal-criterion-rule {
+  background: #f7f4ea;
+}
+
+.eval-modal-section {
+  display: grid;
+  gap: 8px;
+}
+
+.eval-modal-section h4 {
+  margin: 4px 0 0;
+  color: #335440;
+  font-size: 0.84rem;
+}
+
+.eval-modal-judgment,
+.eval-modal-check {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #dfe8e0;
+  border-radius: 10px;
+  padding: 9px 11px;
+  color: #56685b;
+  background: #fff;
+  font-size: 0.72rem;
+}
+
+.eval-modal-judgment > header,
+.eval-modal-check > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.eval-modal-judgment > header > div {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+}
+
+.eval-modal-judgment p,
+.eval-modal-check p {
+  margin: 0;
+  line-height: 1.55;
+}
+
+.eval-modal-judgment details > summary {
+  color: #52705b;
+  cursor: pointer;
+  font-size: 0.68rem;
+}
+
+.eval-result-matrix {
+  display: grid;
+  gap: 12px;
+}
+
+.eval-matrix-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.eval-matrix-summary article {
+  display: grid;
+  gap: 3px;
+  border: 1px solid #dce7de;
+  border-radius: 11px;
+  padding: 10px 12px;
+  background: #f7faf7;
+}
+
+.eval-matrix-summary article.warning {
+  border-color: #deb9b9;
+  background: #fff7f7;
+}
+
+.eval-matrix-summary span,
+.eval-matrix-summary small {
+  color: #718077;
+  font-size: 0.68rem;
+}
+
+.eval-matrix-summary strong {
+  color: #294c35;
+  font-size: 0.94rem;
+}
+
+.eval-matrix-summary article.warning strong {
+  color: #963f3f;
+}
+
+.eval-matrix-category {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #d8e5da;
+  border-radius: 13px;
+  padding: 12px;
+  background: #f1f7f2;
+}
+
+.eval-matrix-category > header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+
+.eval-matrix-category h4 {
+  margin: 2px 0 0;
+  color: #294c35;
+  font-size: 0.95rem;
+}
+
+.eval-matrix-category-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 11px;
+  color: #607266;
+  font-size: 0.68rem;
+}
+
+.eval-matrix-cases {
+  display: grid;
+  gap: 7px;
+}
+
+.eval-matrix-case {
+  border: 1px solid #dce6de;
+  border-left-width: 4px;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.eval-matrix-case.matrix-result-pass {
+  border-left-color: #4f8a60;
+}
+
+.eval-matrix-case.matrix-result-fail {
+  border-left-color: #aa4646;
+}
+
+.eval-matrix-case.matrix-result-pending {
+  border-left-color: #b48a45;
+}
+
+.eval-matrix-case.matrix-result-exploratory {
+  border-left-color: #927d42;
+}
+
+.eval-matrix-case > summary {
+  display: grid;
+  grid-template-columns: minmax(210px, 1.6fr) repeat(6, minmax(86px, auto));
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 11px;
+  color: #607266;
+  cursor: pointer;
+  font-size: 0.7rem;
+}
+
+.eval-matrix-case-title,
+.eval-matrix-attempt-title {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.eval-matrix-case-title small,
+.eval-matrix-attempt-title small {
+  overflow: hidden;
+  color: #7b897f;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eval-matrix-case-detail {
+  display: grid;
+  gap: 7px;
+  border-top: 1px solid #e4ebe5;
+  padding: 9px 11px 11px;
+}
+
+.eval-matrix-reason {
+  margin: 0;
+  color: #6c5862;
+  font-size: 0.7rem;
+}
+
+.eval-matrix-attempt {
+  display: grid;
+  grid-template-columns: minmax(145px, 1.2fr) auto minmax(120px, 1fr) repeat(4, auto);
+  align-items: center;
+  gap: 7px 10px;
+  border-radius: 9px;
+  padding: 8px 9px;
+  color: #617065;
+  background: #f6f9f6;
+  font-size: 0.68rem;
+}
+
+.eval-matrix-attempt.matrix-result-fail {
+  background: #fff7f7;
+}
+
+.eval-matrix-attempt.matrix-result-pending {
+  background: #fffaf0;
+}
+
+.eval-matrix-attempt.matrix-result-excluded {
+  background: #f2f3f2;
+  color: #7b817c;
+}
+
+.eval-matrix-redline {
+  color: #9a3636;
+  font-weight: 700;
+}
+
+.eval-matrix-attempt-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .eval-attempts {
   display: grid;
   gap: 6px;
@@ -6110,6 +7120,15 @@ onBeforeUnmount(() => {
   .eval-attempt-row {
     grid-template-columns: minmax(130px, 1fr) auto auto;
   }
+
+  .eval-matrix-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .eval-matrix-case > summary,
+  .eval-matrix-attempt {
+    grid-template-columns: minmax(160px, 1fr) repeat(2, auto);
+  }
 }
 
 @media (max-width: 680px) {
@@ -6133,6 +7152,26 @@ onBeforeUnmount(() => {
 
   .eval-check-guide {
     grid-template-columns: 1fr;
+  }
+
+  .eval-matrix-summary,
+  .eval-matrix-case > summary,
+  .eval-matrix-attempt {
+    grid-template-columns: 1fr;
+  }
+
+  .eval-modal-backdrop {
+    padding: 10px;
+  }
+
+  .eval-modal {
+    max-height: 94vh;
+    border-radius: 12px;
+  }
+
+  .eval-modal-header,
+  .eval-modal-body {
+    padding: 12px;
   }
 
   .eval-review-item {

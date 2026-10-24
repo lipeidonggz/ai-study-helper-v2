@@ -268,6 +268,8 @@ def test_agent_runtime_persists_parented_trace_with_tool_and_budget_data(
     assert all(turn.parent_span_id == root.span_id for turn in turns)
     tool_span = next(span for span in detail.spans if span.name == "tool.call")
     assert tool_span.parent_span_id in {turn.span_id for turn in turns}
+    assert tool_span.attributes["tool.name"] == "search_blocks"
+    assert tool_span.attributes["app.tool_arguments"] == {"query": "MCP"}
     assert tool_span.attributes["app.result_tokens"] > 0
     assert tool_span.attributes["app.diagnostics"]
     assert any(event.name == "budget.check" for turn in turns for event in turn.events)

@@ -312,6 +312,13 @@ def test_llm_judge_builds_whitelist_input_and_judgments(tmp_path: Path) -> None:
         assert len(revision.judgments) == 3
         assert all(item.executor == "llm_judge" for item in revision.judgments)
         assert all(item.normalized_result == "pass" for item in revision.judgments)
+        assert revision.result_matrix is not None
+        assert revision.result_matrix.totals.case_count == 1
+        assert revision.result_matrix.categories[0].cases[0].case_id == "c1-001"
+        assert (
+            revision.result_matrix.categories[0].cases[0].result
+            == revision.case_aggregates[0].result
+        )
         assert all(
             invocation.input_json
             and json.loads(invocation.input_json)["prompt_version"] == "judge-rubric-v2"
