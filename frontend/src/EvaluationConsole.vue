@@ -1034,9 +1034,13 @@ function diagnosticErrorText(code: string): string {
     citation_not_supported: "答案引用存在，但证据原文不支持对应主张",
     citation_support_unknown: "现有证据不足以判断引用是否支持答案",
     citation_support_input_too_large: "本次引用证据超过支持检查输入上限",
+    citation_support_unit_too_large: "单个引用上下文或证据超过安全输入上限",
+    citation_support_context_missing: "无法从答案中定位该引用对应的语义上下文",
+    citation_support_occurrence_missing: "引用支持检查遗漏了部分引用 occurrence",
     citation_support_failed: "引用支持检查未完成",
     citation_output_invalid: "引用支持检查输出格式非法",
     citation_result_block_set_invalid: "引用支持检查的 block 结果不完整或重复",
+    citation_occurrence_set_invalid: "引用支持检查的 occurrence 结果不完整或重复",
     citation_evidence_quote_invalid: "引用支持检查引用了不存在的证据原文",
   };
   return `${labels[code] ?? "执行未完成"}（${code}）`;
@@ -1061,6 +1065,27 @@ function checkExecutorVersionText(check: CheckResultView): string {
   return typeof promptVersion === "string" && promptVersion
     ? `引用判官 ${promptVersion}`
     : `引用判官版本 ${check.checker_version}`;
+}
+
+/** 汇总引用支持分批检查的覆盖范围与批次数。 */
+function citationBatchSummary(check: CheckResultView): string {
+  if (check.checker_id !== "citation_support") {
+    return "";
+  }
+  const batching = check.payload.batching;
+  if (typeof batching !== "object" || batching === null) {
+    return "";
+  }
+  const values = batching as Record<string, unknown>;
+  const contextCount = Number(values.context_count ?? 0);
+  const occurrenceCount = Number(values.occurrence_count ?? 0);
+  const blockCount = Number(values.block_count ?? 0);
+  const batchCount = Number(values.batch_count ?? 0);
+  const preflightFailureCount = Number(values.preflight_failure_count ?? 0);
+  const failureText = preflightFailureCount
+    ? ` · ${preflightFailureCount} 个超限项`
+    : "";
+  return `${batchCount} 批 · ${contextCount} 个上下文 · ${occurrenceCount} 个引用关系 · ${blockCount} 个 block${failureText}`;
 }
 
 /** 读取检查 payload 中的字符串数组。 */
@@ -5529,6 +5554,9 @@ onBeforeUnmount(() => {
                 <small>
                   {{ check.error_code ? diagnosticErrorText(check.error_code) : "无错误" }}
                   · {{ checkExecutorVersionText(check) }}
+                </small>
+                <small v-if="citationBatchSummary(check)">
+                  {{ citationBatchSummary(check) }}
                 </small>
                 <p v-if="checkReviewFor(check)">
                   人工复核：{{ checkReviewReviewerText(check) }} ·

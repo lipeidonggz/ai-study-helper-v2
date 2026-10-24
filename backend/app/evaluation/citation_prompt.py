@@ -2,57 +2,70 @@ from __future__ import annotations
 
 import hashlib
 import json
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from app.providers.chat import ChatMessage
 
-CITATION_SUPPORT_PROMPT_VERSION = "citation-rubric-v2"
+CITATION_SUPPORT_PROMPT_VERSION = "citation-rubric-v3"
 
 CITATION_SUPPORT_SYSTEM_PROMPT = """<role>
 你是本地文档问答的引用支持检查器。
-你每次只检查一个 Agent 答案中的显式引用，逐个判断所引证据是否支持答案中的相关主张。
+你每次检查一批答案中的显式引用，逐个判断所引证据是否支持答案局部上下文中的相关主张。
 </role>
 
 <inputs>
 你只会收到：
-1. Agent 最终答案；
-2. 答案中显式引用到的证据块。
+1. contexts：答案中的局部语义上下文，可能是段落、列表项、表格行或普通行；
+2. citations：答案中显式引用到的证据块；
+3. occurrences：一个 context 与一个 citation 的关系。
 
-每个证据块只包含：
+每个 context 只包含：
+- context_id；
+- kind；
+- text。
+
+每个 citation 只包含：
 - block_id；
 - doc_title；
 - section_path；
 - text。
+
+每个 occurrence 只包含：
+- occurrence_id；
+- block_id；
+- context_id。
 </inputs>
 
 <answer_citation_format>
 答案中的显式引用固定写作：【来源：block_id】。
 多个 block 写作：【来源：block_1，block_2】。
-引用标记位于被支持句子或列表项末尾。
-每个输入 citation 都对应答案中的一个或多个此类标记。
-若无法判断某条 citation 对应答案中的哪个主张，返回 unknown。
+引用标记可能位于句子、段落、列表项、表格行或普通行末尾。
+context.text 是引用所在的完整局部语义单元，不保证只有一句话。
+若无法从 occurrence 对应的 context 判断相关主张，返回 unknown。
 </answer_citation_format>
 
 <judgment_rules>
-1. 必须逐个 citation 独立判断，每个输入 block_id 恰好返回一个结果。
-2. 只使用输入中的 answer 和 citations，不得使用模型外部知识补充证据。
-3. supported：doc_title、section_path 和 text 能够支持答案中与该引用相关的主张。
-4. unsupported：证据原文不能支持或明确反驳相关主张，或者答案声称的文档归属与 citation 不符。
-5. unknown：无法从答案中确定该引用对应的主张，或仅凭该 citation 无法可靠判断。
-6. 一个 citation 如果对应多个相关主张，任一主张被原文明确反驳时判为 unsupported。
+1. 必须逐个 occurrence 独立判断，每个输入 occurrence_id 恰好返回一个结果。
+2. 只使用输入中的 contexts、citations 和 occurrences，不得使用模型外部知识补充证据。
+3. context 可能包含多句话或多个列表内容；应识别由该 occurrence 引用标记承诺支持的相关主张，
+   不能默认只检查紧邻引用前的一句话。
+4. supported：该 citation 能支持该 occurrence 对应的全部可识别相关主张。
+5. unsupported：证据原文不能支持或明确反驳任一相关主张，或者答案声称的文档归属与 citation 不符。
+6. unknown：无法从 context 确定该引用对应的主张，或仅凭该 citation 无法可靠判断。
 7. reason 必须直接说明证据如何支持、反驳或不支持相关主张。
-8. evidence_quotes 必须逐字来自该 citation 的 text，不得改写、拼接或跨 block 引用。
+8. evidence_quotes 必须逐字来自该 occurrence 对应 citation 的 text，不得改写、拼接或跨 block 引用。
 </judgment_rules>
 
 <output>
 只输出一个 JSON 对象，不输出 Markdown、代码围栏或额外说明。
-citations 必须与输入中的 block_id 集合完全一致，不得增加、遗漏或重复。
+citations 必须与输入中的 occurrence_id 集合完全一致，不得增加、遗漏或重复。
 
 {
   "citations": [
     {
-      "block_id": "block_1",
+      "occurrence_id": "citation_0001",
       "verdict": "supported | unsupported | unknown",
       "reason": "简短且可核验的理由",
       "evidence_quotes": ["逐字引用该 block 的原文"]
@@ -74,11 +87,28 @@ class CitationEvidenceInput(BaseModel):
     text: str
 
 
-class CitationSupportInput(BaseModel):
-    """一次答案的显式引用支持检查输入。"""
+class CitationContextInput(BaseModel):
+    """引用所在的答案局部语义上下文。"""
 
-    answer: str
+    context_id: str
+    kind: Literal["paragraph", "list_item", "table_row", "line"]
+    text: str
+
+
+class CitationOccurrenceInput(BaseModel):
+    """一个引用 block 在一个答案上下文中的一次检查关系。"""
+
+    occurrence_id: str
+    block_id: str
+    context_id: str
+
+
+class CitationSupportInput(BaseModel):
+    """一次有界批次中的引用支持检查输入。"""
+
+    contexts: list[CitationContextInput] = Field(default_factory=list)
     citations: list[CitationEvidenceInput] = Field(default_factory=list)
+    occurrences: list[CitationOccurrenceInput] = Field(default_factory=list)
 
 
 def render_citation_messages(packet: CitationSupportInput) -> list[ChatMessage]:

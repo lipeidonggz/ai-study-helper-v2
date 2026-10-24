@@ -17,18 +17,23 @@ from app.evaluation.aggregation import build_aggregates, build_result_matrix
 from app.evaluation.citation_prompt import (
     CITATION_SUPPORT_PROMPT_HASH,
     CITATION_SUPPORT_PROMPT_VERSION,
+    CitationContextInput,
     CitationEvidenceInput,
+    CitationOccurrenceInput,
     CitationSupportInput,
     render_citation_messages,
 )
 from app.evaluation.database import EvaluationDatabase
 from app.evaluation.evidence import (
-    MAX_JUDGE_EVIDENCE_CHARS,
+    MAX_CITATION_BATCH_INPUT_CHARS,
+    MAX_CITATION_BATCH_OCCURRENCES,
     BuiltJudgeInput,
     JudgeCriterionInput,
     JudgeInputError,
     JudgeInputPacket,
     build_judge_input,
+    cited_block_ids,
+    split_citation_contexts,
 )
 from app.evaluation.judge_prompt import (
     JUDGE_PROMPT_HASH,
@@ -76,10 +81,11 @@ from app.tracing.catalog import TraceCatalog
 
 CHECKER_VERSIONS = {
     "citation_integrity": "1",
-    "citation_support": "1",
+    "citation_support": "2",
     "truncation_declared": "1",
 }
 JUDGE_MAX_OUTPUT_TOKENS = 2_048
+CITATION_SUPPORT_MAX_OUTPUT_TOKENS = 4_096
 
 
 class JudgeOutput(BaseModel):
@@ -92,11 +98,11 @@ class JudgeOutput(BaseModel):
 
 
 class CitationResultOutput(BaseModel):
-    """引用判官对单个 block 的结构化结论。"""
+    """引用判官对单个 occurrence 的结构化结论。"""
 
     model_config = ConfigDict(extra="forbid")
 
-    block_id: str
+    occurrence_id: str
     verdict: Literal["supported", "unsupported", "unknown"]
     reason: str = Field(min_length=1)
     evidence_quotes: list[str]
@@ -747,14 +753,13 @@ class EvaluationJudgmentService:
                         for item in built.all_evidence
                         if item.block_id in cited_ids
                     ]
-                    _add_citation_task_or_pending(
-                        self,
-                        revision_id=revision_id,
+                    citation_task = _build_citation_task(
                         attempt_id=attempt.attempt_id,
                         answer=attempt.answer,
                         citations=cited_evidence,
-                        citation_tasks=citation_tasks,
                     )
+                    if citation_task is not None:
+                        citation_tasks.append(citation_task)
             except JudgeInputError as error:
                 build_error = error
                 self._persist_pending_check(
@@ -974,10 +979,33 @@ class EvaluationJudgmentService:
         *,
         budget: _JudgeBudget,
         timeout_seconds: int,
-    ) -> _CitationOutcome:
-        """执行一次最小输入的引用支持检查。"""
+    ) -> _CitationAttemptOutcome:
+        """顺序执行一个 attempt 的全部引用支持批次并合并结果。"""
 
-        messages = render_citation_messages(task.packet)
+        outcomes = [
+            await self._judge_citation_batch(
+                task,
+                batch_index=batch_index,
+                packet=packet,
+                budget=budget,
+                timeout_seconds=timeout_seconds,
+            )
+            for batch_index, packet in enumerate(task.batches, start=1)
+        ]
+        return _merge_citation_outcomes(task, outcomes)
+
+    async def _judge_citation_batch(
+        self,
+        task: _PreparedCitationTask,
+        *,
+        batch_index: int,
+        packet: CitationSupportInput,
+        budget: _JudgeBudget,
+        timeout_seconds: int,
+    ) -> _CitationBatchOutcome:
+        """执行一个有界引用支持批次。"""
+
+        messages = render_citation_messages(packet)
         input_json = _json(
             {
                 "prompt_version": CITATION_SUPPORT_PROMPT_VERSION,
@@ -986,14 +1014,17 @@ class EvaluationJudgmentService:
                 ],
             }
         )
-        reserved_tokens = 2 * (_estimate_tokens(input_json) + JUDGE_MAX_OUTPUT_TOKENS)
+        reserved_tokens = 2 * (_estimate_tokens(input_json) + CITATION_SUPPORT_MAX_OUTPUT_TOKENS)
         if not budget.reserve(tokens=reserved_tokens, requests=2):
-            return _CitationOutcome(
+            return _CitationBatchOutcome(
                 attempt_id=task.attempt_id,
+                batch_index=batch_index,
+                expected_occurrence_ids=tuple(item.occurrence_id for item in packet.occurrences),
                 result="pending",
+                citations=(),
                 payload={
                     "prompt_version": CITATION_SUPPORT_PROMPT_VERSION,
-                    "input": task.packet.model_dump(mode="json"),
+                    "input": packet.model_dump(mode="json"),
                     "error": "judge_budget_exhausted",
                 },
                 error_code="judge_budget_exhausted",
@@ -1009,7 +1040,7 @@ class EvaluationJudgmentService:
                 result = await asyncio.wait_for(
                     provider.complete(
                         messages,
-                        max_output_tokens=JUDGE_MAX_OUTPUT_TOKENS,
+                        max_output_tokens=CITATION_SUPPORT_MAX_OUTPUT_TOKENS,
                     ),
                     timeout=timeout_seconds,
                 )
@@ -1081,7 +1112,7 @@ class EvaluationJudgmentService:
                 )
             )
             try:
-                parsed = _parse_citation_output(result, task.packet)
+                parsed = _parse_citation_output(result, packet)
             except ValueError as error:
                 last_error = str(error)
                 invocations[-1] = replace_invocation(
@@ -1112,14 +1143,17 @@ class EvaluationJudgmentService:
             for invocation in invocations
         ]
         if parsed is None:
-            return _CitationOutcome(
+            return _CitationBatchOutcome(
                 attempt_id=task.attempt_id,
+                batch_index=batch_index,
+                expected_occurrence_ids=tuple(item.occurrence_id for item in packet.occurrences),
                 result="pending",
+                citations=(),
                 payload={
                     "prompt_version": CITATION_SUPPORT_PROMPT_VERSION,
                     "prompt_hash": CITATION_SUPPORT_PROMPT_HASH,
                     "model_id": provider.profile.model_id,
-                    "input": task.packet.model_dump(mode="json"),
+                    "input": packet.model_dump(mode="json"),
                     "error": last_error or "citation_support_failed",
                     "invocations": invocation_payload,
                 },
@@ -1135,14 +1169,17 @@ class EvaluationJudgmentService:
             "fail": "citation_not_supported",
             "pending": "citation_support_unknown",
         }[normalized]
-        return _CitationOutcome(
+        return _CitationBatchOutcome(
             attempt_id=task.attempt_id,
+            batch_index=batch_index,
+            expected_occurrence_ids=tuple(item.occurrence_id for item in packet.occurrences),
             result=normalized,
+            citations=tuple(parsed.citations),
             payload={
                 "prompt_version": CITATION_SUPPORT_PROMPT_VERSION,
                 "prompt_hash": CITATION_SUPPORT_PROMPT_HASH,
                 "model_id": provider.profile.model_id,
-                "input": task.packet.model_dump(mode="json"),
+                "input": packet.model_dump(mode="json"),
                 "citations": [citation.model_dump(mode="json") for citation in parsed.citations],
                 "invocations": invocation_payload,
             },
@@ -1175,7 +1212,7 @@ class EvaluationJudgmentService:
     def _persist_citation_support(
         self,
         revision_id: str,
-        outcome: _CitationOutcome,
+        outcome: _CitationAttemptOutcome,
     ) -> None:
         """持久化引用支持检查及最小调用审计。"""
 
@@ -1393,15 +1430,40 @@ class _PreparedTask:
 
 @dataclass(frozen=True, slots=True)
 class _PreparedCitationTask:
-    """一次 attempt 的显式引用支持检查任务。"""
+    """一个 attempt 的全部有界引用支持批次。"""
 
     attempt_id: str
-    packet: CitationSupportInput
+    batches: tuple[CitationSupportInput, ...]
+    occurrences: tuple[CitationOccurrenceInput, ...]
+    preflight_failures: tuple[_CitationPreflightFailure, ...]
+    context_count: int
 
 
 @dataclass(frozen=True, slots=True)
-class _CitationOutcome:
-    """尚未持久化的引用支持检查结果与调用审计。"""
+class _CitationPreflightFailure:
+    """无法安全送入模型、只能显式 pending 的单 occurrence。"""
+
+    occurrence: CitationOccurrenceInput
+    input_chars: int
+    error_code: str
+
+
+@dataclass(frozen=True, slots=True)
+class _CitationBatchOutcome:
+    """一个引用支持批次的结果与调用审计。"""
+
+    attempt_id: str
+    batch_index: int
+    expected_occurrence_ids: tuple[str, ...]
+    result: Literal["pass", "fail", "pending"]
+    citations: tuple[CitationResultOutput, ...]
+    payload: dict[str, Any]
+    error_code: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _CitationAttemptOutcome:
+    """一个 attempt 的全部批次合并后的最终引用支持结果。"""
 
     attempt_id: str
     result: Literal["pass", "fail", "pending"]
@@ -1434,38 +1496,276 @@ class _JudgeBudget:
         self._requests += max(0, 2 - actual_requests)
 
 
-def _add_citation_task_or_pending(
-    service: EvaluationJudgmentService,
+def _build_citation_task(
     *,
-    revision_id: str,
     attempt_id: str,
     answer: str,
     citations: list[CitationEvidenceInput],
-    citation_tasks: list[_PreparedCitationTask],
-) -> None:
-    """加入引用语义检查；超限时只把该共享检查记为 pending。"""
+) -> _PreparedCitationTask | None:
+    """按答案语义上下文构建有界引用检查批次。"""
 
-    evidence_chars = sum(len(item.text) for item in citations)
-    if evidence_chars > MAX_JUDGE_EVIDENCE_CHARS:
-        service._persist_citation_support(
-            revision_id,
-            _CitationOutcome(
-                attempt_id=attempt_id,
-                result="pending",
-                payload={
-                    "prompt_version": CITATION_SUPPORT_PROMPT_VERSION,
-                    "evidence_char_count": evidence_chars,
-                    "error": "citation_support_input_too_large",
-                },
-                error_code="citation_support_input_too_large",
-            ),
+    contexts = split_citation_contexts(answer)
+    evidence_by_id = {item.block_id: item for item in citations}
+    occurrences: list[CitationOccurrenceInput] = []
+    preflight_failures: list[_CitationPreflightFailure] = []
+    for context in contexts:
+        for block_id in cited_block_ids(context.text):
+            if block_id not in evidence_by_id:
+                continue
+            occurrences.append(
+                CitationOccurrenceInput(
+                    occurrence_id=f"citation_{len(occurrences) + 1:04d}",
+                    block_id=block_id,
+                    context_id=context.context_id,
+                )
+            )
+    covered_block_ids = {item.block_id for item in occurrences}
+    for block_id in cited_block_ids(answer):
+        if block_id in covered_block_ids:
+            continue
+        occurrence = CitationOccurrenceInput(
+            occurrence_id=f"citation_{len(occurrences) + 1:04d}",
+            block_id=block_id,
+            context_id="context_missing",
         )
-        return
-    citation_tasks.append(
-        _PreparedCitationTask(
-            attempt_id=attempt_id,
-            packet=CitationSupportInput(answer=answer, citations=citations),
+        occurrences.append(occurrence)
+        preflight_failures.append(
+            _CitationPreflightFailure(
+                occurrence=occurrence,
+                input_chars=0,
+                error_code="citation_support_context_missing",
+            )
         )
+    if not occurrences:
+        return None
+
+    context_by_id = {item.context_id: item for item in contexts}
+    batches: list[CitationSupportInput] = []
+    current: list[CitationOccurrenceInput] = []
+    preflight_occurrence_ids = {item.occurrence.occurrence_id for item in preflight_failures}
+    for occurrence in occurrences:
+        if occurrence.occurrence_id in preflight_occurrence_ids:
+            continue
+        candidate = [*current, occurrence]
+        candidate_packet = _citation_packet(
+            candidate,
+            context_by_id=context_by_id,
+            evidence_by_id=evidence_by_id,
+        )
+        candidate_chars = len(_json(candidate_packet.model_dump(mode="json")))
+        exceeds_occurrences = len(candidate) > MAX_CITATION_BATCH_OCCURRENCES
+        exceeds_chars = candidate_chars > MAX_CITATION_BATCH_INPUT_CHARS
+        if current and (exceeds_occurrences or exceeds_chars):
+            batches.append(
+                _citation_packet(
+                    current,
+                    context_by_id=context_by_id,
+                    evidence_by_id=evidence_by_id,
+                )
+            )
+            current = [occurrence]
+            single_packet = _citation_packet(
+                current,
+                context_by_id=context_by_id,
+                evidence_by_id=evidence_by_id,
+            )
+            if len(_json(single_packet.model_dump(mode="json"))) > (MAX_CITATION_BATCH_INPUT_CHARS):
+                preflight_failures.append(
+                    _CitationPreflightFailure(
+                        occurrence=occurrence,
+                        input_chars=len(_json(single_packet.model_dump(mode="json"))),
+                        error_code="citation_support_unit_too_large",
+                    )
+                )
+                current = []
+            continue
+        if not current and (exceeds_occurrences or exceeds_chars):
+            preflight_failures.append(
+                _CitationPreflightFailure(
+                    occurrence=occurrence,
+                    input_chars=candidate_chars,
+                    error_code="citation_support_unit_too_large",
+                )
+            )
+            continue
+        current = candidate
+    if current:
+        batches.append(
+            _citation_packet(
+                current,
+                context_by_id=context_by_id,
+                evidence_by_id=evidence_by_id,
+            )
+        )
+    return _PreparedCitationTask(
+        attempt_id=attempt_id,
+        batches=tuple(batches),
+        occurrences=tuple(occurrences),
+        preflight_failures=tuple(preflight_failures),
+        context_count=len(contexts),
+    )
+
+
+def _citation_packet(
+    occurrences: list[CitationOccurrenceInput],
+    *,
+    context_by_id: dict[str, CitationContextInput],
+    evidence_by_id: dict[str, CitationEvidenceInput],
+) -> CitationSupportInput:
+    context_ids = list(dict.fromkeys(item.context_id for item in occurrences))
+    block_ids = list(dict.fromkeys(item.block_id for item in occurrences))
+    return CitationSupportInput(
+        contexts=[context_by_id[context_id] for context_id in context_ids],
+        citations=[evidence_by_id[block_id] for block_id in block_ids],
+        occurrences=list(occurrences),
+    )
+
+
+def _merge_citation_outcomes(
+    task: _PreparedCitationTask,
+    batches: list[_CitationBatchOutcome],
+) -> _CitationAttemptOutcome:
+    """把 occurrence 级批次结果按 fail > pending > pass 合并到 block。"""
+
+    occurrence_results: dict[str, CitationResultOutput] = {}
+    occurrence_errors: dict[str, str] = {}
+    for batch in batches:
+        for citation in batch.citations:
+            occurrence_results[citation.occurrence_id] = citation
+        if batch.result != "pass":
+            for occurrence_id in batch.expected_occurrence_ids:
+                occurrence_errors[occurrence_id] = batch.error_code or "citation_support_failed"
+    for failure in task.preflight_failures:
+        occurrence_errors[failure.occurrence.occurrence_id] = failure.error_code
+
+    block_verdicts: dict[str, list[str]] = {}
+    block_reasons: dict[str, list[str]] = {}
+    block_quotes: dict[str, list[str]] = {}
+    for occurrence in task.occurrences:
+        verdict_result = occurrence_results.get(occurrence.occurrence_id)
+        verdict = verdict_result.verdict if verdict_result is not None else "unknown"
+        reason = (
+            verdict_result.reason
+            if verdict_result is not None
+            else occurrence_errors.get(
+                occurrence.occurrence_id,
+                "citation_support_occurrence_missing",
+            )
+        )
+        block_verdicts.setdefault(occurrence.block_id, []).append(verdict)
+        block_reasons.setdefault(occurrence.block_id, []).append(reason)
+        if verdict_result is not None:
+            quotes = block_quotes.setdefault(occurrence.block_id, [])
+            for quote in verdict_result.evidence_quotes:
+                if quote not in quotes:
+                    quotes.append(quote)
+
+    merged_citations: list[dict[str, Any]] = []
+    all_verdicts: list[str] = []
+    for block_id, verdicts in block_verdicts.items():
+        merged_verdict = (
+            "unsupported"
+            if "unsupported" in verdicts
+            else "unknown"
+            if "unknown" in verdicts
+            else "supported"
+        )
+        all_verdicts.append(merged_verdict)
+        merged_citations.append(
+            {
+                "block_id": block_id,
+                "verdict": merged_verdict,
+                "reason": "；".join(dict.fromkeys(block_reasons[block_id])),
+                "evidence_quotes": block_quotes.get(block_id, []),
+            }
+        )
+
+    preflight_error_codes = [item.error_code for item in task.preflight_failures]
+    batch_error_codes = [item.error_code for item in batches if item.error_code is not None]
+    if "unsupported" in all_verdicts:
+        result: Literal["pass", "fail", "pending"] = "fail"
+        error_code = "citation_not_supported"
+    elif "unknown" in all_verdicts or batch_error_codes or preflight_error_codes:
+        result = "pending"
+        error_code = (
+            preflight_error_codes[0]
+            if preflight_error_codes
+            else batch_error_codes[0]
+            if batch_error_codes
+            else "citation_support_unknown"
+        )
+    else:
+        result = "pass"
+        error_code = None
+
+    batch_payloads: list[dict[str, Any]] = []
+    for batch in batches:
+        batch_payload = dict(batch.payload)
+        batch_payload.update(
+            {
+                "batch_index": batch.batch_index,
+                "result": batch.result,
+                "occurrence_ids": list(batch.expected_occurrence_ids),
+            }
+        )
+        batch_payloads.append(batch_payload)
+    model_ids = [
+        value
+        for value in dict.fromkeys(
+            item.payload.get("model_id") for item in batches if item.payload.get("model_id")
+        )
+        if isinstance(value, str)
+    ]
+    return _CitationAttemptOutcome(
+        attempt_id=task.attempt_id,
+        result=result,
+        payload={
+            "prompt_version": CITATION_SUPPORT_PROMPT_VERSION,
+            "prompt_hash": CITATION_SUPPORT_PROMPT_HASH,
+            "model_ids": model_ids,
+            "batching": {
+                "strategy": "citation-context-v1",
+                "context_count": task.context_count,
+                "occurrence_count": len(task.occurrences),
+                "block_count": len(block_verdicts),
+                "batch_count": len(batches),
+                "preflight_failure_count": len(task.preflight_failures),
+                "max_occurrences_per_batch": MAX_CITATION_BATCH_OCCURRENCES,
+                "max_input_chars_per_batch": MAX_CITATION_BATCH_INPUT_CHARS,
+            },
+            "citations": merged_citations,
+            "occurrence_results": [
+                {
+                    **occurrence.model_dump(mode="json"),
+                    "verdict": (
+                        occurrence_results[occurrence.occurrence_id].verdict
+                        if occurrence.occurrence_id in occurrence_results
+                        else "unknown"
+                    ),
+                    "reason": (
+                        occurrence_results[occurrence.occurrence_id].reason
+                        if occurrence.occurrence_id in occurrence_results
+                        else occurrence_errors.get(
+                            occurrence.occurrence_id,
+                            "citation_support_occurrence_missing",
+                        )
+                    ),
+                }
+                for occurrence in task.occurrences
+            ],
+            "preflight_failures": [
+                {
+                    "occurrence_id": item.occurrence.occurrence_id,
+                    "block_id": item.occurrence.block_id,
+                    "context_id": item.occurrence.context_id,
+                    "input_chars": item.input_chars,
+                    "error": item.error_code,
+                }
+                for item in task.preflight_failures
+            ],
+            "batches": batch_payloads,
+        },
+        error_code=error_code,
     )
 
 
@@ -1542,19 +1842,21 @@ def _parse_citation_output(
     result: ChatCompletionResult,
     packet: CitationSupportInput,
 ) -> CitationSupportOutput:
-    """校验引用支持结论、block 归属和 quote 原文。"""
+    """校验引用支持结论、occurrence 覆盖和 quote 原文。"""
 
     try:
         parsed = CitationSupportOutput.model_validate_json(result.content)
     except ValidationError as error:
         raise ValueError("citation_output_invalid") from error
     evidence_by_id = {item.block_id: item.text for item in packet.citations}
-    result_ids = [item.block_id for item in parsed.citations]
-    if len(result_ids) != len(set(result_ids)) or set(result_ids) != set(evidence_by_id):
-        raise ValueError("citation_result_block_set_invalid")
+    occurrence_by_id = {item.occurrence_id: item for item in packet.occurrences}
+    result_ids = [item.occurrence_id for item in parsed.citations]
+    if len(result_ids) != len(set(result_ids)) or set(result_ids) != set(occurrence_by_id):
+        raise ValueError("citation_occurrence_set_invalid")
     for item in parsed.citations:
+        occurrence = occurrence_by_id[item.occurrence_id]
         for quote in item.evidence_quotes:
-            if quote not in evidence_by_id[item.block_id]:
+            if quote not in evidence_by_id[occurrence.block_id]:
                 raise ValueError("citation_evidence_quote_invalid")
     return parsed
 

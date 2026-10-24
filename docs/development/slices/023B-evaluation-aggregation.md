@@ -159,7 +159,7 @@
 ## 已知风险与后续
 
 - 人工改判的正确性依赖 reviewer 对证据和 criterion 的理解；
-- 长答案引用支持 pending 会阻塞正式 case pass，相关增强见 `BL-0007`；
+- 长答案引用支持 pending 会阻塞正式 case pass；相关能力已在 [025](./025-evaluation-citation-support-batching.md) 完成；
 - 人工复核 citation_support 时必须逐个 block 填写原因，长答案的人工成本可能较高；
 - 模型协议违规具有随机性；v2 已隔离伪造 Observation 的上下文污染，但长期发生率仍需观察；
 - 样本序号当前由开始时间推导；若后续出现恢复或并发异常，应在数据层固化稳定 ordinal；
