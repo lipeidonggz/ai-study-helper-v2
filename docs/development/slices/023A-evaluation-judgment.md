@@ -342,6 +342,6 @@
 ## 已知风险与后续
 
 - LLM Judge 本身存在随机抖动；023A 保存多次 Judgment 以支持后续校准，但尚未实现统计置信度和自动一致性评估。
-- 长答案可能产生大量引用，引用支持检查会因输入超限而 pending；长答案证据的分批检查另行评估。
+- 长答案可能产生大量引用；该输入超限缺口已由 [025](./025-evaluation-citation-support-batching.md) 按语义上下文 occurrence 分批修复。
 - LLM Judge 成本随 attempts × criteria 增长；023A 已有界并发、预算和失败暂停，但真实大规模成本仍需观察。
 - 人工覆盖、N/K 聚合、结果矩阵和基线留给 023B。

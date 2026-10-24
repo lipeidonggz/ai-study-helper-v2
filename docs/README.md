@@ -102,6 +102,8 @@
 - [024A · 评测结果矩阵人工验收清单（已完成）](development/manual-tests/024A-evaluation-result-matrix.md)
 - [024B · 基线管理与跨 run 比较（已完成）](development/slices/024B-evaluation-baseline-comparison.md)
 - [024B · 基线与比较人工验收清单（已完成）](development/manual-tests/024B-evaluation-baseline-comparison.md)
+- [025 · 长答案引用支持分批检查（已完成）](development/slices/025-evaluation-citation-support-batching.md)
+- [025 · 引用支持分批检查人工验收清单（已完成）](development/manual-tests/025-citation-support-batching.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库

@@ -7,11 +7,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.evaluation.citation_prompt import CitationContextInput
 from app.tracing.catalog import TraceCatalog, TraceInvalidError, TraceNotFoundError
 from app.tracing.models import TraceArtifactRecord, TraceDetailRecord
 
 CITATION_PATTERN = re.compile(r"【来源：([^】]+)】")
 MAX_JUDGE_EVIDENCE_CHARS = 60_000
+MAX_CITATION_BATCH_OCCURRENCES = 5
+MAX_CITATION_BATCH_INPUT_CHARS = 60_000
 
 
 class JudgeInputError(RuntimeError):
@@ -107,7 +110,7 @@ def build_judge_input(
         ) from error
 
     normalized_answer = answer or ""
-    cited_ids = _cited_block_ids(normalized_answer)
+    cited_ids = cited_block_ids(normalized_answer)
     evidence = _extract_evidence(trace, catalog, cited_ids)
     evidence_ids = {item.block_id for item in evidence}
     missing_ids = [block_id for block_id in cited_ids if block_id not in evidence_ids]
@@ -128,6 +131,82 @@ def build_judge_input(
         all_evidence=evidence,
         trace=trace,
     )
+
+
+def split_citation_contexts(answer: str) -> list[CitationContextInput]:
+    """把答案拆成引用所在的段落、列表项、表格行或普通行。"""
+
+    contexts: list[CitationContextInput] = []
+    paragraph: list[str] = []
+
+    def append_context(
+        kind: Literal["paragraph", "list_item", "table_row", "line"],
+        text: str,
+    ) -> None:
+        if not cited_block_ids(text):
+            return
+        contexts.append(
+            CitationContextInput(
+                context_id=f"context_{len(contexts) + 1:04d}",
+                kind=kind,
+                text=text.strip(),
+            )
+        )
+
+    def flush_paragraph() -> None:
+        if paragraph:
+            append_context("paragraph", "\n".join(paragraph))
+            paragraph.clear()
+
+    lines = answer.splitlines()
+    index = 0
+    in_code_fence = False
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.strip()
+        if stripped.startswith(("```", "~~~")):
+            flush_paragraph()
+            in_code_fence = not in_code_fence
+            index += 1
+            continue
+        if in_code_fence:
+            index += 1
+            continue
+        if not stripped:
+            flush_paragraph()
+            index += 1
+            continue
+        if _HEADING_PATTERN.match(line):
+            flush_paragraph()
+            append_context("line", line)
+            index += 1
+            continue
+        if _TABLE_ROW_PATTERN.match(line):
+            flush_paragraph()
+            append_context("table_row", line)
+            index += 1
+            continue
+        if _LIST_ITEM_PATTERN.match(line):
+            flush_paragraph()
+            item_lines = [line]
+            index += 1
+            while index < len(lines):
+                continuation = lines[index]
+                if (
+                    not continuation.strip()
+                    or _HEADING_PATTERN.match(continuation)
+                    or _TABLE_ROW_PATTERN.match(continuation)
+                    or _LIST_ITEM_PATTERN.match(continuation)
+                ):
+                    break
+                item_lines.append(continuation)
+                index += 1
+            append_context("list_item", "\n".join(item_lines))
+            continue
+        paragraph.append(line)
+        index += 1
+    flush_paragraph()
+    return contexts
 
 
 def _extract_evidence(
@@ -197,13 +276,20 @@ def _artifact_ref(value: object) -> TraceArtifactRecord | None:
         return None
 
 
-def _cited_block_ids(answer: str) -> list[str]:
+def cited_block_ids(answer: str) -> list[str]:
+    """按出现顺序返回答案显式引用的唯一 block ID。"""
+
     result: list[str] = []
     for match in CITATION_PATTERN.finditer(answer):
         for value in re.split(r"[,，、\s]+", match.group(1).strip()):
             if value and value not in result:
                 result.append(value)
     return result
+
+
+_HEADING_PATTERN = re.compile(r"^\s{0,3}#{1,6}\s+")
+_LIST_ITEM_PATTERN = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+_TABLE_ROW_PATTERN = re.compile(r"^\s*\|.*\|\s*$")
 
 
 def _declares_truncation(answer: str) -> bool:
