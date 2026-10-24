@@ -347,7 +347,7 @@ def test_schema_v1_upgrades_plan_facts_without_rewriting_them(tmp_path: Path) ->
         )
     finally:
         connection.close()
-    assert database.schema_version() == 5
+    assert database.schema_version() == 7
     assert (source_n, source_k) == (10, 9)
     assert mode == "formal"
     assert suite_statuses == {"sr_old": "retired", "sr_new": "active"}

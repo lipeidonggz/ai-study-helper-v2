@@ -100,6 +100,8 @@
 - [023B · 生效判定绑定与 N/K 聚合人工验收清单（已完成）](development/manual-tests/023B-evaluation-aggregation.md)
 - [024A · 评测结果矩阵（已完成）](development/slices/024A-evaluation-result-matrix.md)
 - [024A · 评测结果矩阵人工验收清单（已完成）](development/manual-tests/024A-evaluation-result-matrix.md)
+- [024B · 基线管理与跨 run 比较（已完成）](development/slices/024B-evaluation-baseline-comparison.md)
+- [024B · 基线与比较人工验收清单（已完成）](development/manual-tests/024B-evaluation-baseline-comparison.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库
