@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
+from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, StateGraph
 
 from app import __version__
@@ -42,12 +43,7 @@ from app.retrieval.service import RetrievalFailure, RetrievalReadService, Retrie
 from app.tracing.models import TraceMode, TraceStatus
 from app.tracing.store import TraceSession, TraceSpanHandle, TraceStore, new_trace_id
 
-AGENT_LOOP_VERSION = "react-langgraph-v2"
-HISTORY_ASSISTANT_WRAPPER = "Assistant response:\n"
-PROTOCOL_ERROR_ASSISTANT_PLACEHOLDER = (
-    "[本次模型响应格式错误，原文已由 Harness 省略。"
-    "请重新按协议输出一个 Thought 和一个 Action，不得编造 Observation。]"
-)
+AGENT_LOOP_VERSION = "react-structured-v3"
 _PARTIAL_ANSWER_NOTICE = "**内容未完**：本次回答因运行预算限制提前结束，以上内容可能不完整。"
 _TRUNCATION_NOTICE_MARKERS = (
     "内容未完",
@@ -73,6 +69,7 @@ class AgentRunConfig:
     max_request_tokens: int = 400_000
     finalization_reserve_tokens: int = 4_000
     max_output_tokens: int = 8_192
+    max_protocol_errors: int = 2
 
     def __post_init__(self) -> None:
         if self.max_tool_calls < 0:
@@ -85,6 +82,8 @@ class AgentRunConfig:
             raise ValueError("finalization reserve must be within request budget")
         if self.max_output_tokens <= 0:
             raise ValueError("max_output_tokens must be positive")
+        if self.max_protocol_errors <= 0:
+            raise ValueError("max_protocol_errors must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +138,7 @@ class _AgentGraphState(TypedDict, total=False):
     output_tokens: int
     tools_enabled: bool
     finalization_mode: bool
+    protocol_errors: int
     current_system_prompt: str
     next_context_estimate: int | None
     context_estimate_source: Literal["provider_anchor", "estimated"]
@@ -310,6 +310,7 @@ class AgentRuntime:
                     "max_request_tokens": self._config.max_request_tokens,
                     "finalization_reserve_tokens": self._config.finalization_reserve_tokens,
                     "max_output_tokens": self._config.max_output_tokens,
+                    "max_protocol_errors": self._config.max_protocol_errors,
                 },
             )
         except Exception:
@@ -495,15 +496,22 @@ class _AgentGraphExecution:
             "output_tokens": 0,
             "tools_enabled": True,
             "finalization_mode": False,
+            "protocol_errors": 0,
             "next_context_estimate": None,
             "context_estimate_source": "estimated",
             "sources": [],
             "current_turn_span": None,
         }
-        final = await self._graph.ainvoke(
-            initial,
-            {"recursion_limit": self._config.max_tool_calls * 3 + 20},
-        )
+        final = initial
+        try:
+            async for state in self._graph.astream(
+                initial,
+                {"recursion_limit": self._config.max_tool_calls * 3 + 20},
+                stream_mode="values",
+            ):
+                final = cast(_AgentGraphState, state)
+        except GraphRecursionError:
+            final = self._protocol_loop_state(final)
         status = final.get("status", "failed")
         if status == "running":
             status = "failed"
@@ -528,6 +536,29 @@ class _AgentGraphExecution:
             output_tokens=final.get("output_tokens", 0),
             sources=final.get("sources", []),
             events=tuple(final.get("events", [])),
+        )
+
+    def _protocol_loop_state(self, state: _AgentGraphState) -> _AgentGraphState:
+        """把无法收敛的图循环转换为可判定的产品失败终态。"""
+
+        events = list(state.get("events", []))
+        limitations = _with_limitation(
+            list(state.get("limitations", [])),
+            code="agent_protocol_loop",
+            message="Agent 协议多次无法收敛，已停止继续调用模型。",
+            parameter="max_protocol_errors",
+            limit=self._config.max_protocol_errors,
+        )
+        return self._terminal_state(
+            state,
+            events=events,
+            status="failed",
+            reason="agent_protocol_loop",
+            extra={
+                "limitations": limitations,
+                "tools_enabled": False,
+                "finalization_mode": True,
+            },
         )
 
     def _build_graph(self):
@@ -987,10 +1018,7 @@ class _AgentGraphExecution:
             state.get("input_tokens", 0) + current_input_tokens + failed_attempt_input_tokens
         )
         output_tokens = state.get("output_tokens", 0) + current_output_tokens
-        assistant_wrapper_tokens = self._token_counter.count(HISTORY_ASSISTANT_WRAPPER)
-        next_context_estimate = (
-            current_input_tokens + current_output_tokens + assistant_wrapper_tokens
-        )
+        next_context_estimate = current_input_tokens + current_output_tokens
         next_context_estimate_source = (
             "provider_anchor" if provider_usage_available else "estimated"
         )
@@ -1023,14 +1051,9 @@ class _AgentGraphExecution:
             ),
         )
         try:
-            if _contains_fabricated_observation(result.content):
-                raise ActionProtocolError(
-                    "model response contains Observation; "
-                    "only Harness may produce Observation after dispatching a tool"
-                )
             action = parse_action(result.content)
         except ActionProtocolError as protocol_error:
-            if finalization_mode or result.finish_reason == "length":
+            if result.finish_reason == "length":
                 reason = (
                     "request_budget_exceeded" if finalization_mode else "answer_output_truncated"
                 )
@@ -1068,18 +1091,73 @@ class _AgentGraphExecution:
                         "current_system_prompt": system_prompt,
                         "next_context_estimate": next_context_estimate,
                         "context_estimate_source": next_context_estimate_source,
+                        "protocol_errors": state.get("protocol_errors", 0),
                     },
                 )
-            observation = _observation(
-                harness_status="protocol_error",
-                tool=None,
-                payload=None,
-                message=str(protocol_error),
-            )
-            observation_text = f"Observation:\n{_canonical_json(observation)}"
-            observation_tokens = self._token_counter.count(observation_text)
-            history.append(f"{HISTORY_ASSISTANT_WRAPPER}{PROTOCOL_ERROR_ASSISTANT_PLACEHOLDER}")
-            history.append(observation_text)
+            if finalization_mode:
+                answer, visible_suffix = _partial_answer_with_notice(outcome.emitted_answer)
+                if visible_suffix:
+                    self._record_event(
+                        events,
+                        AgentEvent(
+                            event_type="answer_delta",
+                            payload={"delta": visible_suffix},
+                        ),
+                    )
+                protocol_errors = state.get("protocol_errors", 0) + 1
+                limitations = _with_limitation(
+                    limitations,
+                    code="agent_protocol_loop",
+                    message="强制最终回答阶段仍未输出合法 finish JSON，Agent 已停止。",
+                    parameter="max_protocol_errors",
+                    limit=self._config.max_protocol_errors,
+                )
+                self._record_event(
+                    events,
+                    AgentEvent(
+                        event_type="protocol_error",
+                        payload={
+                            "message": str(protocol_error),
+                            "turn": agent_turns,
+                            "count": protocol_errors,
+                            "max_protocol_errors": self._config.max_protocol_errors,
+                            "finalization_required": True,
+                        },
+                    ),
+                )
+                return self._terminal_state(
+                    state,
+                    events=events,
+                    status="failed",
+                    reason="agent_protocol_loop",
+                    extra={
+                        "history": history,
+                        "final_answer": answer,
+                        "limitations": limitations,
+                        "agent_turns": agent_turns,
+                        "model_calls": model_calls,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "tools_enabled": False,
+                        "finalization_mode": True,
+                        "protocol_errors": protocol_errors,
+                        "current_system_prompt": system_prompt,
+                        "next_context_estimate": next_context_estimate,
+                        "context_estimate_source": next_context_estimate_source,
+                    },
+                )
+            protocol_errors = state.get("protocol_errors", 0) + 1
+            enter_finalization = protocol_errors >= self._config.max_protocol_errors
+            protocol_message = {
+                "type": "protocol_error",
+                "message": str(protocol_error),
+                "protocol_error_count": protocol_errors,
+                "max_protocol_errors": self._config.max_protocol_errors,
+                "tools_enabled": not enter_finalization,
+            }
+            protocol_text = _canonical_json(protocol_message)
+            protocol_tokens = self._token_counter.count(protocol_text)
+            history.append(protocol_text)
             self._record_event(
                 events,
                 AgentEvent(
@@ -1087,7 +1165,10 @@ class _AgentGraphExecution:
                     payload={
                         "message": str(protocol_error),
                         "turn": agent_turns,
-                        "result_tokens": observation_tokens,
+                        "count": protocol_errors,
+                        "max_protocol_errors": self._config.max_protocol_errors,
+                        "finalization_required": enter_finalization,
+                        "result_tokens": protocol_tokens,
                     },
                 ),
             )
@@ -1095,8 +1176,20 @@ class _AgentGraphExecution:
                 trace_turn,
                 status="error",
                 error_code="protocol_error",
-                attributes={"app.protocol_error": str(protocol_error)},
+                attributes={
+                    "app.protocol_error": str(protocol_error),
+                    "app.protocol_error_count": protocol_errors,
+                    "app.finalization_required": enter_finalization,
+                },
             )
+            if enter_finalization:
+                limitations = _with_limitation(
+                    limitations,
+                    code="agent_protocol_error_finalization",
+                    message="模型连续输出不符合结构化协议，已关闭工具并要求最终回答。",
+                    parameter="max_protocol_errors",
+                    limit=self._config.max_protocol_errors,
+                )
             return {
                 "history": history,
                 "events": events,
@@ -1105,15 +1198,16 @@ class _AgentGraphExecution:
                 "model_calls": model_calls,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
-                "tools_enabled": tools_enabled,
-                "finalization_mode": finalization_mode,
+                "tools_enabled": not enter_finalization,
+                "finalization_mode": enter_finalization,
+                "protocol_errors": protocol_errors,
                 "current_system_prompt": system_prompt,
-                "next_context_estimate": next_context_estimate + observation_tokens,
+                "next_context_estimate": next_context_estimate + protocol_tokens,
                 "context_estimate_source": next_context_estimate_source,
                 "limitations": limitations,
                 "current_turn_span": None,
             }
-        history.append(f"{HISTORY_ASSISTANT_WRAPPER}{result.content}")
+        history.append(result.content)
 
         if isinstance(action, FinishAction):
             if outcome.extractor is not None:
@@ -1184,6 +1278,7 @@ class _AgentGraphExecution:
                 "output_tokens": output_tokens,
                 "tools_enabled": tools_enabled,
                 "finalization_mode": finalization_mode,
+                "protocol_errors": 0,
                 "current_system_prompt": system_prompt,
                 "next_context_estimate": next_context_estimate,
                 "context_estimate_source": next_context_estimate_source,
@@ -1192,48 +1287,43 @@ class _AgentGraphExecution:
             }
 
         if not tools_enabled:
-            observation = _observation(
-                harness_status="tool_unavailable",
-                tool=action.tool_name,
-                payload=None,
-                message="tools are disabled during finalization",
+            answer, visible_suffix = _partial_answer_with_notice(outcome.emitted_answer)
+            if visible_suffix:
+                self._record_event(
+                    events,
+                    AgentEvent(
+                        event_type="answer_delta",
+                        payload={"delta": visible_suffix},
+                    ),
+                )
+            limitations = _with_limitation(
+                limitations,
+                code="agent_protocol_loop",
+                message="强制最终回答阶段仍输出工具调用，Agent 已停止。",
+                parameter="max_protocol_errors",
+                limit=self._config.max_protocol_errors,
             )
-            observation_text = f"Observation:\n{_canonical_json(observation)}"
-            observation_tokens = self._token_counter.count(observation_text)
-            history.append(observation_text)
-            self._record_event(
-                events,
-                AgentEvent(
-                    event_type="tool_unavailable",
-                    payload={
-                        "tool": action.tool_name,
-                        "reason": "finalization",
-                        "result_tokens": observation_tokens,
-                    },
-                ),
+            return self._terminal_state(
+                state,
+                events=events,
+                status="failed",
+                reason="agent_protocol_loop",
+                extra={
+                    "history": history,
+                    "final_answer": answer,
+                    "limitations": limitations,
+                    "agent_turns": agent_turns,
+                    "model_calls": model_calls,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "tools_enabled": False,
+                    "finalization_mode": True,
+                    "protocol_errors": state.get("protocol_errors", 0) + 1,
+                    "current_system_prompt": system_prompt,
+                    "next_context_estimate": next_context_estimate,
+                    "context_estimate_source": next_context_estimate_source,
+                },
             )
-            self._end_trace_turn(
-                trace_turn,
-                status="error",
-                error_code="tool_unavailable",
-                attributes={"app.reason": "finalization"},
-            )
-            return {
-                "history": history,
-                "events": events,
-                "pending_action": None,
-                "agent_turns": agent_turns,
-                "model_calls": model_calls,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "tools_enabled": False,
-                "finalization_mode": True,
-                "current_system_prompt": system_prompt,
-                "next_context_estimate": next_context_estimate + observation_tokens,
-                "context_estimate_source": next_context_estimate_source,
-                "limitations": limitations,
-                "current_turn_span": None,
-            }
         return {
             "history": history,
             "events": events,
@@ -1244,6 +1334,7 @@ class _AgentGraphExecution:
             "output_tokens": output_tokens,
             "tools_enabled": True,
             "finalization_mode": finalization_mode,
+            "protocol_errors": 0,
             "current_system_prompt": system_prompt,
             "next_context_estimate": next_context_estimate,
             "context_estimate_source": next_context_estimate_source,
@@ -1316,7 +1407,7 @@ class _AgentGraphExecution:
                 payload=None,
                 message="tool is not in the current whitelist",
             )
-            observation_text = f"Observation:\n{_canonical_json(observation)}"
+            observation_text = _canonical_json(observation)
             observation_tokens = self._token_counter.count(observation_text)
             history.append(observation_text)
             self._record_event(
@@ -1399,7 +1490,7 @@ class _AgentGraphExecution:
             payload=execution.payload,
             message=None,
         )
-        observation_text = f"Observation:\n{_canonical_json(observation)}"
+        observation_text = _canonical_json(observation)
         result_tokens = self._token_counter.count(observation_text)
         prospective = (state.get("next_context_estimate") or 0) + result_tokens
         if tool_span is not None and self._trace_session is not None:
@@ -1449,7 +1540,7 @@ class _AgentGraphExecution:
                 payload=None,
                 message="tool result would exceed the context budget",
             )
-            budget_text = f"Observation:\n{_canonical_json(budget_observation)}"
+            budget_text = _canonical_json(budget_observation)
             budget_tokens = self._token_counter.count(budget_text)
             history.append(budget_text)
             self._end_trace_turn(
@@ -1831,6 +1922,7 @@ def _observation(
     message: str | None,
 ) -> dict[str, Any]:
     return {
+        "type": "tool_result",
         "harness_status": harness_status,
         "tool": tool,
         "payload": payload,
@@ -1896,17 +1988,10 @@ def _render_answer_with_limitations(
     return f"{warning}\n\n{answer}"
 
 
-def _contains_fabricated_observation(content: str) -> bool:
-    """识别模型自行伪造的 Observation 标记。"""
-
-    normalized = content.casefold()
-    return "<observation>" in normalized or "\nobservation:" in normalized
-
-
 def _partial_answer_with_notice(answer: str | None) -> tuple[str, str]:
     """补齐用户可见的部分回答声明，并返回新增流式增量。
 
-    模型可能被输出长度截断在 ``Finish[...]`` 中间。此时已经流出的正文仍然
+    模型可能被输出长度截断在结构化 finish JSON 的 answer 字符串中间。此时已经流出的正文仍然
     是用户实际看到的内容，不能因为协议未闭合而丢弃；追加固定声明可保证用户
     知道回答不完整，并让 checker 获得稳定、可核验的截断事实。
     """

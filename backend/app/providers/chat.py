@@ -254,6 +254,7 @@ class DeepSeekChatProvider:
                 messages=message_payload,
                 temperature=self.profile.temperature,
                 max_tokens=max_output_tokens or self.profile.max_output_tokens,
+                response_format={"type": "json_object"},
                 extra_body={
                     "thinking": {"type": "enabled" if self.profile.thinking_enabled else "disabled"}
                 },
@@ -354,6 +355,7 @@ class DeepSeekChatProvider:
                 messages=message_payload,
                 temperature=self.profile.temperature,
                 max_tokens=max_output_tokens or self.profile.max_output_tokens,
+                response_format={"type": "json_object"},
                 stream=True,
                 stream_options={"include_usage": True},
                 extra_body={

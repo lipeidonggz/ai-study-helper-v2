@@ -624,6 +624,7 @@ def test_runner_waits_for_inflight_attempts_before_sealing(
         ("failed", "chat_upstream_unavailable", "infrastructure"),
         ("failed", "embedding_upstream_unavailable", "infrastructure"),
         ("failed", "evaluation_attempt_timeout", "infrastructure"),
+        ("failed", "agent_protocol_loop", "product"),
         ("canceled", "canceled_by_user", "canceled"),
         ("outcome_unknown", "evaluation_process_restarted", "unknown"),
     ],
