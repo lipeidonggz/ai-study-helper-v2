@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime
 
 from app.evaluation.models import (
     AttemptAggregateView,
+    AttemptView,
     CaseAggregateView,
     CaseRevisionView,
     CheckResultView,
     CheckReviewView,
     EffectiveJudgmentBindingView,
+    EvaluationResultMatrixView,
     PlanCaseView,
+    ResultMatrixAttemptView,
+    ResultMatrixCaseView,
+    ResultMatrixCategoryView,
+    ResultMatrixTotalsView,
     RunView,
 )
 
@@ -186,3 +193,145 @@ def _case_aggregate(
         result=result,
         reasons=reasons,
     )
+
+
+def build_result_matrix(
+    *,
+    run: RunView,
+    plan_cases: list[PlanCaseView],
+    cases: dict[str, CaseRevisionView],
+    attempt_aggregates: list[AttemptAggregateView],
+    case_aggregates: list[CaseAggregateView],
+) -> EvaluationResultMatrixView:
+    """把冻结用例、attempt 聚合与 N/K 结果投影成四层只读矩阵。"""
+
+    aggregate_by_attempt = {aggregate.attempt_id: aggregate for aggregate in attempt_aggregates}
+    aggregate_by_case = {aggregate.case_revision_id: aggregate for aggregate in case_aggregates}
+    attempts_by_case: dict[str, list[AttemptView]] = {}
+    for attempt in run.attempts:
+        attempts_by_case.setdefault(attempt.case_revision_id, []).append(attempt)
+
+    cases_by_category: dict[str, list[ResultMatrixCaseView]] = {}
+    for plan_case in plan_cases:
+        case = cases[plan_case.case_revision_id]
+        attempts = attempts_by_case.get(case.revision_id, [])
+        attempt_views = [
+            _result_matrix_attempt(
+                attempt=attempt,
+                sample_ordinal=index,
+                aggregate=aggregate_by_attempt.get(attempt.attempt_id),
+            )
+            for index, attempt in enumerate(attempts, start=1)
+        ]
+        aggregate = aggregate_by_case[case.revision_id]
+        category = case.category or "未分类"
+        cases_by_category.setdefault(category, []).append(
+            ResultMatrixCaseView(
+                case_id=case.case_id,
+                case_revision_id=case.revision_id,
+                category=category,
+                question=case.question,
+                n=aggregate.n,
+                k=aggregate.k,
+                attempt_count=len(attempt_views),
+                valid_samples=aggregate.valid_samples,
+                excluded_count=sum(item.result == "excluded" for item in attempt_views),
+                pass_count=aggregate.pass_count,
+                fail_count=aggregate.fail_count,
+                pending_count=aggregate.pending_count,
+                redline_violation_count=aggregate.redline_violation_count,
+                result=aggregate.result,
+                input_tokens=sum(item.input_tokens for item in attempt_views),
+                output_tokens=sum(item.output_tokens for item in attempt_views),
+                model_calls=sum(item.model_calls for item in attempt_views),
+                tool_calls=sum(item.tool_calls for item in attempt_views),
+                duration_ms=sum(item.duration_ms or 0 for item in attempt_views),
+                reasons=aggregate.reasons,
+                attempts=attempt_views,
+            )
+        )
+
+    categories = [
+        ResultMatrixCategoryView(
+            category=category,
+            totals=_result_matrix_totals(cases),
+            cases=cases,
+        )
+        for category, cases in cases_by_category.items()
+    ]
+    all_cases = [case for category in categories for case in category.cases]
+    return EvaluationResultMatrixView(
+        run_id=run.run_id,
+        run_status=run.status,
+        plan_mode=run.plan_mode,
+        suite_name=run.suite_name,
+        suite_revision_id=run.suite_revision_id,
+        suite_revision_number=run.suite_revision_number,
+        totals=_result_matrix_totals(all_cases),
+        categories=categories,
+    )
+
+
+def _result_matrix_attempt(
+    *,
+    attempt: AttemptView,
+    sample_ordinal: int,
+    aggregate: AttemptAggregateView | None,
+) -> ResultMatrixAttemptView:
+    return ResultMatrixAttemptView(
+        attempt_id=attempt.attempt_id,
+        sample_ordinal=sample_ordinal,
+        execution_status=attempt.execution_status,
+        outcome_class=attempt.outcome_class,
+        valid_sample=aggregate.valid_sample if aggregate is not None else False,
+        result=aggregate.result if aggregate is not None else "pending",
+        redline_violated=(
+            aggregate is not None and (aggregate.x_violated > 0 or bool(aggregate.check_failures))
+        ),
+        trace_id=attempt.trace_id,
+        trace_status=attempt.trace_status,
+        started_at=attempt.started_at,
+        finished_at=attempt.finished_at,
+        duration_ms=_duration_ms(attempt.started_at, attempt.finished_at),
+        input_tokens=attempt.input_tokens,
+        output_tokens=attempt.output_tokens,
+        model_calls=attempt.model_calls,
+        tool_calls=attempt.tool_calls,
+        reasons=[] if aggregate is None else aggregate.reasons,
+    )
+
+
+def _result_matrix_totals(cases: list[ResultMatrixCaseView]) -> ResultMatrixTotalsView:
+    attempts = [attempt for case in cases for attempt in case.attempts]
+    return ResultMatrixTotalsView(
+        case_count=len(cases),
+        case_pass_count=sum(case.result == "pass" for case in cases),
+        case_fail_count=sum(case.result == "fail" for case in cases),
+        case_pending_count=sum(case.result == "pending" for case in cases),
+        case_exploratory_count=sum(case.result == "exploratory" for case in cases),
+        attempt_count=len(attempts),
+        valid_samples=sum(attempt.valid_sample for attempt in attempts),
+        excluded_attempts=sum(attempt.result == "excluded" for attempt in attempts),
+        infrastructure_failures=sum(
+            attempt.outcome_class == "infrastructure" for attempt in attempts
+        ),
+        canceled_attempts=sum(attempt.outcome_class == "canceled" for attempt in attempts),
+        unknown_attempts=sum(attempt.outcome_class == "unknown" for attempt in attempts),
+        redline_violation_count=sum(case.redline_violation_count for case in cases),
+        input_tokens=sum(case.input_tokens for case in cases),
+        output_tokens=sum(case.output_tokens for case in cases),
+        model_calls=sum(case.model_calls for case in cases),
+        tool_calls=sum(case.tool_calls for case in cases),
+        duration_ms=sum(case.duration_ms for case in cases),
+    )
+
+
+def _duration_ms(started_at: str, finished_at: str | None) -> int | None:
+    if finished_at is None:
+        return None
+    try:
+        started = datetime.fromisoformat(started_at)
+        finished = datetime.fromisoformat(finished_at)
+    except ValueError:
+        return None
+    return max(0, int((finished - started).total_seconds() * 1_000))

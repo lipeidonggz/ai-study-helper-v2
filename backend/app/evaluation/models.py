@@ -535,6 +535,97 @@ class CaseAggregateView(BaseModel):
     reasons: list[str] = Field(default_factory=list)
 
 
+class ResultMatrixAttemptView(BaseModel):
+    """结果矩阵中的一次执行样本及其成本和证据入口。"""
+
+    attempt_id: str
+    sample_ordinal: int = Field(ge=1)
+    execution_status: str
+    outcome_class: Literal["product", "infrastructure", "canceled", "unknown"]
+    valid_sample: bool
+    result: Literal["pass", "fail", "pending", "excluded"]
+    redline_violated: bool
+    trace_id: str | None
+    trace_status: Literal["complete", "partial", "dropped", "missing"]
+    started_at: str
+    finished_at: str | None
+    duration_ms: int | None = Field(default=None, ge=0)
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    model_calls: int = Field(ge=0)
+    tool_calls: int = Field(ge=0)
+    reasons: list[str] = Field(default_factory=list)
+
+
+class ResultMatrixCaseView(BaseModel):
+    """一个 case 在结果矩阵中的 N/K、状态与资源汇总。"""
+
+    case_id: str
+    case_revision_id: str
+    category: str
+    question: str
+    n: int
+    k: int
+    attempt_count: int
+    valid_samples: int
+    excluded_count: int
+    pass_count: int
+    fail_count: int
+    pending_count: int
+    redline_violation_count: int
+    result: Literal["pass", "fail", "pending", "exploratory"]
+    input_tokens: int
+    output_tokens: int
+    model_calls: int
+    tool_calls: int
+    duration_ms: int
+    reasons: list[str] = Field(default_factory=list)
+    attempts: list[ResultMatrixAttemptView] = Field(default_factory=list)
+
+
+class ResultMatrixTotalsView(BaseModel):
+    """一个类别或整个 run 的结果与资源总量。"""
+
+    case_count: int
+    case_pass_count: int
+    case_fail_count: int
+    case_pending_count: int
+    case_exploratory_count: int
+    attempt_count: int
+    valid_samples: int
+    excluded_attempts: int
+    infrastructure_failures: int
+    canceled_attempts: int
+    unknown_attempts: int
+    redline_violation_count: int
+    input_tokens: int
+    output_tokens: int
+    model_calls: int
+    tool_calls: int
+    duration_ms: int
+
+
+class ResultMatrixCategoryView(BaseModel):
+    """按冻结 case category 分组的结果矩阵。"""
+
+    category: str
+    totals: ResultMatrixTotalsView
+    cases: list[ResultMatrixCaseView]
+
+
+class EvaluationResultMatrixView(BaseModel):
+    """从执行与判定事实重建的四层只读结果矩阵。"""
+
+    run_id: str
+    run_status: RunStatus
+    plan_mode: Literal["formal", "exploratory"]
+    suite_name: str | None
+    suite_revision_id: str | None
+    suite_revision_number: int | None
+    totals: ResultMatrixTotalsView
+    categories: list[ResultMatrixCategoryView]
+
+
 class EvaluationRevisionView(BaseModel):
     """一次判定任务的进度、版本和逐项结果。"""
 
@@ -557,6 +648,7 @@ class EvaluationRevisionView(BaseModel):
     checks: list[CheckResultView]
     attempt_aggregates: list[AttemptAggregateView] = Field(default_factory=list)
     case_aggregates: list[CaseAggregateView] = Field(default_factory=list)
+    result_matrix: EvaluationResultMatrixView | None = None
 
 
 class JudgePromptView(BaseModel):

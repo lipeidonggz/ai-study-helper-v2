@@ -13,7 +13,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import func, select
 
-from app.evaluation.aggregation import build_aggregates
+from app.evaluation.aggregation import build_aggregates, build_result_matrix
 from app.evaluation.citation_prompt import (
     CITATION_SUPPORT_PROMPT_HASH,
     CITATION_SUPPORT_PROMPT_VERSION,
@@ -430,6 +430,13 @@ class EvaluationJudgmentService:
                 checks=check_views,
                 reviews=review_views,
             )
+            result_matrix = build_result_matrix(
+                run=run,
+                plan_cases=plan_cases,
+                cases=case_views,
+                attempt_aggregates=attempt_aggregates,
+                case_aggregates=case_aggregates,
+            )
             return EvaluationRevisionView(
                 revision_id=row.revision_id,
                 execution_run_id=row.execution_run_id,
@@ -450,6 +457,7 @@ class EvaluationJudgmentService:
                 checks=check_views,
                 attempt_aggregates=attempt_aggregates,
                 case_aggregates=case_aggregates,
+                result_matrix=result_matrix,
             )
 
     def override_judgment(

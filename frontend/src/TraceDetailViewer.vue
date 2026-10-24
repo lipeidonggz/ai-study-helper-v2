@@ -81,6 +81,38 @@ const spanRows = computed(() => {
   }));
 });
 
+/** 把工具调用 span 转成调用树标题中的工具名与参数摘要。 */
+function toolCallSummary(
+  span: TraceSpan,
+): { label: string; title: string } | null {
+  if (span.kind !== "TOOL" || span.name !== "tool.call") {
+    return null;
+  }
+  const toolName =
+    typeof span.attributes["tool.name"] === "string"
+      ? span.attributes["tool.name"]
+      : "unknown";
+  const argumentsValue = span.attributes["app.tool_arguments"];
+  if (!argumentsValue || typeof argumentsValue !== "object") {
+    return {
+      label: `${toolName} · 参数未记录`,
+      title: `${toolName}\n当前 trace 模式未记录参数原文。`,
+    };
+  }
+  try {
+    const serialized = JSON.stringify(argumentsValue);
+    return {
+      label: `${toolName} ${serialized}`,
+      title: `${toolName}\n${JSON.stringify(argumentsValue, null, 2)}`,
+    };
+  } catch {
+    return {
+      label: `${toolName} · 参数无法展开`,
+      title: `${toolName}\n参数对象无法序列化。`,
+    };
+  }
+}
+
 const artifactById = computed(
   () =>
     new Map(
@@ -309,6 +341,13 @@ onBeforeUnmount(() => {
               {{ traceSpanKindLabel(row.span.kind) }}
             </span>
             <strong>{{ row.span.name }}</strong>
+            <span
+              v-if="toolCallSummary(row.span)"
+              class="trace-tool-call-summary"
+              :title="toolCallSummary(row.span)?.title"
+            >
+              {{ toolCallSummary(row.span)?.label }}
+            </span>
             <span>{{ traceSpanStatusLabel(row.span) }}</span>
           </span>
           <small>
@@ -642,6 +681,16 @@ onBeforeUnmount(() => {
 .trace-span-topline strong {
   color: #294532;
   font-size: 0.78rem;
+}
+
+.trace-tool-call-summary {
+  min-width: 0;
+  overflow: hidden;
+  color: #536b5b;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 0.69rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .trace-span-topline > span:last-child {

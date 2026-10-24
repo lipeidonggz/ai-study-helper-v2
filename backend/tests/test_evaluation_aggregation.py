@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.evaluation.aggregation import build_aggregates
+from app.evaluation.aggregation import build_aggregates, build_result_matrix
 from app.evaluation.models import (
     AttemptView,
     CaseRevisionView,
@@ -247,3 +247,108 @@ def test_case_aggregation_applies_k_threshold_exploratory_and_redline() -> None:
     )[1][0]
     assert redline.result == "fail"
     assert redline.redline_violation_count == 1
+
+
+def test_result_matrix_groups_categories_and_separates_quality_from_cost() -> None:
+    first_case = _case([_criterion("R", "r1")]).model_copy(
+        update={
+            "case_id": "c1-001",
+            "revision_id": "cr_first",
+            "category": "1 有没有",
+        }
+    )
+    second_case = _case([_criterion("R", "r2")]).model_copy(
+        update={
+            "case_id": "c2-001",
+            "revision_id": "cr_second",
+            "category": "2 是什么",
+        }
+    )
+    attempts = [
+        _attempt("attempt_first_1", "cr_first"),
+        _attempt("attempt_first_2", "cr_first"),
+        _attempt("attempt_first_infra", "cr_first").model_copy(
+            update={
+                "execution_status": "failed",
+                "outcome_class": "infrastructure",
+                "error_code": "chat_upstream_unavailable",
+                "input_tokens": 100,
+                "output_tokens": 20,
+            }
+        ),
+        _attempt("attempt_second_1", "cr_second"),
+    ]
+    run = _run(attempts).model_copy(
+        update={
+            "attempts": attempts,
+            "totals": {
+                "attempts": 4,
+                "valid_samples": 3,
+                "infrastructure_failures": 1,
+            },
+        }
+    )
+    first_plan = _plan(first_case, n=2, k=2)
+    second_plan = _plan(second_case, n=1, k=1)
+    first_criterion = first_case.criteria[0]
+    second_criterion = second_case.criteria[0]
+    bindings = [
+        _binding("attempt_first_1", first_criterion, "pass"),
+        _binding("attempt_first_2", first_criterion, "pass"),
+        _binding("attempt_second_1", second_criterion, "pending"),
+    ]
+    checks = [
+        _integrity_check("attempt_first_1"),
+        _integrity_check("attempt_first_2"),
+        _integrity_check("attempt_second_1"),
+    ]
+    attempt_aggregates, case_aggregates = build_aggregates(
+        run=run,
+        plan_cases=[first_plan, second_plan],
+        cases={
+            first_case.revision_id: first_case,
+            second_case.revision_id: second_case,
+        },
+        bindings=bindings,
+        checks=checks,
+        reviews=[],
+    )
+
+    matrix = build_result_matrix(
+        run=run,
+        plan_cases=[first_plan, second_plan],
+        cases={
+            first_case.revision_id: first_case,
+            second_case.revision_id: second_case,
+        },
+        attempt_aggregates=attempt_aggregates,
+        case_aggregates=case_aggregates,
+    )
+
+    assert [category.category for category in matrix.categories] == [
+        "1 有没有",
+        "2 是什么",
+    ]
+    assert matrix.totals.case_count == 2
+    assert matrix.totals.case_pass_count == 1
+    assert matrix.totals.case_pending_count == 1
+    assert matrix.totals.attempt_count == 4
+    assert matrix.totals.valid_samples == 3
+    assert matrix.totals.infrastructure_failures == 1
+    assert matrix.totals.input_tokens == 103
+
+    first_case_matrix = matrix.categories[0].cases[0]
+    assert first_case_matrix.result == "pass"
+    assert first_case_matrix.valid_samples == 2
+    assert first_case_matrix.excluded_count == 1
+    assert [attempt.sample_ordinal for attempt in first_case_matrix.attempts] == [
+        1,
+        2,
+        3,
+    ]
+    assert first_case_matrix.attempts[2].result == "excluded"
+    assert first_case_matrix.attempts[2].valid_sample is False
+
+    second_case_matrix = matrix.categories[1].cases[0]
+    assert second_case_matrix.result == "pending"
+    assert second_case_matrix.pending_count == 1
