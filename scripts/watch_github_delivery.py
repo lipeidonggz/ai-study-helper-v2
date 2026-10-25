@@ -79,6 +79,8 @@ class GitHubClient:
                 raw = response.read().decode("utf-8")
         except HTTPError as error:
             raise GitHubApiError(f"GitHub API returned HTTP {error.code}") from error
+        except TimeoutError as error:
+            raise GitHubApiError("GitHub API request timed out") from error
         except URLError as error:
             raise GitHubApiError(f"GitHub API is unreachable: {error.reason}") from error
         try:

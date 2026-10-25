@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from scripts.watch_github_delivery import evaluate_delivery, latest_required_checks
+import pytest
+from scripts.watch_github_delivery import (
+    GitHubApiError,
+    GitHubClient,
+    evaluate_delivery,
+    latest_required_checks,
+)
 
 
 def _check(name: str, *, conclusion: str = "success", run_id: int = 1) -> dict:
@@ -108,3 +114,15 @@ def test_delivery_waits_when_required_checks_are_not_complete() -> None:
     )
 
     assert evaluation.state == "pending"
+
+
+def test_github_read_timeout_becomes_stable_api_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raise_timeout(*_args: object, **_kwargs: object) -> None:
+        raise TimeoutError("read timed out")
+
+    monkeypatch.setattr("scripts.watch_github_delivery.urlopen", raise_timeout)
+
+    with pytest.raises(GitHubApiError, match="request timed out"):
+        GitHubClient("test-token").get_json("https://api.github.com/test")
