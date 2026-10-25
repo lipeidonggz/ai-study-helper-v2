@@ -25,3 +25,4 @@
 - [07 · 金标准不是参考答案：为什么最后把判官输入删到只剩答案和一条判据](./07-gold-standard-criterion-contract.md)
 - [08 · 我不再逐行审查 AI 代码，但我知道该在哪里停下来](./08-human-ai-collaboration-retrospective.md)
 - [09 · 模型太会演完整 ReAct：为什么只阻止伪造 Observation 还不够](./09-structured-react-protocol.md)
+- [10 · DeepSeek RAG 实战：为问答系统实现可验证的可信引用（附源码）](./10-deepseek-rag-trustworthy-citations.md)
