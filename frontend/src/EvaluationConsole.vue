@@ -1002,6 +1002,17 @@ function statusText(status: string): string {
   return labels[status] ?? status;
 }
 
+/** 为结果矩阵中的 case 提供仅用于扫读的背景提示，不改变 case 聚合状态。 */
+function matrixCaseAttentionClass(matrixCase: ResultMatrixCaseView): string {
+  if (matrixCase.attempts.some((attempt) => attempt.result === "fail")) {
+    return "matrix-case-attention-fail";
+  }
+  if (matrixCase.attempts.some((attempt) => attempt.result === "pending")) {
+    return "matrix-case-attention-pending";
+  }
+  return "";
+}
+
 /** 解释 attempt 是否计入有效评测样本。 */
 function outcomeClassText(outcomeClass: AttemptView["outcome_class"]): string {
   const labels: Record<AttemptView["outcome_class"], string> = {
@@ -4152,7 +4163,10 @@ onBeforeUnmount(() => {
                   v-for="matrixCase in category.cases"
                   :key="matrixCase.case_revision_id"
                   class="eval-matrix-case"
-                  :class="`matrix-result-${matrixCase.result}`"
+                  :class="[
+                    `matrix-result-${matrixCase.result}`,
+                    matrixCaseAttentionClass(matrixCase),
+                  ]"
                 >
                   <summary>
                     <div class="eval-matrix-case-title">
@@ -7751,6 +7765,16 @@ onBeforeUnmount(() => {
   border-left-color: #927d42;
 }
 
+.eval-matrix-case.matrix-case-attention-fail {
+  border-left-color: #b23c3c;
+  background: #fff1f0;
+}
+
+.eval-matrix-case.matrix-case-attention-pending {
+  border-left-color: #b07820;
+  background: #fff7e5;
+}
+
 .eval-matrix-case > summary {
   display: grid;
   grid-template-columns: minmax(210px, 1.6fr) repeat(6, minmax(86px, auto));
@@ -7803,11 +7827,11 @@ onBeforeUnmount(() => {
 }
 
 .eval-matrix-attempt.matrix-result-fail {
-  background: #fff7f7;
+  background: #fdebea;
 }
 
 .eval-matrix-attempt.matrix-result-pending {
-  background: #fffaf0;
+  background: #fff4d9;
 }
 
 .eval-matrix-attempt.matrix-result-excluded {
