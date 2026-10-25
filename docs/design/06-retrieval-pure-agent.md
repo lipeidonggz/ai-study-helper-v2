@@ -296,7 +296,7 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 
 ### 8.3 初版系统提示词：ReAct ＋ 产品约束
 
-下面是模型可见的提示词骨架，采用结构化 ReAct 协议。外层引擎负责注入工具、校验 JSON、执行工具并追加 Runtime-only `tool_result`；收到 `finish` 后停止循环。`response_protocol`、`tool_result_protocol`、`scope`、`evidence`、`coverage`、`citation`、`answer`、`termination` 各自只承担一类规则，工具自身的局部选择条件放在工具描述中。完整发布文本以代码中的 `chat-v4` 为准，并受 [ADR 0011](../decisions/0011-structured-react-response-protocol.md) 约束。
+下面是模型可见的提示词骨架，采用结构化 ReAct 协议。外层引擎负责注入工具、校验 JSON、执行工具并追加 Runtime-only `tool_result`；收到 `finish` 后冻结正文并停止循环，再由独立 citation annotator 选择 `claim span → block_ids`。`response_protocol`、`tool_result_protocol`、`scope`、`evidence`、`coverage`、`citation`、`answer`、`termination` 各自只承担一类规则，工具自身的局部选择条件放在工具描述中。完整发布文本以代码中的 `chat-v5` 为准，并受 [ADR 0011](../decisions/0011-structured-react-response-protocol.md) 与 [ADR 0012](../decisions/0012-harness-owned-claim-citation-annotation.md) 约束。
 
 `{collection_status}` 由 Harness 从请求开始时固定的 collection 快照注入，模型不能修改。其结构为 `{"snapshot_id":"...","completeness":"complete|partial","failed_documents":[{"doc_id":"...","title":"...","reason":"..."}]}`；`complete` 时列表为空，`partial` 时必须列出未成功入库的文档，供模型执行遗漏透明。
 
@@ -371,17 +371,16 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 </coverage>
 
 <citation>
-1. 当用户要求区分来源时，每一个由文档块支持的结论，必须在该句或该列表项的末尾标注来源。
-2. 来源格式：【来源：block_id】；多个支持块并列书写。`block_id` 已全局唯一且包含文档身份，不得再前置一次 `doc_id`。
-3. 只能标注本次请求中工具实际返回、且内容直接支持该结论的块；不得编造来源，也不得把主题相近但不能直接支持该结论的块挂上去。
-4. 没有来源标注的内容视为模型补充或推断，不再额外添加“模型补充”标签。
-5. 普通回答不要求逐句标注；但只要声称某内容来自文档，就必须有对应来源标记。
+1. 不要在 finish.answer 中输出“来源”、block_id、引用角标或任何形式的引用占位符。
+2. 引用由 Harness 在正文生成完成后，基于本次工具真实返回的证据块独立标注。
+3. 保持答案正文连贯，并准确表达哪些内容来自工具证据、哪些属于补充或推断。
+4. 不得声称某内容来自文档，除非本次工具结果确实直接支持该内容。
 </citation>
 
 <answer>
 1. 答案形态跟随问题：定义给定义，原因给因果链，步骤按顺序，比较使用同一组维度，清单给清单。
 2. 对“哪个更好／该听谁的”类问题，陈述双方观点、前提和依据，不替用户裁决。
-3. 当用户要求区分来源时，文档支持的结论按 <citation> 规则标注；未标注内容视为模型补充或推断。
+3. 文档支持的结论直接表达，不写引用标记；后置 citation annotation 会基于冻结正文生成来源关系。
 4. 最终回答只给答案、澄清或缺口说明，不展示内部运行轨迹。
 </answer>
 
@@ -405,7 +404,7 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 </history>
 ```
 
-**引用渲染边界**：模型输出的是内部机器键 `【来源：block_id】`；前端必须把它解析为可读的文档标题、来源名和块预览，并支持点击回看。解析不到标题或块时必须显式标成失效引用，不能把原始 `block_id` 当作最终用户文案。
+**引用标注与渲染边界**：主回答只生成一次正文，不得写 inline 引用标记。正文完成后，Harness 按段落、列表项、表格行和句末标点确定性切出 span；独立 annotator 只返回 `span_id + block_ids[]`，不得返回或改写正文。Harness 校验 span 精确落在原文、block ID 属于本次真实工具证据后，以 artifact 保存结构化 annotation；前端按 offset 在渲染副本上追加可点击来源，不修改原答案。引用详情默认以锚定悬浮卡就地展示标题、章节和证据摘要，不滚动主页面；用户显式选择“查看文档详情”时才离开阅读位置。标注失败时保留正文并将引用状态记为 pending，不能伪装成“无引用即通过”。历史 trace 中的 `【来源：block_id】` 仍可只读回退渲染与解析。
 
 **审阅重点**：这版只写“怎么工作”和产品功能边界，不写具体轮次、token、延迟、重试次数等质量预算；这些在 §9 的统一检查中再反向约束提示词与循环。
 
@@ -427,14 +426,14 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 | 质量属性 | 当前设计承接 | 设计覆盖 | 验证状态 | 待处理 |
 | --- | --- | --- | --- | --- |
 | **Q1 正确性** | Agentic 检索、五工具、证据规则、块级引用 | ✅ 闭合 | 未测 | 用 18 条用例和 N＝10／K＝9 验证内容正确性。 |
-| **Q2 可溯源** | `block_id`／`doc_id`／`section_path`＋文档标题／来源显示名解析接口＋`【来源：block_id】`内部引用键 | ✅ 闭合 | 未测 | 检索侧保证块可解析、原文可重建、UI 能把内部引用键解析成用户可读标题；引用块是否存在、是否支持相邻结论由判官设计核验。 |
+| **Q2 可溯源** | `block_id`／`doc_id`／`section_path`＋文档标题／来源显示名解析接口＋Harness 校验的 `span_id → block_ids[]` annotation | ✅ 闭合 | 未测 | 检索侧保证块可解析、原文可重建；UI 按 annotation offset 展示可读来源；引用块是否存在、是否支持该 claim 由判官使用同一结构化 annotation 核验。 |
 | **Q3 完整性／遗漏透明** | 请求固定 collection 快照；partial 状态显式注入提示词；coverage 提示词；工具返回范围内全量业务结果，Harness 统一计算 `result_tokens` 并在加入上下文前做唯一一次预算准入 | ✅ 闭合 | 未测 | 在用户预算内必须一次取全；范围过大时返回错误并建议缩小范围，不能返回半套结果。用 c7／c13／c15 验证。 |
-| **Q4 诚实性** | 文档事实必须有块、模型补充不得冒充原文；来源区分有明确触发条件 | ✅ 闭合 | 未测 | 待判官设计“来源归属”和“无证据文档声称”两类检查，并用反例回归；模型自报来源不能作为通过依据。 |
+| **Q4 诚实性** | 文档事实必须有块、模型补充不得冒充原文；引用由 Harness 后置标注且只接受本次真实证据 | ✅ 闭合 | 未测 | 用“无证据仍声称来源”“伪造 block ID”“同一段双 claim”和“标注 pending”做反例回归；模型自报正文引用不能作为通过依据。 |
 | **Q5 一致性** | 工具全序排序、固定预算、固定工具上限 | ✅ 闭合 | 未测 | Agentic 路径仍有随机性；需用 03 的 N＝10／K＝9 观察翻转和失败类型。 |
 | **Q6 表达合适** | 提示词按问题形态组织答案；模板结构稳定 | ✅ 闭合 | 未测 | 逐题验证定义、因果、步骤、比较、清单和换形态回答。 |
 | **Q7 边界合规** | `scope`、越界走 `finish`、歧义走澄清 | ✅ 闭合 | 未测 | 用 cf-001／cf-002 及其他越界样本验证。 |
-| **Q8 响应速度** | 快车道 H1、工具调用上限、用户可配置 100k 单次上下文与 400k 请求累计 token | ✅ 闭合 | 未测 | 首字延迟尚无实测；复杂题的预算收口和最终回答预留也要跑批确认。 |
-| **成本** | 8 次工具调用、单块默认约 450 token 目标（固定 sizing estimator）、用户可配置 100k／400k 预算 | ✅ 闭合 | 未测 | 当前数值是按 8 轮估算；需用实际 N、tokenizer、工具结果分布校准。 |
+| **Q8 响应速度** | 快车道 H1、工具调用上限、后置引用标注、用户可配置 100k 单次上下文与 400k 请求累计 token | ✅ 闭合 | 未测 | 首字延迟不等待引用标注；完整等待时间约增加一次模型调用，复杂题的预算收口和最终回答预留仍需跑批确认。 |
+| **成本** | 8 次工具调用、一次后置 claim annotation、单块默认约 450 token 目标（固定 sizing estimator）、用户可配置 100k／400k 预算 | ✅ 闭合 | 未测 | 当前按“多一次迭代”估算；需用实际 N、tokenizer、工具证据规模分布和 annotator 输出成本校准。 |
 | **安全** | Harness 工具白名单＋工具只读＋工具返回内容作为不可信资料；无写文件、代码执行和外部网络能力 | ✅ 闭合 | 未测 | 验证注入样本不会扩大工具权限、改变用户范围或伪造来源；验证未入白名单工具返回 `tool_unavailable`。 |
 | **隐私／数据主权** | 按 04 当前自用、公开语料前提 | ➖ 忽略 | 不适用 | 若改为面向他人或使用外部模型，必须重新评估模型通道和数据留存。 |
 | **可靠性／降级** | 业务错误不重试；协议错误转 Runtime-only `protocol_error`；瞬时工具／模型错误最多重试 1 次；预算错误直接终止；部分来源失败允许带缺口回答；终结轮失败返回确定性错误 | ✅ 闭合 | 未测 | 验证超时、限流、错误重试、部分来源失败和终结轮失败的行为；不单设“重试预算”。 |
@@ -517,10 +516,11 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 | **Span 公共字段** | `trace_id`／`span_id`／`parent_span_id`／名称／类型／开始与结束时间／`ok\|error`／错误码；产品扩展字段统一用 `app.*` | 构成可查询、可导出的调用树，而不是一堆互不关联的日志行 |
 | **`agent.turn`** | `turn_index`；结构化 `tool_call`／`finish` 的 artifact 引用（`metadata` 模式只记类型和 hash）；本轮的模型调用 span、工具 span 和预算检查结果 | 回答“Agent 为什么在这一轮选了这个工具／为什么在这里结束” |
 | **`llm.call`** | 实际尝试序号；provider／model／模型快照或版本；温度等采样参数；输入、输出、缓存 token；`finish_reason`；耗时；完整渲染提示词和模型原始输出的 artifact 引用（`metadata` 模式只记 hash） | 区分是提示词、模型、截断、协议解析还是预算导致的失败；支撑成本与复现 |
+| **`citation.annotation`** | provider／model、prompt 版本与 hash、答案 span 数、证据块数、实际尝试次数、输入／输出 token 和 annotation 状态；完整 annotator prompt／raw output 的 artifact 引用（`metadata` 模式只记 hash） | 解释引用为什么 pending、是否发生重试，以及后置标注的真实成本 |
 | **`tool.call`** | 工具名；规范化参数；实际尝试序号；Harness 状态；`payload` artifact 引用；返回数／`total`／`count`／Harness 计算的 `result_tokens`；耗时（`metadata` 模式对参数和 payload 只记 hash／计数） | 判断是选错工具、参数不对、结果为空、结果过大还是工具执行失败 |
 | **工具诊断属性** | `search_blocks` 记录 `search_mode`／`top_k`／`empty_reason`、query embedding 的 provider／model／request ID／token usage，以及每个返回结果的 `block_id`／`rank`／`score`；`list_blocks`／`scan_term` 记录范围与 `total`／`count`；`result_tokens` 由 Harness 统一记录；所有工具记录公共 `error.code` | 不仅知道返回了什么，还能解释“为什么是这些块、为什么是这个顺序、为什么为空” |
 | **`budget.check` 事件** | 作为 `agent.turn`／`tool.call` 上的 span event 记录：`phase=pre_turn\|post_tool\|finalization`、`limit_kind=context\|request`、`limit_tokens`、`observed_tokens`、`remaining_tokens`、`decision=admit\|reject\|terminate`、关联的轮次和工具调用 | 预算失败时能直接定位是哪一步、按什么额度和实际数量被拒绝，不只留下最终错误码 |
-| **`artifact`** | `artifact_id`（内容 hash）／类型／MIME／字节数／可选压缩方式／内容或外部引用；只在 `full` 模式生成 | 保存完整用户问题、渲染提示词、结构化模型输出、工具 payload 和最终回答；span 只挂引用，不重复塞正文 |
+| **`artifact`** | `artifact_id`（内容 hash）／类型／MIME／字节数／可选压缩方式／内容或外部引用；只在 `full` 模式生成 | 保存完整用户问题、渲染提示词、结构化模型输出、工具 payload、最终回答和 citation annotation；span 只挂引用，不重复塞正文 |
 
 **artifact 引用必须能解释“缺失”**：`metadata` 模式不生成正文 artifact，但 span 仍保留内容 hash 和 `artifact_state=omitted`，不能留下一个看起来可打开、实际悬空的引用。`full` 模式才要求所有引用都指向真实文件并通过 checksum。
 
@@ -866,7 +866,7 @@ trace manifest 同时记录 `replay_scope=metadata|evidence|retrieval`：`metada
 | **排序与检索常数** | RRF 参数、候选深度、Top-K 等查询时参数纳入 RetrievalProfile／ExecutionPlan 与 trace；相同快照下输入与参数一致时结果稳定 | 结果按 RRF 降序；平局按 `doc_id → block_index → block_id`；支持检索重放与版本差异定位 |
 | **构建完整性与错误** | 逐文档成功／失败状态、重试记录、切分统计、embedding 统计、索引完成状态；任一阶段失败都不能静默标记成功 | 状态页和工具可如实报告 partial；模型不得把 missing doc 当成正文无此内容；运维能定位失败阶段 |
 | **快照生命周期** | 旧快照只读；保留期限／数量可配置；删除前检查 trace 是否需要检索重放；损坏可检测 | 本机 trace 在快照存在时可检索重放；快照缺失时如实降级为证据复现 |
-| **引用可展示性** | 能由 `doc_id`／`block_id` 稳定解析出文档标题、来源显示名和块预览；历史快照中的映射不能因后续重命名而漂移 | 模型输出机器引用键，前端展示为用户可读、可点击的来源，不直接向非技术用户暴露内部 ID |
+| **引用可展示性** | 能由 `doc_id`／`block_id` 稳定解析出文档标题、来源显示名和块预览；历史快照中的映射不能因后续重命名而漂移 | Harness 后置 annotation 输出机器引用键，前端按 claim offset 展示为用户可读、可点击的来源，不直接向非技术用户暴露内部 ID |
 
 **不属于入库侧契约**：查询改写、选择工具、判断证据是否足够、组织答案和生成引用文本都由 Agent 完成；入库侧只保证“语料、结构、向量、索引、版本和状态可被可靠消费”。
 

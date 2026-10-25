@@ -13,6 +13,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import func, select
 
+from app.agent.citations import CitationAnnotation
 from app.evaluation.aggregation import build_aggregates, build_result_matrix
 from app.evaluation.citation_prompt import (
     CITATION_SUPPORT_PROMPT_HASH,
@@ -81,7 +82,7 @@ from app.tracing.catalog import TraceCatalog
 
 CHECKER_VERSIONS = {
     "citation_integrity": "1",
-    "citation_support": "2",
+    "citation_support": "3",
     "truncation_declared": "1",
 }
 JUDGE_MAX_OUTPUT_TOKENS = 2_048
@@ -757,6 +758,7 @@ class EvaluationJudgmentService:
                         attempt_id=attempt.attempt_id,
                         answer=attempt.answer,
                         citations=cited_evidence,
+                        annotations=built.citation_annotations,
                     )
                     if citation_task is not None:
                         citation_tasks.append(citation_task)
@@ -1501,41 +1503,63 @@ def _build_citation_task(
     attempt_id: str,
     answer: str,
     citations: list[CitationEvidenceInput],
+    annotations: list[CitationAnnotation],
 ) -> _PreparedCitationTask | None:
     """按答案语义上下文构建有界引用检查批次。"""
 
-    contexts = split_citation_contexts(answer)
     evidence_by_id = {item.block_id: item for item in citations}
     occurrences: list[CitationOccurrenceInput] = []
     preflight_failures: list[_CitationPreflightFailure] = []
-    for context in contexts:
-        for block_id in cited_block_ids(context.text):
-            if block_id not in evidence_by_id:
+    if annotations:
+        contexts = [
+            CitationContextInput(
+                context_id=annotation.annotation_id,
+                kind="claim",
+                text=annotation.text,
+            )
+            for annotation in annotations
+        ]
+        for annotation in annotations:
+            for block_id in annotation.block_ids:
+                if block_id not in evidence_by_id:
+                    continue
+                occurrences.append(
+                    CitationOccurrenceInput(
+                        occurrence_id=f"citation_{len(occurrences) + 1:04d}",
+                        block_id=block_id,
+                        context_id=annotation.annotation_id,
+                    )
+                )
+    else:
+        contexts = split_citation_contexts(answer)
+        for context in contexts:
+            for block_id in cited_block_ids(context.text):
+                if block_id not in evidence_by_id:
+                    continue
+                occurrences.append(
+                    CitationOccurrenceInput(
+                        occurrence_id=f"citation_{len(occurrences) + 1:04d}",
+                        block_id=block_id,
+                        context_id=context.context_id,
+                    )
+                )
+        covered_block_ids = {item.block_id for item in occurrences}
+        for block_id in cited_block_ids(answer):
+            if block_id in covered_block_ids:
                 continue
-            occurrences.append(
-                CitationOccurrenceInput(
-                    occurrence_id=f"citation_{len(occurrences) + 1:04d}",
-                    block_id=block_id,
-                    context_id=context.context_id,
+            occurrence = CitationOccurrenceInput(
+                occurrence_id=f"citation_{len(occurrences) + 1:04d}",
+                block_id=block_id,
+                context_id="context_missing",
+            )
+            occurrences.append(occurrence)
+            preflight_failures.append(
+                _CitationPreflightFailure(
+                    occurrence=occurrence,
+                    input_chars=0,
+                    error_code="citation_support_context_missing",
                 )
             )
-    covered_block_ids = {item.block_id for item in occurrences}
-    for block_id in cited_block_ids(answer):
-        if block_id in covered_block_ids:
-            continue
-        occurrence = CitationOccurrenceInput(
-            occurrence_id=f"citation_{len(occurrences) + 1:04d}",
-            block_id=block_id,
-            context_id="context_missing",
-        )
-        occurrences.append(occurrence)
-        preflight_failures.append(
-            _CitationPreflightFailure(
-                occurrence=occurrence,
-                input_chars=0,
-                error_code="citation_support_context_missing",
-            )
-        )
     if not occurrences:
         return None
 

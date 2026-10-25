@@ -15,6 +15,7 @@ import { API_TIMEOUT_MS, fetchWithTimeout } from "./api";
 import {
   normalizeChatSourceKey,
   renderChatMarkdown,
+  type ChatCitationAnnotation,
 } from "./chat-markdown";
 import TraceDetailViewer from "./TraceDetailViewer.vue";
 import {
@@ -233,6 +234,17 @@ interface AgentChatSource {
   tool: string;
 }
 
+/** 引用角标旁的来源悬浮卡及其视口锚点。 */
+interface ChatCitationPopover {
+  source: AgentChatSource;
+  left: number;
+  top: number;
+  placement: "above" | "below";
+}
+
+/** 后置 citation annotator 返回的一条答案 span 引用。 */
+interface AgentChatCitation extends ChatCitationAnnotation {}
+
 /** SSE 事件 envelope 中前端会消费的载荷字段。 */
 interface AgentStreamPayload {
   run_id?: string;
@@ -249,6 +261,9 @@ interface AgentStreamPayload {
   input_source?: "provider" | "estimated";
   output_source?: "provider" | "estimated";
   sources?: AgentChatSource[];
+  annotations?: AgentChatCitation[];
+  status?: "complete" | "pending" | "not_applicable";
+  error_code?: string | null;
   source_count?: number;
   message?: string;
   reason?: string;
@@ -501,6 +516,7 @@ const chatStatus = ref<AgentChatStatus>("idle");
 const chatActivity = ref("等待提问");
 const chatAnswer = ref("");
 const chatSources = ref<AgentChatSource[]>([]);
+const chatCitations = ref<AgentChatCitation[]>([]);
 const chatInputTokens = ref(0);
 const chatOutputTokens = ref(0);
 const chatInputSource = ref<"provider" | "estimated">("estimated");
@@ -510,9 +526,9 @@ const chatWarning = ref("");
 const chatStopping = ref(false);
 const chatLastEventId = ref(0);
 const chatSourcesExpanded = ref(false);
-const selectedChatSourceKey = ref("");
 const expandedChatSourceKey = ref("");
 const chatSourceNotice = ref("");
+const chatCitationPopover = ref<ChatCitationPopover | null>(null);
 const pendingChatEvents: AgentStreamEnvelope[] = [];
 
 let unlisten: UnlistenFn | undefined;
@@ -523,6 +539,7 @@ let disposed = false;
 let chatStreamController: AbortController | undefined;
 let pendingDocumentBlockId = "";
 let chatEventPump: Promise<void> | null = null;
+let activeCitationElement: HTMLElement | null = null;
 
 /** 从 URL hash 解析当前工作区；未知值回退到问答工作台。 */
 function readSectionFromHash(): AppSection {
@@ -717,19 +734,12 @@ const chatSourceNumbers = computed(() => {
 
 /** 渲染安全 Markdown；来源数字随本次运行来源列表实时更新。 */
 const chatAnswerHtml = computed(() =>
-  renderChatMarkdown(chatAnswer.value, chatSourceNumbers.value),
+  renderChatMarkdown(
+    chatAnswer.value,
+    chatSourceNumbers.value,
+    chatCitations.value,
+  ),
 );
-
-/** 展开来源区、目标卡片，并滚动到本次运行实际返回的来源。 */
-async function focusChatSource(sourceKey: string): Promise<void> {
-  chatSourcesExpanded.value = true;
-  selectedChatSourceKey.value = sourceKey;
-  expandedChatSourceKey.value = sourceKey;
-  await nextTick();
-  document
-    .getElementById(`chat-source-${encodeURIComponent(sourceKey)}`)
-    ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-}
 
 /** 展开或收起答案下方的来源汇总。 */
 function toggleChatSources(): void {
@@ -742,7 +752,47 @@ function toggleChatSourceCard(sourceKey: string): void {
     expandedChatSourceKey.value === sourceKey ? "" : sourceKey;
 }
 
-/** 代理安全 Markdown 中的来源链接点击，定位到本次运行来源卡片。 */
+/** 关闭引用悬浮卡，并恢复触发角标的可访问状态。 */
+function closeChatCitationPopover(): void {
+  if (activeCitationElement) {
+    activeCitationElement.classList.remove("active");
+    activeCitationElement.setAttribute("aria-expanded", "false");
+  }
+  activeCitationElement = null;
+  chatCitationPopover.value = null;
+}
+
+/** 在触发角标附近计算不会越出视口的悬浮卡位置。 */
+function openChatCitationPopover(
+  source: AgentChatSource,
+  citation: HTMLElement,
+): void {
+  closeChatCitationPopover();
+  const rect = citation.getBoundingClientRect();
+  const margin = 12;
+  const gap = 8;
+  const estimatedHeight = 230;
+  const width = Math.min(360, window.innerWidth - margin * 2);
+  const left = Math.min(
+    Math.max(rect.left, margin),
+    Math.max(margin, window.innerWidth - width - margin),
+  );
+  const showAbove =
+    window.innerHeight - rect.bottom < estimatedHeight &&
+    rect.top >= estimatedHeight;
+
+  chatCitationPopover.value = {
+    source,
+    left,
+    top: showAbove ? rect.top - gap : rect.bottom + gap,
+    placement: showAbove ? "above" : "below",
+  };
+  activeCitationElement = citation;
+  citation.classList.add("active");
+  citation.setAttribute("aria-expanded", "true");
+}
+
+/** 代理安全 Markdown 中的来源点击，就地展示引用内容而不滚动正文。 */
 function handleChatAnswerClick(event: MouseEvent): void {
   const target = event.target;
   if (!(target instanceof Element)) {
@@ -766,7 +816,45 @@ function handleChatAnswerClick(event: MouseEvent): void {
     return;
   }
   chatSourceNotice.value = "";
-  void focusChatSource(source.source_key);
+  openChatCitationPopover(source, citation);
+}
+
+/** 点击悬浮卡和引用角标之外的区域时关闭卡片。 */
+function handleDocumentPointerDown(event: PointerEvent): void {
+  if (!chatCitationPopover.value || !(event.target instanceof Element)) {
+    return;
+  }
+  if (
+    event.target.closest("[data-chat-citation-popover]") ||
+    event.target.closest("[data-chat-source-key]")
+  ) {
+    return;
+  }
+  closeChatCitationPopover();
+}
+
+/** Escape 或页面滚动时关闭悬浮卡，避免卡片与角标脱离。 */
+function handleChatCitationDismiss(event: Event): void {
+  if (
+    event.type === "keydown" &&
+    (event as KeyboardEvent).key !== "Escape"
+  ) {
+    return;
+  }
+  if (
+    event.type === "scroll" &&
+    event.target instanceof Element &&
+    event.target.closest("[data-chat-citation-popover]")
+  ) {
+    return;
+  }
+  closeChatCitationPopover();
+}
+
+/** 从悬浮卡进入文档详情；这是用户显式选择，不替代默认就地阅读。 */
+function openChatCitationSourceDocument(source: AgentChatSource): void {
+  closeChatCitationPopover();
+  openChatSourceDocument(source);
 }
 
 /** 只有当前活动快照与本次运行一致时才允许打开文档详情。 */
@@ -2461,6 +2549,7 @@ function agentChatErrorMessage(code: string, detail: string): string {
 
 /** 重置上一次问答的展示状态。 */
 function resetChatState(): void {
+  closeChatCitationPopover();
   pendingChatEvents.length = 0;
   chatRunId.value = "";
   chatTraceId.value = "";
@@ -2470,6 +2559,7 @@ function resetChatState(): void {
   chatActivity.value = "等待提问";
   chatAnswer.value = "";
   chatSources.value = [];
+  chatCitations.value = [];
   chatInputTokens.value = 0;
   chatOutputTokens.value = 0;
   chatInputSource.value = "estimated";
@@ -2479,7 +2569,6 @@ function resetChatState(): void {
   chatStopping.value = false;
   chatLastEventId.value = 0;
   chatSourcesExpanded.value = false;
-  selectedChatSourceKey.value = "";
   expandedChatSourceKey.value = "";
   chatSourceNotice.value = "";
 }
@@ -2566,6 +2655,28 @@ function applyAgentStreamEvent(envelope: AgentStreamEnvelope): void {
     case "sources_available":
       if (payload.sources) {
         mergeChatSources(payload.sources);
+      }
+      break;
+    case "citation_annotation_started":
+      chatActivity.value = "正在核对引用依据";
+      break;
+    case "citations_available":
+      chatCitations.value = payload.annotations ?? [];
+      if (payload.status === "pending") {
+        const citationWarning =
+          payload.message || "引用标注未完成，正文已保留。";
+        chatWarning.value = chatWarning.value
+          ? `${chatWarning.value}；${citationWarning}`
+          : citationWarning;
+        chatActivity.value = "回答完成，引用标注未完成";
+      } else if (chatCitations.value.length > 0) {
+        chatActivity.value =
+          chatStatus.value === "partial"
+            ? `回答已生成，但内容不完整，已标注 ${chatCitations.value.length} 处引用`
+            : `回答完成，已标注 ${chatCitations.value.length} 处引用`;
+      } else {
+        chatActivity.value =
+          chatStatus.value === "partial" ? "回答已生成，但内容不完整" : "回答完成";
       }
       break;
     case "answer_delta":
@@ -2830,6 +2941,10 @@ function openChatSourceDocument(source: AgentChatSource): void {
 
 onMounted(async () => {
   window.addEventListener("hashchange", syncSectionFromHash);
+  document.addEventListener("pointerdown", handleDocumentPointerDown);
+  document.addEventListener("keydown", handleChatCitationDismiss);
+  window.addEventListener("scroll", handleChatCitationDismiss, true);
+  window.addEventListener("resize", closeChatCitationPopover);
   unlisten = await listen<BackendStatus>("backend-status", (event) => {
     applyStatus(event.payload);
     if (event.payload.status === "running") {
@@ -2847,6 +2962,10 @@ onBeforeUnmount(() => {
   disposed = true;
   chatStreamController?.abort();
   window.removeEventListener("hashchange", syncSectionFromHash);
+  document.removeEventListener("pointerdown", handleDocumentPointerDown);
+  document.removeEventListener("keydown", handleChatCitationDismiss);
+  window.removeEventListener("scroll", handleChatCitationDismiss, true);
+  window.removeEventListener("resize", closeChatCitationPopover);
   unlisten?.();
   if (healthTimer !== undefined) {
     window.clearInterval(healthTimer);
@@ -3118,7 +3237,6 @@ onBeforeUnmount(() => {
               :id="`chat-source-${encodeURIComponent(source.source_key)}`"
               :key="source.source_key"
               class="chat-source-card"
-              :class="{ selected: selectedChatSourceKey === source.source_key }"
             >
               <button
                 type="button"
@@ -3157,6 +3275,71 @@ onBeforeUnmount(() => {
           </p>
         </section>
       </section>
+      <Teleport to="body">
+        <aside
+          v-if="chatCitationPopover"
+          class="chat-citation-popover"
+          :class="chatCitationPopover.placement"
+          :style="{
+            left: `${chatCitationPopover.left}px`,
+            top: `${chatCitationPopover.top}px`,
+          }"
+          role="dialog"
+          aria-modal="false"
+          aria-labelledby="chat-citation-popover-title"
+          data-chat-citation-popover
+        >
+          <div class="chat-citation-popover-head">
+            <span class="chat-source-index">
+              {{
+                chatSourceNumbers.get(
+                  normalizeChatSourceKey(
+                    chatCitationPopover.source.source_key,
+                  ),
+                )
+              }}
+            </span>
+            <div>
+              <strong id="chat-citation-popover-title">
+                {{ chatCitationPopover.source.doc_title }}
+              </strong>
+              <small>
+                {{ chatCitationPopover.source.source_label || "本地文档" }}
+                <template v-if="chatCitationPopover.source.section_path.length">
+                  ·
+                  {{
+                    chatCitationPopover.source.section_path.join(" › ")
+                  }}
+                </template>
+              </small>
+            </div>
+            <button
+              type="button"
+              class="chat-citation-popover-close"
+              aria-label="关闭引用内容"
+              @click="closeChatCitationPopover"
+            >
+              ×
+            </button>
+          </div>
+          <p>
+            {{
+              chatCitationPopover.source.excerpt ||
+              "该来源暂无正文摘录。"
+            }}
+          </p>
+          <button
+            v-if="canOpenChatSourceDocument"
+            type="button"
+            class="inline-link"
+            @click="
+              openChatCitationSourceDocument(chatCitationPopover.source)
+            "
+          >
+            查看文档详情
+          </button>
+        </aside>
+      </Teleport>
     </section>
 
     <section v-if="activeSection === 'diagnostics'" class="diagnostics-page">

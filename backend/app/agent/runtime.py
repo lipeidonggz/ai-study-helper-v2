@@ -18,6 +18,12 @@ from app.agent.actions import (
     ToolAction,
     parse_action,
 )
+from app.agent.citations import (
+    CitationAnnotationArtifact,
+    CitationAnnotator,
+    CitationEvidenceBlock,
+    split_answer_spans,
+)
 from app.agent.finish_stream import FinishAnswerDeltaExtractor
 from app.agent.models import AgentLimitation
 from app.agent.prompt import PromptBundle, release_prompt_bundle
@@ -119,6 +125,8 @@ class AgentRunResult:
     sources: list[dict[str, Any]]
     events: tuple[AgentEvent, ...]
     trace_status: Literal["complete", "partial", "dropped", "missing"] = "missing"
+    citation_annotations: CitationAnnotationArtifact | None = None
+    citation_annotation_model_calls: int = 0
 
 
 class _AgentGraphState(TypedDict, total=False):
@@ -143,6 +151,9 @@ class _AgentGraphState(TypedDict, total=False):
     next_context_estimate: int | None
     context_estimate_source: Literal["provider_anchor", "estimated"]
     sources: list[dict[str, Any]]
+    evidence_blocks: list[dict[str, Any]]
+    citation_annotations: CitationAnnotationArtifact | None
+    citation_annotation_model_calls: int
     current_turn_span: TraceSpanHandle | None
 
 
@@ -377,6 +388,8 @@ class AgentRuntime:
             output_tokens=0,
             sources=[],
             events=(event,),
+            citation_annotations=None,
+            citation_annotation_model_calls=0,
         )
 
     def _finish_trace(
@@ -394,11 +407,21 @@ class AgentRuntime:
                 agent_turns=result.agent_turns,
                 tool_calls=result.tool_calls,
                 model_calls=result.model_calls,
-                retry_count=max(0, result.model_calls - result.agent_turns),
+                retry_count=max(
+                    0,
+                    result.model_calls
+                    - result.agent_turns
+                    - result.citation_annotation_model_calls,
+                ),
                 input_tokens=result.input_tokens,
                 output_tokens=result.output_tokens,
                 answer=result.answer,
                 limitations=[limitation.model_dump() for limitation in result.limitations],
+                citation_annotations=(
+                    result.citation_annotations.model_dump(mode="json")
+                    if result.citation_annotations is not None
+                    else None
+                ),
             )
         except Exception:
             if self._trace_store is not None:
@@ -426,6 +449,7 @@ class AgentRuntime:
                 output_tokens=0,
                 answer=None,
                 limitations=[],
+                citation_annotations=None,
             )
         except Exception:
             self._trace_store.mark_failure(
@@ -500,6 +524,9 @@ class _AgentGraphExecution:
             "next_context_estimate": None,
             "context_estimate_source": "estimated",
             "sources": [],
+            "evidence_blocks": [],
+            "citation_annotations": None,
+            "citation_annotation_model_calls": 0,
             "current_turn_span": None,
         }
         final = initial
@@ -512,6 +539,7 @@ class _AgentGraphExecution:
                 final = cast(_AgentGraphState, state)
         except GraphRecursionError:
             final = self._protocol_loop_state(final)
+        final = await self._annotate_citations(final)
         status = final.get("status", "failed")
         if status == "running":
             status = "failed"
@@ -536,6 +564,214 @@ class _AgentGraphExecution:
             output_tokens=final.get("output_tokens", 0),
             sources=final.get("sources", []),
             events=tuple(final.get("events", [])),
+            citation_annotations=final.get("citation_annotations"),
+            citation_annotation_model_calls=final.get(
+                "citation_annotation_model_calls",
+                0,
+            ),
+        )
+
+    async def _annotate_citations(
+        self,
+        state: _AgentGraphState,
+    ) -> _AgentGraphState:
+        """在冻结答案之后标注引用；失败时保留正文并显式进入 pending。"""
+
+        if state.get("status") not in {"succeeded", "partial"}:
+            return state
+        answer = state.get("final_answer")
+        if not answer:
+            return state
+        evidence_blocks = [
+            CitationEvidenceBlock.model_validate(item) for item in state.get("evidence_blocks", [])
+        ]
+        events = list(state.get("events", []))
+        if self._cancellation.is_cancelled:
+            return self._canceled_state(state, events=events, answer=answer)
+        self._record_event(
+            events,
+            AgentEvent(
+                event_type="activity_changed",
+                payload={"stage": "citation_annotation", "label": "正在核对引用依据"},
+            ),
+        )
+        self._record_event(
+            events,
+            AgentEvent(
+                event_type="citation_annotation_started",
+                payload={"evidence_count": len(evidence_blocks)},
+            ),
+        )
+
+        current_input_tokens = state.get("input_tokens", 0)
+        current_output_tokens = state.get("output_tokens", 0)
+        annotation_span = (
+            self._trace_session.start_span(
+                "citation.annotation",
+                "LLM",
+                attributes={
+                    "llm.provider": self._chat_provider.profile.provider,
+                    "llm.request.model": self._chat_provider.profile.model_id,
+                    "llm.invocation_parameters.max_tokens": (self._config.max_output_tokens),
+                    "app.answer_span_count": len(split_answer_spans(answer)),
+                    "app.evidence_block_count": len(evidence_blocks),
+                },
+            )
+            if self._trace_session is not None
+            else None
+        )
+        try:
+            outcome = await CitationAnnotator(
+                self._chat_provider,
+                token_counter=self._token_counter,
+            ).annotate(
+                question=self._question,
+                answer=answer,
+                evidence_blocks=evidence_blocks,
+                spent_input_tokens=current_input_tokens,
+                spent_output_tokens=current_output_tokens,
+                max_context_tokens=self._config.max_context_tokens,
+                max_request_tokens=self._config.max_request_tokens,
+                max_output_tokens=self._config.max_output_tokens,
+            )
+        except asyncio.CancelledError:
+            if annotation_span is not None and self._trace_session is not None:
+                self._trace_session.end_span(
+                    annotation_span,
+                    status="error",
+                    error_code="canceled_by_user",
+                )
+            raise
+        except Exception:
+            if annotation_span is not None and self._trace_session is not None:
+                self._trace_session.end_span(
+                    annotation_span,
+                    status="error",
+                    error_code="citation_annotation_internal_error",
+                )
+            raise
+
+        cancelled = self._cancellation.is_cancelled
+        if annotation_span is not None and self._trace_session is not None:
+            if outcome.messages:
+                prompt_artifact = self._trace_session.record_artifact(
+                    kind="citation.annotation.prompt",
+                    mime_type="application/json",
+                    content=[
+                        {"role": message.role, "content": message.content}
+                        for message in outcome.messages
+                    ],
+                )
+                annotation_span.attributes["llm.prompt"] = prompt_artifact.model_dump(mode="json")
+            if outcome.raw_outputs:
+                output_artifact = self._trace_session.record_artifact(
+                    kind="citation.annotation.output",
+                    mime_type="application/json",
+                    content=list(outcome.raw_outputs),
+                )
+                annotation_span.attributes["llm.output"] = output_artifact.model_dump(mode="json")
+            annotation_span.attributes.update(
+                {
+                    "app.citation_annotation_status": outcome.artifact.status,
+                    "app.citation_annotation_prompt_version": (outcome.artifact.prompt_version),
+                    "app.citation_annotation_prompt_hash": outcome.artifact.prompt_hash,
+                    "app.model_calls": outcome.model_calls,
+                    "llm.token_count.prompt": outcome.input_tokens,
+                    "llm.token_count.completion": outcome.output_tokens,
+                    "app.usage_source": ("provider" if outcome.model_calls > 0 else "not_called"),
+                }
+            )
+            if outcome.model_calls > 1:
+                self._trace_session.add_span_event(
+                    annotation_span,
+                    "retry",
+                    {"app.attempts": outcome.model_calls},
+                )
+            self._trace_session.end_span(
+                annotation_span,
+                status=(
+                    "ok" if outcome.artifact.status != "pending" and not cancelled else "error"
+                ),
+                error_code=("canceled_by_user" if cancelled else outcome.artifact.error_code),
+            )
+
+        model_calls = state.get("model_calls", 0) + outcome.model_calls
+        input_tokens = current_input_tokens + outcome.input_tokens
+        output_tokens = current_output_tokens + outcome.output_tokens
+        limitations = list(state.get("limitations", []))
+        if outcome.artifact.status == "pending":
+            limitations = _with_limitation(
+                limitations,
+                code="citation_annotation_pending",
+                message=(
+                    "引用标注未完成，正文已保留："
+                    f"{outcome.artifact.error_message or outcome.artifact.error_code}"
+                ),
+            )
+        if cancelled:
+            return self._canceled_state(
+                state,
+                events=events,
+                answer=answer,
+                extra={
+                    "model_calls": model_calls,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "limitations": limitations,
+                    "citation_annotations": outcome.artifact,
+                    "citation_annotation_model_calls": outcome.model_calls,
+                },
+            )
+
+        artifact_payload = outcome.artifact.model_dump(mode="json")
+        public_payload = {
+            "status": artifact_payload["status"],
+            "annotations": artifact_payload["annotations"],
+            "error_code": artifact_payload["error_code"],
+            "message": artifact_payload["error_message"],
+        }
+        if outcome.model_calls:
+            self._record_event(
+                events,
+                AgentEvent(
+                    event_type="usage_update",
+                    payload={
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "input_source": "estimated",
+                        "output_source": "provider",
+                    },
+                ),
+            )
+        self._record_event(
+            events,
+            AgentEvent(
+                event_type="citations_available",
+                payload=public_payload,
+            ),
+        )
+        if outcome.artifact.status == "pending":
+            self._record_event(
+                events,
+                AgentEvent(
+                    event_type="citation_annotation_failed",
+                    payload=public_payload,
+                ),
+            )
+
+        return cast(
+            _AgentGraphState,
+            {
+                **state,
+                "events": events,
+                "model_calls": model_calls,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "limitations": limitations,
+                "citation_annotations": outcome.artifact,
+                "citation_annotation_model_calls": outcome.model_calls,
+                "current_turn_span": None,
+            },
         )
 
     def _protocol_loop_state(self, state: _AgentGraphState) -> _AgentGraphState:
@@ -1447,6 +1683,11 @@ class _AgentGraphExecution:
             return self._canceled_state(state, events=events)
         source_refs = _source_refs(action.tool_name, execution.payload)
         merged_sources = _merge_sources(state.get("sources", []), source_refs)
+        evidence_refs = _evidence_blocks(execution.payload)
+        merged_evidence = _merge_evidence(
+            state.get("evidence_blocks", []),
+            evidence_refs,
+        )
         if tool_span is not None and self._trace_session is not None:
             payload_artifact = self._trace_session.record_artifact(
                 kind="tool.payload",
@@ -1561,6 +1802,7 @@ class _AgentGraphExecution:
                 ),
                 "limitations": limitations,
                 "sources": merged_sources,
+                "evidence_blocks": merged_evidence,
                 "current_turn_span": None,
             }
         history.append(observation_text)
@@ -1577,6 +1819,7 @@ class _AgentGraphExecution:
             "next_context_estimate": prospective,
             "limitations": limitations,
             "sources": merged_sources,
+            "evidence_blocks": merged_evidence,
             "current_turn_span": None,
         }
 
@@ -1897,6 +2140,60 @@ def _source_refs(tool: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return sources
+
+
+def _evidence_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """提取本次工具返回的完整可引用证据，供后置 annotation 使用。"""
+
+    candidates = payload.get("blocks")
+    if not isinstance(candidates, list):
+        candidates = payload.get("matches")
+    if not isinstance(candidates, list):
+        return []
+    evidence: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        block_id = candidate.get("block_id")
+        text = candidate.get("text")
+        if not isinstance(text, str):
+            text = candidate.get("snippet")
+        if (
+            not isinstance(block_id, str)
+            or not isinstance(text, str)
+            or not text.strip()
+            or block_id in seen
+        ):
+            continue
+        seen.add(block_id)
+        evidence.append(
+            {
+                "block_id": block_id,
+                "doc_id": str(candidate.get("doc_id") or ""),
+                "doc_title": str(candidate.get("doc_title") or ""),
+                "source_label": str(candidate.get("source_label") or ""),
+                "section_path": [str(value) for value in candidate.get("section_path", [])],
+                "text": text,
+            }
+        )
+    return evidence
+
+
+def _merge_evidence(
+    existing: list[dict[str, Any]],
+    incoming: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """按 block_id 合并证据正文并保留首次出现顺序。"""
+
+    merged = list(existing)
+    seen = {item.get("block_id") for item in merged if isinstance(item, dict)}
+    for item in incoming:
+        block_id = item["block_id"]
+        if block_id not in seen:
+            merged.append(item)
+            seen.add(block_id)
+    return merged
 
 
 def _merge_sources(

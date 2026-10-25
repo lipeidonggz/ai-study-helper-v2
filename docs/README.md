@@ -6,9 +6,9 @@
 
 ## 当前状态
 
-- 阶段：实现阶段，025 长答案引用支持分批检查已完成，026 正在收口。
+- 阶段：实现阶段，026 结构化 ReAct 已完成，027 claim-aware 引用标注正在实现与验收。
 - 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付、检索与 Agent 运行链、流式问答、本地 trace 诊断和逐 criterion 评测判定已实现。
-- 当前工作：026 结构化 ReAct 协议已完成实现和真实探针，正在进行反向解释与人工验收。
+- 当前工作：027 已完成。
 
 ## 设计基线
 
@@ -58,6 +58,7 @@
 - [0009 · 单开发壳承载产品和评测](decisions/0009-development-shell-with-compiled-evaluation.md)
 - [0010 · 评测用例与用例集采用草稿、不可变修订版和显式启用](decisions/0010-evaluation-case-and-suite-revision-workflow.md)
 - [0011 · 使用单 JSON 结构化 ReAct 响应协议](decisions/0011-structured-react-response-protocol.md)
+- [0012 · 由 Harness 组织 claim 级引用标注](decisions/0012-harness-owned-claim-citation-annotation.md)
 - [0008 · Harness 统一计算 Tool Observation token](decisions/0008-harness-owned-result-token-accounting.md)
 - [切片控制契约与证据包模板](development/slices/TEMPLATE.md)
 - [001 · 桌面 sidecar 最小启动链（已完成）](development/slices/001-desktop-sidecar-bootstrap.md)
@@ -107,6 +108,8 @@
 - [025 · 引用支持分批检查人工验收清单（已完成）](development/manual-tests/025-citation-support-batching.md)
 - [026 · 结构化 ReAct 输出协议（已完成）](development/slices/026-structured-react-protocol.md)
 - [026 · 结构化 ReAct 人工验收清单（已完成）](development/manual-tests/026-structured-react-protocol.md)
+- [027 · Claim-aware 引用标注（已完成）](development/slices/027-claim-aware-citation-annotation.md)
+- [027 · Claim-aware 引用标注人工验收清单（已完成）](development/manual-tests/027-claim-aware-citation-annotation.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库

@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.agent.citations import CitationAnnotation, CitationAnnotationArtifact
 from app.evaluation.citation_prompt import CitationContextInput
 from app.tracing.catalog import TraceCatalog, TraceInvalidError, TraceNotFoundError
 from app.tracing.models import TraceArtifactRecord, TraceDetailRecord
@@ -75,6 +76,7 @@ class BuiltJudgeInput:
 
     checker_payload: CheckerPayload
     all_evidence: list[EvidenceBlock]
+    citation_annotations: list[CitationAnnotation]
     trace: TraceDetailRecord
 
 
@@ -110,7 +112,16 @@ def build_judge_input(
         ) from error
 
     normalized_answer = answer or ""
-    cited_ids = cited_block_ids(normalized_answer)
+    citation_annotations = _load_citation_annotations(trace, catalog, normalized_answer)
+    cited_ids = (
+        list(
+            dict.fromkeys(
+                block_id for annotation in citation_annotations for block_id in annotation.block_ids
+            )
+        )
+        if citation_annotations is not None
+        else cited_block_ids(normalized_answer)
+    )
     evidence = _extract_evidence(trace, catalog, cited_ids)
     evidence_ids = {item.block_id for item in evidence}
     missing_ids = [block_id for block_id in cited_ids if block_id not in evidence_ids]
@@ -129,8 +140,58 @@ def build_judge_input(
     return BuiltJudgeInput(
         checker_payload=checker_payload,
         all_evidence=evidence,
+        citation_annotations=citation_annotations or [],
         trace=trace,
     )
+
+
+def _load_citation_annotations(
+    trace: TraceDetailRecord,
+    catalog: TraceCatalog,
+    answer: str,
+) -> list[CitationAnnotation] | None:
+    """优先读取结构化 citation artifact；历史 attempt 保持 inline 解析回退。"""
+
+    artifact = next(
+        (item for item in trace.manifest.artifacts if item.kind == "citations"),
+        None,
+    )
+    if artifact is None:
+        return None
+    if artifact.state != "stored":
+        raise JudgeInputError(
+            "citation_annotation_artifact_missing",
+            f"citation annotation artifact is {artifact.state}",
+        )
+    try:
+        payload = catalog.artifact_path(
+            trace.manifest.trace_id,
+            artifact.artifact_id,
+        ).read_text(encoding="utf-8")
+        annotations = CitationAnnotationArtifact.model_validate_json(payload)
+    except (OSError, ValueError, TraceNotFoundError, TraceInvalidError) as error:
+        raise JudgeInputError(
+            "citation_annotation_artifact_invalid",
+            f"citation annotation artifact is invalid: {error}",
+        ) from error
+    if annotations.status == "pending":
+        raise JudgeInputError(
+            annotations.error_code or "citation_annotation_pending",
+            annotations.error_message or "citation annotation is pending",
+        )
+    if annotations.status != "complete":
+        return []
+    for annotation in annotations.annotations:
+        if (
+            annotation.start_index < 0
+            or annotation.end_index > len(answer)
+            or answer[annotation.start_index : annotation.end_index] != annotation.text
+        ):
+            raise JudgeInputError(
+                "citation_annotation_span_invalid",
+                f"citation annotation span does not match answer: {annotation.span_id}",
+            )
+    return annotations.annotations
 
 
 def split_citation_contexts(answer: str) -> list[CitationContextInput]:

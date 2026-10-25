@@ -540,6 +540,7 @@ class TraceSession:
         output_tokens: int,
         answer: str | None,
         limitations: list[dict[str, Any]],
+        citation_annotations: dict[str, Any] | None = None,
     ) -> None:
         """关闭根 span，并提交不可变 manifest。"""
 
@@ -553,6 +554,15 @@ class TraceSession:
             )
         else:
             answer_artifact = None
+        citation_artifact = (
+            self.record_artifact(
+                kind="citations",
+                mime_type="application/json",
+                content=citation_annotations,
+            )
+            if citation_annotations is not None
+            else None
+        )
         root = self._root_span
         if root is None:
             raise RuntimeError("trace session has no root span")
@@ -563,6 +573,11 @@ class TraceSession:
                 "app.termination_reason": termination_reason,
                 "app.answer_artifact": (
                     answer_artifact.model_dump(mode="json") if answer_artifact is not None else None
+                ),
+                "app.citations_artifact": (
+                    citation_artifact.model_dump(mode="json")
+                    if citation_artifact is not None
+                    else None
                 ),
             },
         )

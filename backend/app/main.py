@@ -765,6 +765,8 @@ def create_app(
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
             sources=result.sources,
+            citation_annotations=result.citation_annotations,
+            citation_annotation_model_calls=result.citation_annotation_model_calls,
             events=[
                 AgentRunEvent(event_type=event.event_type, payload=event.payload)
                 for event in result.events
