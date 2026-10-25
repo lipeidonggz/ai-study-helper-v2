@@ -130,7 +130,7 @@ def test_release_prompt_bundle_has_stable_version_and_hash() -> None:
     first = release_prompt_bundle()
     second = release_prompt_bundle()
 
-    assert first.version == "chat-v4"
+    assert first.version == "chat-v5"
     assert first.template_hash == second.template_hash
     assert len(first.template_hash) == 64
     assert '"type":"tool_call"' in first.template

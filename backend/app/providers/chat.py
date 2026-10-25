@@ -107,13 +107,20 @@ class ChatProvider(Protocol):
 class FakeChatProvider:
     """按预设内容依次返回的确定性 chat provider。"""
 
-    def __init__(self, responses: Sequence[str], *, stream_chunk_size: int = 7) -> None:
+    def __init__(
+        self,
+        responses: Sequence[str],
+        *,
+        stream_chunk_size: int = 7,
+        auto_empty_citation_annotations: bool = True,
+    ) -> None:
         if not responses:
             raise ValueError("fake chat provider requires at least one response")
         if stream_chunk_size <= 0:
             raise ValueError("stream_chunk_size must be positive")
         self._responses = list(responses)
         self._stream_chunk_size = stream_chunk_size
+        self._auto_empty_citation_annotations = auto_empty_citation_annotations
         self._profile = ChatProviderProfile(
             provider="fake",
             model_id="fake-agent-chat",
@@ -161,6 +168,24 @@ class FakeChatProvider:
         messages: Sequence[ChatMessage],
         max_output_tokens: int | None,
     ) -> ChatCompletionResult:
+        if (
+            self._auto_empty_citation_annotations
+            and messages
+            and messages[0].role == "system"
+            and "后置引用标注器" in messages[0].content
+        ):
+            content = '{"annotations":[]}'
+            self.requests.append(tuple(messages))
+            self.max_output_requests.append(max_output_tokens)
+            input_tokens = sum(max(1, len(message.content) // 4) for message in messages)
+            return ChatCompletionResult(
+                content=content,
+                request_id=f"fake-chat-{len(self.requests):04d}",
+                actual_model_id=self.profile.model_id,
+                finish_reason="stop",
+                input_tokens=input_tokens,
+                output_tokens=max(1, len(content) // 4),
+            )
         if not self._responses:
             raise ChatProviderError(
                 code="chat_fake_exhausted",

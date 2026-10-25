@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.agent.citations import CitationAnnotationArtifact
+
 
 class AgentRunRequest(BaseModel):
     """内部 Agent 单轮问答请求。"""
@@ -47,6 +49,8 @@ class AgentRunResponse(BaseModel):
     output_tokens: int = Field(ge=0)
     sources: list[dict[str, Any]] = Field(default_factory=list)
     events: list[AgentRunEvent]
+    citation_annotations: CitationAnnotationArtifact | None = None
+    citation_annotation_model_calls: int = Field(default=0, ge=0)
 
 
 class AgentRunStartResponse(BaseModel):

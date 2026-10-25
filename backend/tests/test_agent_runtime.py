@@ -175,7 +175,13 @@ def test_agent_runtime_executes_tool_and_finishes(tmp_path: Path) -> None:
     assert result.answer == "MCP 位于沙箱边界章节。"
     assert result.agent_turns == 2
     assert result.tool_calls == 1
-    assert result.model_calls == 2
+    assert result.model_calls == 3
+    assert result.citation_annotation_model_calls == 1
+    citation_event = next(
+        event for event in result.events if event.event_type == "citations_available"
+    )
+    assert citation_event.payload["status"] == "complete"
+    assert citation_event.payload["annotations"] == []
     tool_event = next(event for event in result.events if event.event_type == "tool_call")
     assert tool_event.payload["result_tokens"] > 0
     assert "result_tokens" not in tool_event.payload["diagnostics"]
@@ -185,6 +191,71 @@ def test_agent_runtime_executes_tool_and_finishes(tmp_path: Path) -> None:
     assert model_events[1].payload["usage_source"] == "provider"
     assert "harness_status" in chat_provider.requests[1][1].content
     assert "result_tokens" not in chat_provider.requests[1][1].content
+
+
+def test_runtime_emits_structured_claim_annotation_without_editing_answer(
+    tmp_path: Path,
+) -> None:
+    embedding_provider = _prepare_snapshot(tmp_path)
+
+    class AnnotatingProvider(FakeChatProvider):
+        async def complete(self, messages, *, max_output_tokens=None):
+            if "后置引用标注器" in messages[0].content:
+                packet = json.loads(messages[-1].content)
+                content = json.dumps(
+                    {
+                        "annotations": [
+                            {
+                                "span_id": packet["spans"][0]["span_id"],
+                                "block_ids": [packet["evidence_blocks"][0]["block_id"]],
+                            }
+                        ]
+                    }
+                )
+                self.requests.append(tuple(messages))
+                self.max_output_requests.append(max_output_tokens)
+                return ChatCompletionResult(
+                    content=content,
+                    request_id="fake-chat-annotation",
+                    actual_model_id=self.profile.model_id,
+                    finish_reason="stop",
+                    input_tokens=20,
+                    output_tokens=5,
+                )
+            return await super().complete(
+                messages,
+                max_output_tokens=max_output_tokens,
+            )
+
+    answer = "MCP 位于沙箱边界章节。"
+    chat_provider = AnnotatingProvider(
+        [
+            _tool_call("search_blocks", {"query": "MCP"}),
+            _finish(answer),
+        ],
+        auto_empty_citation_annotations=False,
+    )
+    runtime = AgentRuntime(
+        tmp_path,
+        chat_provider=chat_provider,
+        embedding_provider=embedding_provider,
+    )
+
+    result = asyncio.run(runtime.run("MCP 在哪个章节？"))
+
+    assert result.status == "succeeded"
+    assert result.answer == answer
+    assert result.citation_annotations is not None
+    assert result.citation_annotations.status == "complete"
+    assert len(result.citation_annotations.annotations) == 1
+    annotation = result.citation_annotations.annotations[0]
+    assert result.answer[annotation.start_index : annotation.end_index] == annotation.text
+    assert annotation.block_ids == [result.sources[0]["block_id"]]
+    citation_event = next(
+        event for event in result.events if event.event_type == "citations_available"
+    )
+    assert citation_event.payload["status"] == "complete"
+    assert citation_event.payload["annotations"][0]["text"] == annotation.text
 
 
 def test_agent_runtime_emits_safe_answer_activity_usage_and_sources(
@@ -227,6 +298,107 @@ def test_agent_runtime_emits_safe_answer_activity_usage_and_sources(
         for event in emitted
         if event.event_type == "answer_delta"
     )
+
+
+def test_annotation_failure_preserves_answer_and_marks_pending(
+    tmp_path: Path,
+) -> None:
+    embedding_provider = _prepare_snapshot(tmp_path)
+    chat_provider = FakeChatProvider(
+        [
+            _tool_call("search_blocks", {"query": "MCP"}),
+            _finish("MCP 位于沙箱边界章节。"),
+            "not-json",
+            "not-json",
+        ],
+        auto_empty_citation_annotations=False,
+    )
+    runtime = AgentRuntime(
+        tmp_path,
+        chat_provider=chat_provider,
+        embedding_provider=embedding_provider,
+    )
+
+    result = asyncio.run(runtime.run("MCP 在哪个章节？"))
+
+    assert result.status == "succeeded"
+    assert result.answer == "MCP 位于沙箱边界章节。"
+    assert result.citation_annotations is not None
+    assert result.citation_annotations.status == "pending"
+    assert result.citation_annotations.error_code == "citation_annotation_output_invalid"
+    assert result.citation_annotation_model_calls == 2
+    assert result.model_calls == 4
+    assert any(
+        limitation.code == "citation_annotation_pending" for limitation in result.limitations
+    )
+    events = [event.event_type for event in result.events]
+    assert "citation_annotation_started" in events
+    assert "citation_annotation_failed" in events
+
+
+def test_cancel_during_annotation_preserves_answer_and_usage(
+    tmp_path: Path,
+) -> None:
+    embedding_provider = _prepare_snapshot(tmp_path)
+
+    class WaitingAnnotationProvider(FakeChatProvider):
+        annotation_started = asyncio.Event()
+        annotation_release = asyncio.Event()
+
+        async def complete(self, messages, *, max_output_tokens=None):
+            if "后置引用标注器" in messages[0].content:
+                self.annotation_started.set()
+                await self.annotation_release.wait()
+                content = '{"annotations":[]}'
+                self.requests.append(tuple(messages))
+                self.max_output_requests.append(max_output_tokens)
+                return ChatCompletionResult(
+                    content=content,
+                    request_id="fake-chat-annotation",
+                    actual_model_id=self.profile.model_id,
+                    finish_reason="stop",
+                    input_tokens=20,
+                    output_tokens=5,
+                )
+            return await super().complete(
+                messages,
+                max_output_tokens=max_output_tokens,
+            )
+
+    provider = WaitingAnnotationProvider(
+        [
+            _tool_call("search_blocks", {"query": "MCP"}),
+            _finish("完整答案已经生成。"),
+        ],
+        auto_empty_citation_annotations=False,
+    )
+    token = RunCancellationToken()
+    runtime = AgentRuntime(
+        tmp_path,
+        chat_provider=provider,
+        embedding_provider=embedding_provider,
+    )
+
+    async def run() -> tuple:
+        task = asyncio.create_task(runtime.run("取消引用标注", cancellation=token))
+        await provider.annotation_started.wait()
+        token.cancel()
+        provider.annotation_release.set()
+        return await asyncio.wait_for(task, timeout=3)
+
+    result = asyncio.run(run())
+
+    assert result.status == "canceled"
+    assert result.termination_reason == "canceled_by_user"
+    assert result.answer == "完整答案已经生成。"
+    assert result.citation_annotation_model_calls == 1
+    assert result.model_calls == 3
+    assert result.citation_annotations is not None
+    assert result.citation_annotations.status == "complete"
+    event_types = [event.event_type for event in result.events]
+    assert "answer_completed" in event_types
+    assert "citation_annotation_started" in event_types
+    assert event_types[-1] == "run_canceled"
 
 
 def test_agent_runtime_cancel_interrupts_model_stream_without_later_calls(
@@ -294,13 +466,15 @@ def test_agent_runtime_persists_parented_trace_with_tool_and_budget_data(
     assert result.trace_id and TRACE_ID_PATTERN.fullmatch(result.trace_id)
     assert result.trace_status == "complete"
     assert store.wait_for_idle(3)
-    detail = TraceCatalog(tmp_path / "traces").load(result.trace_id)
+    trace_catalog = TraceCatalog(tmp_path / "traces")
+    detail = trace_catalog.load(result.trace_id)
     store.close()
 
     names = [span.name for span in detail.spans]
     assert names.count("agent.run") == 1
     assert names.count("agent.turn") == 2
     assert names.count("llm.call") == 2
+    assert names.count("citation.annotation") == 1
     assert names.count("tool.call") == 1
     root = next(span for span in detail.spans if span.name == "agent.run")
     turns = [span for span in detail.spans if span.name == "agent.turn"]
@@ -315,6 +489,13 @@ def test_agent_runtime_persists_parented_trace_with_tool_and_budget_data(
     assert detail.manifest.trace_status == "complete"
     assert detail.manifest.replay_scope == "retrieval"
     assert detail.manifest.versions["agent_loop_version"] == "react-structured-v3"
+    assert detail.manifest.model_calls == result.model_calls == 3
+    citation_span = next(span for span in detail.spans if span.name == "citation.annotation")
+    assert citation_span.status == "ok"
+    assert citation_span.attributes["app.citation_annotation_status"] == "complete"
+    assert citation_span.attributes["app.model_calls"] == 1
+    assert citation_span.attributes["llm.token_count.prompt"] > 0
+    assert citation_span.attributes["llm.token_count.completion"] > 0
     assert {artifact.kind for artifact in detail.manifest.artifacts} >= {
         "question",
         "llm.prompt",
@@ -322,7 +503,20 @@ def test_agent_runtime_persists_parented_trace_with_tool_and_budget_data(
         "tool.arguments",
         "tool.payload",
         "answer",
+        "citations",
+        "citation.annotation.prompt",
+        "citation.annotation.output",
     }
+    citation_artifact = next(
+        artifact for artifact in detail.manifest.artifacts if artifact.kind == "citations"
+    )
+    citation_payload = json.loads(
+        trace_catalog.artifact_path(
+            result.trace_id,
+            citation_artifact.artifact_id,
+        ).read_text(encoding="utf-8")
+    )
+    assert citation_payload["status"] == "complete"
 
 
 def test_trace_queue_failure_does_not_break_agent_answer(
@@ -884,8 +1078,10 @@ def test_protected_agent_api_runs_with_injected_providers(tmp_path: Path) -> Non
     assert result["answer"] == "API 运行成功"
     assert result["answer_completeness"] == "complete"
     assert result["limitations"] == []
-    assert result["prompt_bundle_version"] == "chat-v4"
+    assert result["prompt_bundle_version"] == "chat-v5"
     assert result["observation_token_counter_version"] == "chat-budget-conservative-v1"
+    assert result["citation_annotations"]["status"] == "not_applicable"
+    assert result["citation_annotation_model_calls"] == 0
 
 
 def test_agent_api_uses_saved_runtime_settings(tmp_path: Path) -> None:
@@ -936,7 +1132,7 @@ def test_agent_api_uses_saved_runtime_settings(tmp_path: Path) -> None:
     assert result["status"] == "succeeded"
     tool_event = next(event for event in result["events"] if event["event_type"] == "tool_call")
     assert tool_event["payload"]["diagnostics"]["search_profile"]["top_k"] == 3
-    assert chat_provider.max_output_requests == [4096, 4096]
+    assert chat_provider.max_output_requests == [4096, 4096, 4096]
 
 
 def test_runtime_settings_do_not_change_an_inflight_request(tmp_path: Path) -> None:
@@ -1212,6 +1408,8 @@ def test_streaming_agent_api_replays_events_without_duplicate_text(
     assert "event: usage_update" in event_text
     assert "event: answer_delta" in event_text
     assert "event: answer_completed" in event_text
+    assert "event: citations_available" in event_text
+    assert '"status":"not_applicable"' in event_text
     assert "流式回答" in event_text
     assert resumed_text == ""
     assert gap_status == 409

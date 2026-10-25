@@ -205,8 +205,8 @@ class EvaluationRunner:
         timeout_seconds = int(plan.run_policy["attempt_timeout_seconds"])
         per_attempt_tokens = settings.max_request_tokens
         # Runtime 对每次模型调用最多做两次供应商尝试；预留上限必须覆盖
-        # 工具轮次、最终回答和这些确定性重试，否则并发会突破请求硬预算。
-        per_attempt_requests = 2 * (settings.max_tool_calls + 1)
+        # 工具轮次、最终回答、后置引用标注和这些确定性重试，否则并发会突破请求硬预算。
+        per_attempt_requests = 2 * (settings.max_tool_calls + 2)
         running: dict[asyncio.Task[_AttemptOutcome], _RunningAttempt] = {}
         consecutive_upstream_failures = 0
         self._repository.set_run_status(run_id, "running", started=True)
