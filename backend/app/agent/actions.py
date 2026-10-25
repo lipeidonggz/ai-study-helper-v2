@@ -3,20 +3,22 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
-_TOOL_ACTION_PATTERN = re.compile(r"^(?P<name>[A-Za-z_][A-Za-z0-9_]*)\[(?P<arguments>.*)\]$")
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+
+_TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class ActionProtocolError(ValueError):
-    """模型响应不符合 Thought／Action 协议。"""
+    """模型响应不符合结构化 ReAct 协议。"""
 
 
 @dataclass(frozen=True, slots=True)
 class ToolAction:
-    """要求 Harness 执行一个白名单工具的 Action。"""
+    """要求 Harness 执行一个白名单工具。"""
 
-    thought: str
+    decision_summary: str
     tool_name: str
     arguments: dict[str, Any]
 
@@ -25,66 +27,140 @@ class ToolAction:
 class FinishAction:
     """结束 Agent 循环并携带最终回答。"""
 
-    thought: str
     answer: str
+    decision_summary: str = ""
 
 
 ParsedAction = ToolAction | FinishAction
 
 
+class _ToolCallResponse(BaseModel):
+    """模型可返回的工具调用 JSON。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["tool_call"]
+    decision_summary: str = Field(min_length=1)
+    tool: str = Field(min_length=1)
+    arguments: dict[str, Any]
+
+    @field_validator("decision_summary")
+    @classmethod
+    def validate_decision_summary(cls, value: str) -> str:
+        """拒绝只有空白的决策摘要。"""
+
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("decision_summary must not be empty")
+        return normalized
+
+    @field_validator("tool")
+    @classmethod
+    def validate_tool_name(cls, value: str) -> str:
+        """工具名必须是稳定标识符，具体白名单由 ToolAdapter 校验。"""
+
+        if _TOOL_NAME_PATTERN.fullmatch(value) is None:
+            raise ValueError("tool must be a stable identifier")
+        return value
+
+
+class _FinishResponse(BaseModel):
+    """模型可返回的最终答案 JSON。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["finish"]
+    answer: str = Field(min_length=1)
+    decision_summary: str = ""
+
+    @field_validator("answer")
+    @classmethod
+    def validate_answer(cls, value: str) -> str:
+        """拒绝只有空白的最终答案。"""
+
+        if not value.strip():
+            raise ValueError("answer must not be empty")
+        return value
+
+
 def parse_action(response: str) -> ParsedAction:
-    """解析唯一一个 Thought 和一个 Action，拒绝其他输出形式。"""
+    """严格解析唯一一个 tool_call 或 finish JSON 对象。"""
 
-    lines = response.splitlines()
-    non_empty = [(index, line) for index, line in enumerate(lines) if line.strip()]
-    if not non_empty:
-        raise ActionProtocolError("response is empty")
-    thought_lines = [index for index, line in non_empty if line.lstrip().startswith("Thought:")]
-    action_lines = [index for index, line in non_empty if line.lstrip().startswith("Action:")]
-    if len(thought_lines) != 1:
-        raise ActionProtocolError("response must contain exactly one Thought")
-    if len(action_lines) != 1:
-        raise ActionProtocolError("response must contain exactly one Action")
-    thought_index = thought_lines[0]
-    action_index = action_lines[0]
-    if non_empty[0][0] != thought_index or thought_index >= action_index:
-        raise ActionProtocolError("Thought must appear before Action")
-    thought = "\n".join(line.strip() for line in lines[thought_index:action_index]).strip()
-    if not thought.startswith("Thought:") or not thought[8:].strip():
-        raise ActionProtocolError("Thought must not be empty")
-
-    action_line = lines[action_index].lstrip()
-    action_text = action_line.removeprefix("Action:").strip()
-    if action_text.startswith("Finish["):
-        finish_text = "\n".join([action_text, *lines[action_index + 1 :]])
-        close_index = _last_non_empty_close_bracket(finish_text)
-        if close_index < 0 or finish_text[close_index + 1 :].strip():
-            raise ActionProtocolError("Finish must end with its closing bracket")
-        answer = finish_text[len("Finish[") : close_index]
-        if not answer.strip():
-            raise ActionProtocolError("Finish answer must not be empty")
-        return FinishAction(thought=thought.removeprefix("Thought:").strip(), answer=answer)
-
-    if any(line.strip() for line in lines[action_index + 1 :]):
-        raise ActionProtocolError("tool Action must be one line")
-    match = _TOOL_ACTION_PATTERN.fullmatch(action_text)
-    if match is None:
-        raise ActionProtocolError("tool Action must use name[json_object]")
     try:
-        arguments = json.loads(match.group("arguments"))
-    except json.JSONDecodeError as error:
-        raise ActionProtocolError("tool Action arguments are not valid JSON") from error
-    if not isinstance(arguments, dict):
-        raise ActionProtocolError("tool Action arguments must be a JSON object")
-    return ToolAction(
-        thought=thought.removeprefix("Thought:").strip(),
-        tool_name=match.group("name"),
-        arguments=arguments,
-    )
+        payload = json.loads(
+            _escape_control_characters_in_strings(response),
+            object_pairs_hook=_object_without_duplicate_keys,
+            parse_constant=_reject_non_finite_number,
+        )
+    except (json.JSONDecodeError, ValueError) as error:
+        raise ActionProtocolError("response must be one valid JSON object") from error
+    if not isinstance(payload, dict):
+        raise ActionProtocolError("response must be a JSON object")
+    response_type = payload.get("type")
+    try:
+        if response_type == "tool_call":
+            tool_call = _ToolCallResponse.model_validate(payload)
+            return ToolAction(
+                decision_summary=tool_call.decision_summary,
+                tool_name=tool_call.tool,
+                arguments=tool_call.arguments,
+            )
+        if response_type == "finish":
+            finish = _FinishResponse.model_validate(payload)
+            return FinishAction(
+                answer=finish.answer,
+                decision_summary=finish.decision_summary.strip(),
+            )
+    except ValidationError as error:
+        raise ActionProtocolError("response does not match its action schema") from error
+    raise ActionProtocolError("response type must be tool_call or finish")
 
 
-def _last_non_empty_close_bracket(value: str) -> int:
-    index = len(value) - 1
-    while index >= 0 and value[index].isspace():
-        index -= 1
-    return index if index >= 0 and value[index] == "]" else -1
+def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """拒绝 JSON 重复键，避免后写字段覆盖先写字段。"""
+
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_non_finite_number(value: str) -> Any:
+    """JSON 协议不接受 NaN 或 Infinity。"""
+
+    raise ValueError(f"non-finite JSON number is not allowed: {value}")
+
+
+def _escape_control_characters_in_strings(value: str) -> str:
+    """把模型漏转义的 JSON 字符串控制字符转成合法转义。"""
+
+    escaped: list[str] = []
+    in_string = False
+    after_backslash = False
+    replacements = {
+        "\b": "\\b",
+        "\f": "\\f",
+        "\n": "\\n",
+        "\r": "\\r",
+        "\t": "\\t",
+    }
+    for char in value:
+        if in_string and after_backslash:
+            escaped.append(char)
+            after_backslash = False
+            continue
+        if char == "\\" and in_string:
+            escaped.append(char)
+            after_backslash = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            escaped.append(char)
+            continue
+        if in_string and ord(char) < 0x20:
+            escaped.append(replacements.get(char, f"\\u{ord(char):04x}"))
+            continue
+        escaped.append(char)
+    return "".join(escaped)

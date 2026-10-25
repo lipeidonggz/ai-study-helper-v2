@@ -13,7 +13,7 @@ export interface UserPromptView {
 /** Agent 输出中的一次工具调用。 */
 export interface ToolActionView {
   kind: "tool";
-  thought: string;
+  decisionSummary: string;
   toolName: string;
   argumentsText: string;
 }
@@ -21,7 +21,7 @@ export interface ToolActionView {
 /** Agent 输出中的最终回答。 */
 export interface FinishActionView {
   kind: "finish";
-  thought: string;
+  decisionSummary: string;
   answer: string;
 }
 
@@ -30,7 +30,7 @@ export type ModelOutputView = ToolActionView | FinishActionView;
 
 /** 运行历史中的一条 Assistant 输出或 Observation。 */
 export interface HistoryEntryView {
-  kind: "assistant" | "observation" | "other";
+  kind: "assistant" | "tool_result" | "protocol_error" | "observation" | "other";
   content: string;
   output: ModelOutputView | null;
   payloadText: string | null;
@@ -124,13 +124,13 @@ export function parseUserPrompt(content: string): UserPromptView | null {
   };
 }
 
-/** 解析运行历史中的 Assistant 输出与 Observation。 */
+/** 解析运行历史中的结构化模型输出和 Harness 消息；兼容旧 trace。 */
 export function parseHistoryEntries(history: string): HistoryEntryView[] {
   if (!history || history === "（空）") {
     return [];
   }
   return history
-    .split(/\n{2,}(?=Assistant response:\n|Observation:\n)/)
+    .split(/\n{2,}(?=Assistant response:\n|Observation:\n|\{)/)
     .map((part) => part.trim())
     .filter(Boolean)
     .map((part) => {
@@ -152,6 +152,10 @@ export function parseHistoryEntries(history: string): HistoryEntryView[] {
           payloadText: formatJson(content),
         };
       }
+      const structured = parseStructuredHistoryEntry(part);
+      if (structured) {
+        return structured;
+      }
       return {
         kind: "other",
         content: part,
@@ -161,8 +165,139 @@ export function parseHistoryEntries(history: string): HistoryEntryView[] {
     });
 }
 
-/** 严格解析 Agent 的 Thought／Action 输出；规则与后端 actions.py 保持一致。 */
+/** 严格解析 Agent 的结构化 JSON 输出；旧 trace 继续按 Thought／Action 读取。 */
 export function parseModelOutput(content: string): ModelOutputView | null {
+  const structured = parseStructuredModelOutput(content);
+  if (structured) {
+    return structured;
+  }
+  return parseLegacyModelOutput(content);
+}
+
+/** 解析结构化 tool_call／finish JSON，并验证展示所需字段。 */
+function parseStructuredModelOutput(content: string): ModelOutputView | null {
+  try {
+    const value = parseModelJson(content);
+    if (!isRecord(value)) {
+      return null;
+    }
+    if (
+      value.type === "tool_call" &&
+      typeof value.decision_summary === "string" &&
+      typeof value.tool === "string" &&
+      isRecord(value.arguments) &&
+      value.decision_summary.trim()
+    ) {
+      return {
+        kind: "tool",
+        decisionSummary: value.decision_summary,
+        toolName: value.tool,
+        argumentsText: JSON.stringify(value.arguments, null, 2),
+      };
+    }
+    if (
+      value.type === "finish" &&
+      typeof value.answer === "string" &&
+      value.answer.trim()
+    ) {
+      return {
+        kind: "finish",
+        decisionSummary:
+          typeof value.decision_summary === "string" ? value.decision_summary : "",
+        answer: value.answer,
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** 解析一条结构化 Agent 或 Harness 历史消息；旧格式返回 null。 */
+function parseStructuredHistoryEntry(part: string): HistoryEntryView | null {
+  try {
+    const value = parseModelJson(part);
+    if (!isRecord(value) || typeof value.type !== "string") {
+      return null;
+    }
+    if (value.type === "tool_call" || value.type === "finish") {
+      return {
+        kind: "assistant",
+        content: part,
+        output: parseStructuredModelOutput(part),
+        payloadText: null,
+      };
+    }
+    if (value.type === "tool_result") {
+      return {
+        kind: "tool_result",
+        content: part,
+        output: null,
+        payloadText: formatJson(part),
+      };
+    }
+    if (value.type === "protocol_error") {
+      return {
+        kind: "protocol_error",
+        content: part,
+        output: null,
+        payloadText: formatJson(part),
+      };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/** 解析模型 JSON，并兼容供应商漏转义字符串控制字符的行为。 */
+function parseModelJson(content: string): unknown {
+  try {
+    return JSON.parse(content) as unknown;
+  } catch {
+    return JSON.parse(escapeControlCharactersInStrings(content)) as unknown;
+  }
+}
+
+/** 只修复 JSON 字符串内的原始控制字符，不改变对象结构。 */
+function escapeControlCharactersInStrings(content: string): string {
+  let result = "";
+  let inString = false;
+  let afterBackslash = false;
+  for (const char of content) {
+    if (inString && afterBackslash) {
+      result += char;
+      afterBackslash = false;
+      continue;
+    }
+    if (char === "\\" && inString) {
+      result += char;
+      afterBackslash = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      result += char;
+      continue;
+    }
+    if (inString && char.charCodeAt(0) < 0x20) {
+      const replacements: Record<string, string> = {
+        "\b": "\\b",
+        "\f": "\\f",
+        "\n": "\\n",
+        "\r": "\\r",
+        "\t": "\\t",
+      };
+      result += replacements[char] ?? `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`;
+      continue;
+    }
+    result += char;
+  }
+  return result;
+}
+
+/** 解析 026 之前自由文本 Thought／Action 格式，仅用于历史 trace 兼容。 */
+function parseLegacyModelOutput(content: string): ModelOutputView | null {
   const lines = content.split(/\r?\n/);
   const nonEmpty = lines
     .map((line, index) => ({ line, index }))
@@ -206,7 +341,7 @@ export function parseModelOutput(content: string): ModelOutputView | null {
     if (!answer.trim()) {
       return null;
     }
-    return { kind: "finish", thought, answer };
+    return { kind: "finish", decisionSummary: thought, answer };
   }
 
   if (lines.slice(actionIndex + 1).some((line) => line.trim())) {
@@ -228,7 +363,7 @@ export function parseModelOutput(content: string): ModelOutputView | null {
   }
   return {
     kind: "tool",
-    thought,
+    decisionSummary: thought,
     toolName: match[1],
     argumentsText,
   };

@@ -75,6 +75,7 @@ def test_deepseek_chat_provider_uses_openai_compatible_contract(
     assert captured["model"] == DEEPSEEK_MODEL_ID
     assert captured["temperature"] == 0.0
     assert captured["max_tokens"] == 8
+    assert captured["response_format"] == {"type": "json_object"}
     assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
     assert result.content == "OK"
     assert result.request_id == "request-1"
@@ -144,6 +145,7 @@ def test_deepseek_chat_provider_streams_deltas_and_usage(
 
     assert captured["stream"] is True
     assert captured["stream_options"] == {"include_usage": True}
+    assert captured["response_format"] == {"type": "json_object"}
     assert "".join(chunk.delta for chunk in chunks) == "答案"
     assert chunks[-1].result is not None
     assert chunks[-1].result.input_tokens == 9

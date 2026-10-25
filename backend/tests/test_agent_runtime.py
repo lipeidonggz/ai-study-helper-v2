@@ -7,11 +7,18 @@ from pathlib import Path
 
 import httpx
 import pytest
+from langgraph.errors import GraphRecursionError
 
-from app.agent.runtime import AgentRunConfig, AgentRuntime, RunCancellationToken
+from app.agent.runtime import (
+    AgentRunConfig,
+    AgentRuntime,
+    RunCancellationToken,
+    _AgentGraphExecution,
+)
 from app.agent.tool_adapter import RetrievalToolAdapter, ToolUnavailableError
 from app.main import create_app
 from app.providers.chat import (
+    ChatCompletionResult,
     ChatMessage,
     ChatProviderError,
     ChatStreamChunk,
@@ -37,6 +44,38 @@ def _html() -> bytes:
         "确保文档拥有足够长度的可读学习材料。</p>"
         "</article></body></html>"
     ).encode()
+
+
+def _tool_call(
+    tool: str,
+    arguments: dict[str, object],
+    *,
+    summary: str = "需要调用工具继续获取证据。",
+) -> str:
+    return json.dumps(
+        {
+            "type": "tool_call",
+            "decision_summary": summary,
+            "tool": tool,
+            "arguments": arguments,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _finish(
+    answer: str,
+    *,
+    summary: str = "当前证据已经足够回答。",
+) -> str:
+    return json.dumps(
+        {
+            "type": "finish",
+            "answer": answer,
+            "decision_summary": summary,
+        },
+        ensure_ascii=False,
+    )
 
 
 async def _wait_for_terminal(client: httpx.AsyncClient, task_id: str) -> None:
@@ -120,8 +159,8 @@ def test_agent_runtime_executes_tool_and_finishes(tmp_path: Path) -> None:
     embedding_provider = _prepare_snapshot(tmp_path)
     chat_provider = FakeChatProvider(
         [
-            'Thought: 需要查找 MCP。\nAction: search_blocks[{"query":"MCP"}]',
-            "Thought: 已取得证据。\nAction: Finish[MCP 位于沙箱边界章节。]",
+            _tool_call("search_blocks", {"query": "MCP"}),
+            _finish("MCP 位于沙箱边界章节。"),
         ]
     )
     runtime = AgentRuntime(
@@ -154,8 +193,8 @@ def test_agent_runtime_emits_safe_answer_activity_usage_and_sources(
     embedding_provider = _prepare_snapshot(tmp_path)
     chat_provider = FakeChatProvider(
         [
-            'Thought: 需要查找 MCP。\nAction: search_blocks[{"query":"MCP"}]',
-            "Thought: 已取得证据。\nAction: Finish[MCP 位于沙箱边界章节。]",
+            _tool_call("search_blocks", {"query": "MCP"}),
+            _finish("MCP 位于沙箱边界章节。"),
         ],
         stream_chunk_size=4,
     )
@@ -183,8 +222,8 @@ def test_agent_runtime_emits_safe_answer_activity_usage_and_sources(
     assert result.sources[0]["source_key"] == result.sources[0]["block_id"]
     assert result.sources[0]["source_key"].startswith(result.sources[0]["doc_id"])
     assert all(
-        "Thought:" not in event.payload.get("delta", "")
-        and "Observation:" not in event.payload.get("delta", "")
+        "decision_summary" not in event.payload.get("delta", "")
+        and '"type":"finish"' not in event.payload.get("delta", "")
         for event in emitted
         if event.event_type == "answer_delta"
     )
@@ -199,7 +238,7 @@ def test_agent_runtime_cancel_interrupts_model_stream_without_later_calls(
         started = asyncio.Event()
 
         async def stream(self, messages, *, max_output_tokens=None):
-            yield ChatStreamChunk(delta="Thought: 尚未完成。\nAction: Finish[已生成的部分答案")
+            yield ChatStreamChunk(delta='{"type":"finish","answer":"已生成的部分答案')
             self.started.set()
             await asyncio.Event().wait()
 
@@ -236,8 +275,8 @@ def test_agent_runtime_persists_parented_trace_with_tool_and_budget_data(
     embedding_provider = _prepare_snapshot(tmp_path)
     chat_provider = FakeChatProvider(
         [
-            'Thought: 需要查找 MCP。\nAction: search_blocks[{"query":"MCP"}]',
-            "Thought: 已取得证据。\nAction: Finish[MCP 位于沙箱边界章节。]",
+            _tool_call("search_blocks", {"query": "MCP"}),
+            _finish("MCP 位于沙箱边界章节。"),
         ],
         stream_chunk_size=5,
     )
@@ -275,7 +314,7 @@ def test_agent_runtime_persists_parented_trace_with_tool_and_budget_data(
     assert any(event.name == "budget.check" for turn in turns for event in turn.events)
     assert detail.manifest.trace_status == "complete"
     assert detail.manifest.replay_scope == "retrieval"
-    assert detail.manifest.versions["agent_loop_version"] == "react-langgraph-v2"
+    assert detail.manifest.versions["agent_loop_version"] == "react-structured-v3"
     assert {artifact.kind for artifact in detail.manifest.artifacts} >= {
         "question",
         "llm.prompt",
@@ -291,7 +330,7 @@ def test_trace_queue_failure_does_not_break_agent_answer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     embedding_provider = _prepare_snapshot(tmp_path)
-    chat_provider = FakeChatProvider(["Thought: 完成。\nAction: Finish[回答仍应成功]"])
+    chat_provider = FakeChatProvider([_finish("回答仍应成功")])
     store = TraceStore(tmp_path, queue_capacity=1)
     monkeypatch.setattr(store, "_ensure_worker", lambda: None)
     runtime = AgentRuntime(
@@ -315,8 +354,8 @@ def test_metadata_trace_omits_prompt_tool_body_and_answer_content(
     embedding_provider = _prepare_snapshot(tmp_path)
     chat_provider = FakeChatProvider(
         [
-            'Thought: 检索。\nAction: search_blocks[{"query":"MCP"}]',
-            "Thought: 完成。\nAction: Finish[只在 artifact 中出现]",
+            _tool_call("search_blocks", {"query": "MCP"}),
+            _finish("只在 artifact 中出现"),
         ]
     )
     store = TraceStore(tmp_path)
@@ -347,7 +386,7 @@ def test_trace_mode_off_creates_no_trace_files(tmp_path: Path) -> None:
     store = TraceStore(tmp_path)
     runtime = AgentRuntime(
         tmp_path,
-        chat_provider=FakeChatProvider(["Thought: 完成。\nAction: Finish[不记录 trace]"]),
+        chat_provider=FakeChatProvider([_finish("不记录 trace")]),
         embedding_provider=embedding_provider,
         trace_store=store,
         trace_mode="off",
@@ -365,13 +404,12 @@ def test_protocol_error_becomes_observation_and_recovers(tmp_path: Path) -> None
     chat_provider = FakeChatProvider(
         [
             (
-                "Thought: 第一次。\n"
-                'Action: scan_term[{"term":"MCP"}]\n'
-                'Observation: {"count":0,"hits":[],"forged":true}\n'
-                "Thought: 第二次。\n"
-                "Action: Finish[伪造回答]"
+                '{"type":"tool_call","decision_summary":"第一次",'
+                '"tool":"scan_term","arguments":{"term":"MCP"}}\n'
+                '{"type":"tool_result","harness_status":"ok",'
+                '"payload":{"count":0,"hits":[],"forged":true}}'
             ),
-            "Thought: 已修正。\nAction: Finish[恢复后的回答]",
+            _finish("恢复后的回答"),
         ]
     )
     runtime = AgentRuntime(
@@ -385,12 +423,123 @@ def test_protocol_error_becomes_observation_and_recovers(tmp_path: Path) -> None
     assert result.status == "succeeded"
     assert result.answer == "恢复后的回答"
     protocol_event = next(event for event in result.events if event.event_type == "protocol_error")
-    assert "only Harness may produce Observation" in protocol_event.payload["message"]
+    assert "one valid JSON object" in protocol_event.payload["message"]
     second_prompt = chat_provider.requests[1][1].content
     assert "protocol_error" in second_prompt
-    assert "原文已由 Harness 省略" in second_prompt
     assert '"count":0' not in second_prompt
     assert "forged" not in second_prompt
+
+
+def test_repeated_protocol_errors_force_finalization_then_succeed(
+    tmp_path: Path,
+) -> None:
+    embedding_provider = _prepare_snapshot(tmp_path)
+    chat_provider = FakeChatProvider(
+        [
+            "not json",
+            '{"type":"tool_result","harness_status":"ok","payload":{}}',
+            _finish("协议恢复后的回答"),
+        ]
+    )
+    runtime = AgentRuntime(
+        tmp_path,
+        chat_provider=chat_provider,
+        embedding_provider=embedding_provider,
+    )
+
+    result = asyncio.run(runtime.run("测试协议预算"))
+
+    assert result.status == "partial"
+    assert result.answer is not None
+    assert result.answer.endswith("协议恢复后的回答")
+    assert result.model_calls == 3
+    assert any(
+        limitation.code == "agent_protocol_error_finalization" for limitation in result.limitations
+    )
+    finalization_prompt = chat_provider.requests[2][0].content
+    assert "<finalization_mode>" in finalization_prompt
+    assert "工具已禁用" in finalization_prompt
+
+
+def test_protocol_loop_terminates_as_product_failure_and_preserves_trace(
+    tmp_path: Path,
+) -> None:
+    embedding_provider = _prepare_snapshot(tmp_path)
+    store = TraceStore(tmp_path)
+    runtime = AgentRuntime(
+        tmp_path,
+        chat_provider=FakeChatProvider(["not json", "still not json", "invalid finish"]),
+        embedding_provider=embedding_provider,
+        trace_store=store,
+        trace_mode="full",
+    )
+
+    result = asyncio.run(runtime.run("测试协议循环终止"))
+
+    assert result.status == "failed"
+    assert result.termination_reason == "agent_protocol_loop"
+    assert result.model_calls == 3
+    assert result.input_tokens > 0
+    assert result.output_tokens > 0
+    assert result.trace_status == "complete"
+    assert store.wait_for_idle(3)
+    detail = TraceCatalog(tmp_path / "traces").load(result.trace_id)
+    store.close()
+    assert detail.manifest.status == "failed"
+    assert detail.manifest.termination_reason == "agent_protocol_loop"
+    assert detail.manifest.model_calls == 3
+    assert detail.manifest.input_tokens == result.input_tokens
+    assert any(span.error_code == "protocol_error" for span in detail.spans)
+
+
+def test_graph_recursion_is_converted_to_product_failure_with_trace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RecursingGraph:
+        async def astream(self, initial, _config, *, stream_mode):
+            assert stream_mode == "values"
+            yield {
+                **initial,
+                "agent_turns": 2,
+                "model_calls": 2,
+                "input_tokens": 30,
+                "output_tokens": 8,
+                "history": ['{"type":"finish","answer":"未完成'],
+            }
+            raise GraphRecursionError("Recursion limit of 20 reached")
+
+    monkeypatch.setattr(
+        _AgentGraphExecution,
+        "_build_graph",
+        lambda _self: RecursingGraph(),
+    )
+    embedding_provider = _prepare_snapshot(tmp_path)
+    store = TraceStore(tmp_path)
+    runtime = AgentRuntime(
+        tmp_path,
+        chat_provider=FakeChatProvider(["unused"]),
+        embedding_provider=embedding_provider,
+        trace_store=store,
+        trace_mode="full",
+    )
+
+    result = asyncio.run(runtime.run("测试图递归异常"))
+
+    assert result.status == "failed"
+    assert result.termination_reason == "agent_protocol_loop"
+    assert result.model_calls == 2
+    assert result.input_tokens == 30
+    assert result.output_tokens == 8
+    assert result.trace_status == "complete"
+    assert store.wait_for_idle(3)
+    detail = TraceCatalog(tmp_path / "traces").load(result.trace_id)
+    store.close()
+    assert detail.manifest.status == "failed"
+    assert detail.manifest.termination_reason == "agent_protocol_loop"
+    assert detail.manifest.model_calls == 2
+    assert detail.manifest.input_tokens == 30
+    assert detail.manifest.output_tokens == 8
 
 
 def test_unknown_tool_is_not_dispatched_and_counts_as_tool_unavailable(
@@ -399,8 +548,8 @@ def test_unknown_tool_is_not_dispatched_and_counts_as_tool_unavailable(
     embedding_provider = _prepare_snapshot(tmp_path)
     chat_provider = FakeChatProvider(
         [
-            'Thought: 尝试未知工具。\nAction: write_file[{"path":"x"}]',
-            "Thought: 改用回答。\nAction: Finish[没有执行未知工具]",
+            _tool_call("write_file", {"path": "x"}),
+            _finish("没有执行未知工具"),
         ]
     )
     runtime = AgentRuntime(
@@ -420,8 +569,7 @@ def test_tool_limit_enters_finalization_mode(tmp_path: Path) -> None:
     embedding_provider = _prepare_snapshot(tmp_path)
     chat_provider = FakeChatProvider(
         [
-            'Thought: 想检索。\nAction: search_blocks[{"query":"MCP"}]',
-            "Thought: 工具已关闭。\nAction: Finish[预算内完成]",
+            _finish("预算内完成"),
         ]
     )
     runtime = AgentRuntime(
@@ -454,9 +602,21 @@ def test_tool_limit_enters_finalization_mode(tmp_path: Path) -> None:
 def test_truncated_finish_keeps_streamed_partial_answer_and_declares_incomplete(
     tmp_path: Path,
 ) -> None:
+    class LengthLimitedProvider(FakeChatProvider):
+        async def complete(self, messages, *, max_output_tokens=None):
+            result = await super().complete(messages, max_output_tokens=max_output_tokens)
+            return ChatCompletionResult(
+                content=result.content,
+                request_id=result.request_id,
+                actual_model_id=result.actual_model_id,
+                finish_reason="length",
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+            )
+
     embedding_provider = _prepare_snapshot(tmp_path)
-    chat_provider = FakeChatProvider(
-        ["Thought: 输出过长。\nAction: Finish[已经生成但尚未闭合的部分正文"]
+    chat_provider = LengthLimitedProvider(
+        ['{"type":"finish","answer":"已经生成但尚未闭合的部分正文']
     )
     runtime = AgentRuntime(
         tmp_path,
@@ -476,13 +636,13 @@ def test_truncated_finish_keeps_streamed_partial_answer_and_declares_incomplete(
     assert any(limitation.code == "request_budget_exceeded" for limitation in result.limitations)
 
 
-def test_tool_attempt_after_limit_is_blocked_until_finish(tmp_path: Path) -> None:
+def test_tool_call_during_finalization_terminates_protocol_loop(tmp_path: Path) -> None:
     embedding_provider = _prepare_snapshot(tmp_path)
     chat_provider = FakeChatProvider(
         [
-            'Thought: 第一次检索。\nAction: search_blocks[{"query":"MCP"}]',
-            'Thought: 再检索一次。\nAction: search_blocks[{"query":"Agent"}]',
-            "Thought: 工具已关闭，直接回答。\nAction: Finish[基于已有证据回答]",
+            _tool_call("search_blocks", {"query": "MCP"}),
+            _tool_call("search_blocks", {"query": "Agent"}),
+            _finish("基于已有证据回答"),
         ]
     )
     runtime = AgentRuntime(
@@ -494,27 +654,25 @@ def test_tool_attempt_after_limit_is_blocked_until_finish(tmp_path: Path) -> Non
 
     result = asyncio.run(runtime.run("测试达到工具上限后继续调用"))
 
-    assert result.status == "partial"
+    assert result.status == "failed"
     assert result.tool_calls == 1
+    assert result.termination_reason == "agent_protocol_loop"
     assert any(
-        limitation.code == "max_tool_calls"
-        and limitation.parameter == "max_tool_calls"
-        and limitation.limit == 1
+        limitation.code == "agent_protocol_loop"
+        and limitation.parameter == "max_protocol_errors"
+        and limitation.limit == 2
         for limitation in result.limitations
     )
-    assert any(event.event_type == "tool_unavailable" for event in result.events)
     second_system_prompt = chat_provider.requests[1][0].content
     tools_text = second_system_prompt.split("<tools>")[1].split("</tools>")[0]
     assert tools_text.strip() == ""
-    assert result.answer is not None
-    assert result.answer.startswith("注意：本次回答未完整完成")
 
 
 def test_context_budget_failure_is_explicit(tmp_path: Path) -> None:
     embedding_provider = _prepare_snapshot(tmp_path)
     runtime = AgentRuntime(
         tmp_path,
-        chat_provider=FakeChatProvider(["Thought: unused\nAction: Finish[unused]"]),
+        chat_provider=FakeChatProvider([_finish("unused")]),
         embedding_provider=embedding_provider,
         config=AgentRunConfig(
             max_context_tokens=10,
@@ -561,8 +719,8 @@ def test_oversized_tool_result_is_dropped_and_answer_is_marked_partial(
     embedding_provider = _prepare_snapshot(tmp_path)
     chat_provider = SmallUsageProvider(
         [
-            'Thought: 检索。\nAction: search_blocks[{"query":"MCP"}]',
-            "Thought: 预算不足。\nAction: Finish[部分回答]",
+            _tool_call("search_blocks", {"query": "MCP"}),
+            _finish("部分回答"),
         ]
     )
     runtime = AgentRuntime(
@@ -645,7 +803,7 @@ def test_chat_retry_is_bounded_to_one_retry(tmp_path: Path) -> None:
             return await super().complete(messages, max_output_tokens=max_output_tokens)
 
     embedding_provider = _prepare_snapshot(tmp_path)
-    provider = RetryChatProvider(["Thought: 完成\nAction: Finish[重试成功]"])
+    provider = RetryChatProvider([_finish("重试成功")])
     RetryChatProvider.attempts = 0
     runtime = AgentRuntime(
         tmp_path,
@@ -682,9 +840,7 @@ def test_missing_provider_usage_uses_conservative_token_estimate(tmp_path: Path)
     embedding_provider = _prepare_snapshot(tmp_path)
     runtime = AgentRuntime(
         tmp_path,
-        chat_provider=MissingUsageProvider(
-            ["Thought: 完成\nAction: Finish[估算 usage 时仍可完成]"]
-        ),
+        chat_provider=MissingUsageProvider([_finish("估算 usage 时仍可完成")]),
         embedding_provider=embedding_provider,
     )
 
@@ -699,7 +855,7 @@ def test_missing_provider_usage_uses_conservative_token_estimate(tmp_path: Path)
 
 def test_protected_agent_api_runs_with_injected_providers(tmp_path: Path) -> None:
     embedding_provider = _prepare_snapshot(tmp_path)
-    chat_provider = FakeChatProvider(["Thought: 直接回答。\nAction: Finish[API 运行成功]"])
+    chat_provider = FakeChatProvider([_finish("API 运行成功")])
     app = create_app(
         TOKEN,
         data_root=tmp_path,
@@ -728,7 +884,7 @@ def test_protected_agent_api_runs_with_injected_providers(tmp_path: Path) -> Non
     assert result["answer"] == "API 运行成功"
     assert result["answer_completeness"] == "complete"
     assert result["limitations"] == []
-    assert result["prompt_bundle_version"] == "chat-v3"
+    assert result["prompt_bundle_version"] == "chat-v4"
     assert result["observation_token_counter_version"] == "chat-budget-conservative-v1"
 
 
@@ -736,8 +892,8 @@ def test_agent_api_uses_saved_runtime_settings(tmp_path: Path) -> None:
     embedding_provider = _prepare_snapshot(tmp_path)
     chat_provider = FakeChatProvider(
         [
-            'Thought: 检索。\nAction: search_blocks[{"query":"MCP"}]',
-            "Thought: 完成。\nAction: Finish[设置已生效]",
+            _tool_call("search_blocks", {"query": "MCP"}),
+            _finish("设置已生效"),
         ]
     )
     app = create_app(
@@ -809,8 +965,8 @@ def test_runtime_settings_do_not_change_an_inflight_request(tmp_path: Path) -> N
 
     chat_provider = BlockingChatProvider(
         [
-            "Thought: 第一请求。\nAction: Finish[旧配置]",
-            "Thought: 第二请求。\nAction: Finish[新配置]",
+            _finish("旧配置"),
+            _finish("新配置"),
         ]
     )
     chat_provider.started = asyncio.Event()
@@ -883,7 +1039,7 @@ def test_runtime_settings_do_not_change_an_inflight_request(tmp_path: Path) -> N
 def test_agent_api_exposes_persisted_trace_detail_and_artifact(tmp_path: Path) -> None:
     embedding_provider = _prepare_snapshot(tmp_path)
     chat_provider = FakeChatProvider(
-        ["Thought: 完成。\nAction: Finish[可诊断回答]"],
+        [_finish("可诊断回答")],
         stream_chunk_size=3,
     )
     app = create_app(
@@ -998,7 +1154,7 @@ def test_streaming_agent_api_replays_events_without_duplicate_text(
 ) -> None:
     embedding_provider = _prepare_snapshot(tmp_path)
     chat_provider = FakeChatProvider(
-        ["Thought: 完成。\nAction: Finish[流式回答]"],
+        [_finish("流式回答")],
         stream_chunk_size=2,
     )
     app = create_app(
@@ -1070,7 +1226,7 @@ def test_streaming_agent_api_cancel_preserves_canceled_terminal_state(
         started = asyncio.Event()
 
         async def stream(self, messages, *, max_output_tokens=None):
-            yield ChatStreamChunk(delta="Thought: 尚未完成。\n")
+            yield ChatStreamChunk(delta='{"type":"finish","answer":')
             self.started.set()
             await asyncio.Event().wait()
 
