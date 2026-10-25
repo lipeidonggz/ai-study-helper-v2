@@ -15,6 +15,8 @@ from app.agent.token_counter import ObservationTokenCounter
 from app.providers.chat import ChatMessage, ChatProvider, ChatProviderError
 
 CITATION_ANNOTATION_SCHEMA_VERSION = "citation-annotation-v1"
+CLAIM_SPAN_VERSION = "claim-spans-v2"
+LEGACY_CLAIM_SPAN_VERSION = "legacy-unknown"
 MAX_CITATION_ANNOTATION_OUTPUT_TOKENS = 4_096
 MAX_CITATION_ANNOTATION_ATTEMPTS = 2
 
@@ -77,6 +79,7 @@ class CitationAnnotationArtifact(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: str = CITATION_ANNOTATION_SCHEMA_VERSION
+    span_version: str = LEGACY_CLAIM_SPAN_VERSION
     status: Literal["complete", "pending", "not_applicable"]
     prompt_version: str = CITATION_ANNOTATION_PROMPT_VERSION
     prompt_hash: str = CITATION_ANNOTATION_PROMPT_HASH
@@ -322,6 +325,7 @@ class CitationAnnotator:
         return CitationAnnotationOutcome(
             artifact=CitationAnnotationArtifact(
                 status=status,
+                span_version=CLAIM_SPAN_VERSION,
                 model_id=model_id,
                 span_count=len(spans),
                 evidence_count=len(evidence_blocks),
@@ -353,6 +357,7 @@ class CitationAnnotator:
         return CitationAnnotationOutcome(
             artifact=CitationAnnotationArtifact(
                 status="pending",
+                span_version=CLAIM_SPAN_VERSION,
                 model_id=model_id,
                 span_count=len(spans),
                 evidence_count=len(evidence_blocks),

@@ -364,6 +364,16 @@ def _case_delta(
         pass_count_delta=_delta(baseline, target, "pass_count"),
         fail_count_delta=_delta(baseline, target, "fail_count"),
         pending_count_delta=_delta(baseline, target, "pending_count"),
+        x_violation_count_delta=_delta(
+            baseline,
+            target,
+            "x_violation_count",
+        ),
+        check_failure_count_delta=_delta(
+            baseline,
+            target,
+            "check_failure_count",
+        ),
         redline_violation_count_delta=_delta(
             baseline,
             target,
@@ -390,6 +400,8 @@ def _comparison_summary(
             target.case_exploratory_count - baseline.case_exploratory_count
         ),
         valid_samples_delta=target.valid_samples - baseline.valid_samples,
+        x_violation_count_delta=(target.x_violation_count - baseline.x_violation_count),
+        check_failure_count_delta=(target.check_failure_count - baseline.check_failure_count),
         redline_violation_count_delta=(
             target.redline_violation_count - baseline.redline_violation_count
         ),

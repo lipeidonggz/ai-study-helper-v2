@@ -673,6 +673,7 @@ class _AgentGraphExecution:
             annotation_span.attributes.update(
                 {
                     "app.citation_annotation_status": outcome.artifact.status,
+                    "app.claim_span_version": outcome.artifact.span_version,
                     "app.citation_annotation_prompt_version": (outcome.artifact.prompt_version),
                     "app.citation_annotation_prompt_hash": outcome.artifact.prompt_hash,
                     "app.model_calls": outcome.model_calls,
@@ -726,6 +727,7 @@ class _AgentGraphExecution:
         artifact_payload = outcome.artifact.model_dump(mode="json")
         public_payload = {
             "status": artifact_payload["status"],
+            "span_version": artifact_payload["span_version"],
             "annotations": artifact_payload["annotations"],
             "error_code": artifact_payload["error_code"],
             "message": artifact_payload["error_message"],

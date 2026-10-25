@@ -10,6 +10,8 @@ import pytest
 
 from app.agent.citation_annotation_prompt import render_citation_annotation_messages
 from app.agent.citations import (
+    CLAIM_SPAN_VERSION,
+    LEGACY_CLAIM_SPAN_VERSION,
     CitationAnnotation,
     CitationAnnotationArtifact,
     CitationAnnotationInput,
@@ -19,7 +21,11 @@ from app.agent.citations import (
 )
 from app.agent.token_counter import ConservativeObservationTokenCounter
 from app.evaluation.citation_prompt import CitationEvidenceInput
-from app.evaluation.evidence import JudgeInputError, build_judge_input
+from app.evaluation.evidence import (
+    JudgeInputError,
+    build_generation_judge_input,
+    build_judge_input,
+)
 from app.evaluation.judgment import _build_citation_task
 from app.providers.chat import (
     ChatCompletionResult,
@@ -224,6 +230,7 @@ def test_annotator_returns_independent_claim_spans_with_exact_offsets() -> None:
     )
 
     assert outcome.artifact.status == "complete"
+    assert outcome.artifact.span_version == CLAIM_SPAN_VERSION
     assert outcome.model_calls == 1
     assert [item.text for item in outcome.artifact.annotations] == [
         "第一事实。",
@@ -574,6 +581,12 @@ def test_pending_annotation_keeps_citation_check_pending(tmp_path: Path) -> None
         ),
     )
 
+    generation_input = build_generation_judge_input(
+        catalog=catalog,  # type: ignore[arg-type]
+        trace_id="c" * 32,
+        trace_status="complete",
+        answer="答案。",
+    )
     with pytest.raises(JudgeInputError) as error:
         build_judge_input(
             catalog=catalog,  # type: ignore[arg-type]
@@ -582,7 +595,25 @@ def test_pending_annotation_keeps_citation_check_pending(tmp_path: Path) -> None
             answer="答案。",
         )
 
+    assert generation_input.checker_payload.generation_state.answer_completeness == "complete"
     assert error.value.code == "citation_annotation_model_failed"
+
+
+def test_legacy_artifact_without_span_version_is_marked_unknown(tmp_path: Path) -> None:
+    payload = {
+        "schema_version": "citation-annotation-v1",
+        "status": "complete",
+        "prompt_version": "claim-citation-v1",
+        "prompt_hash": "a" * 64,
+        "model_id": "fake-annotation",
+        "span_count": 0,
+        "evidence_count": 0,
+        "annotations": [],
+    }
+
+    artifact = CitationAnnotationArtifact.model_validate(payload)
+
+    assert artifact.span_version == LEGACY_CLAIM_SPAN_VERSION
 
 
 def test_historical_trace_without_annotation_artifact_uses_inline_fallback(

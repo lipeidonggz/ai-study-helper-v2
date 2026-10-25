@@ -531,6 +531,8 @@ class CaseAggregateView(BaseModel):
     pass_count: int
     fail_count: int
     pending_count: int
+    x_violation_count: int = 0
+    check_failure_count: int = 0
     redline_violation_count: int
     result: Literal["pass", "fail", "pending", "exploratory"]
     reasons: list[str] = Field(default_factory=list)
@@ -546,6 +548,8 @@ class ResultMatrixAttemptView(BaseModel):
     valid_sample: bool
     result: Literal["pass", "fail", "pending", "excluded"]
     redline_violated: bool
+    x_violated: int = 0
+    check_failures: list[str] = Field(default_factory=list)
     trace_id: str | None
     trace_status: Literal["complete", "partial", "dropped", "missing"]
     started_at: str
@@ -573,6 +577,8 @@ class ResultMatrixCaseView(BaseModel):
     pass_count: int
     fail_count: int
     pending_count: int
+    x_violation_count: int = 0
+    check_failure_count: int = 0
     redline_violation_count: int
     result: Literal["pass", "fail", "pending", "exploratory"]
     input_tokens: int
@@ -598,6 +604,8 @@ class ResultMatrixTotalsView(BaseModel):
     infrastructure_failures: int
     canceled_attempts: int
     unknown_attempts: int
+    x_violation_count: int = 0
+    check_failure_count: int = 0
     redline_violation_count: int
     input_tokens: int
     output_tokens: int
@@ -714,6 +722,8 @@ class BaselineCaseDeltaView(BaseModel):
     pass_count_delta: int
     fail_count_delta: int
     pending_count_delta: int
+    x_violation_count_delta: int = 0
+    check_failure_count_delta: int = 0
     redline_violation_count_delta: int
     input_tokens_delta: int
     output_tokens_delta: int
@@ -730,6 +740,8 @@ class BaselineComparisonSummaryView(BaseModel):
     case_pending_count_delta: int
     case_exploratory_count_delta: int
     valid_samples_delta: int
+    x_violation_count_delta: int = 0
+    check_failure_count_delta: int = 0
     redline_violation_count_delta: int
     input_tokens_delta: int
     output_tokens_delta: int

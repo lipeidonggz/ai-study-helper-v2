@@ -156,6 +156,8 @@ def _case_aggregate(
     pass_count = sum(item.result == "pass" for item in valid)
     fail_count = sum(item.result == "fail" for item in valid)
     pending_count = sum(item.result == "pending" for item in valid)
+    x_violation_count = sum(item.x_violated > 0 for item in valid)
+    check_failure_count = sum(bool(item.check_failures) for item in valid)
     redline_violation_count = sum(
         item.x_violated > 0 or bool(item.check_failures) for item in valid
     )
@@ -189,6 +191,8 @@ def _case_aggregate(
         pass_count=pass_count,
         fail_count=fail_count,
         pending_count=pending_count,
+        x_violation_count=x_violation_count,
+        check_failure_count=check_failure_count,
         redline_violation_count=redline_violation_count,
         result=result,
         reasons=reasons,
@@ -239,6 +243,8 @@ def build_result_matrix(
                 pass_count=aggregate.pass_count,
                 fail_count=aggregate.fail_count,
                 pending_count=aggregate.pending_count,
+                x_violation_count=aggregate.x_violation_count,
+                check_failure_count=aggregate.check_failure_count,
                 redline_violation_count=aggregate.redline_violation_count,
                 result=aggregate.result,
                 input_tokens=sum(item.input_tokens for item in attempt_views),
@@ -288,6 +294,8 @@ def _result_matrix_attempt(
         redline_violated=(
             aggregate is not None and (aggregate.x_violated > 0 or bool(aggregate.check_failures))
         ),
+        x_violated=0 if aggregate is None else aggregate.x_violated,
+        check_failures=[] if aggregate is None else aggregate.check_failures,
         trace_id=attempt.trace_id,
         trace_status=attempt.trace_status,
         started_at=attempt.started_at,
@@ -317,6 +325,8 @@ def _result_matrix_totals(cases: list[ResultMatrixCaseView]) -> ResultMatrixTota
         ),
         canceled_attempts=sum(attempt.outcome_class == "canceled" for attempt in attempts),
         unknown_attempts=sum(attempt.outcome_class == "unknown" for attempt in attempts),
+        x_violation_count=sum(case.x_violation_count for case in cases),
+        check_failure_count=sum(case.check_failure_count for case in cases),
         redline_violation_count=sum(case.redline_violation_count for case in cases),
         input_tokens=sum(case.input_tokens for case in cases),
         output_tokens=sum(case.output_tokens for case in cases),

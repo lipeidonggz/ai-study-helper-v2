@@ -93,6 +93,51 @@ def build_judge_input(
     也不会用其他 attempt 的块补齐。
     """
 
+    base = build_generation_judge_input(
+        catalog=catalog,
+        trace_id=trace_id,
+        trace_status=trace_status,
+        answer=answer,
+    )
+    trace = base.trace
+    normalized_answer = answer or ""
+    citation_annotations = _load_citation_annotations(trace, catalog, normalized_answer)
+    cited_ids = (
+        list(
+            dict.fromkeys(
+                block_id for annotation in citation_annotations for block_id in annotation.block_ids
+            )
+        )
+        if citation_annotations is not None
+        else cited_block_ids(normalized_answer)
+    )
+    evidence = _extract_evidence(trace, catalog, cited_ids)
+    evidence_ids = {item.block_id for item in evidence}
+    missing_ids = [block_id for block_id in cited_ids if block_id not in evidence_ids]
+    checker_payload = base.checker_payload.model_copy(
+        update={
+            "cited_block_ids": cited_ids,
+            "missing_block_ids": missing_ids,
+            "evidence_block_count": len(evidence),
+        }
+    )
+    return BuiltJudgeInput(
+        checker_payload=checker_payload,
+        all_evidence=evidence,
+        citation_annotations=citation_annotations or [],
+        trace=trace,
+    )
+
+
+def build_generation_judge_input(
+    *,
+    catalog: TraceCatalog,
+    trace_id: str | None,
+    trace_status: str,
+    answer: str | None,
+) -> BuiltJudgeInput:
+    """构造只依赖 trace manifest 的 generation checker 输入。"""
+
     if trace_id is None or trace_status != "complete":
         raise JudgeInputError(
             "judge_trace_incomplete",
@@ -112,35 +157,20 @@ def build_judge_input(
         ) from error
 
     normalized_answer = answer or ""
-    citation_annotations = _load_citation_annotations(trace, catalog, normalized_answer)
-    cited_ids = (
-        list(
-            dict.fromkeys(
-                block_id for annotation in citation_annotations for block_id in annotation.block_ids
-            )
-        )
-        if citation_annotations is not None
-        else cited_block_ids(normalized_answer)
-    )
-    evidence = _extract_evidence(trace, catalog, cited_ids)
-    evidence_ids = {item.block_id for item in evidence}
-    missing_ids = [block_id for block_id in cited_ids if block_id not in evidence_ids]
-    limitations = list(trace.manifest.limitations)
-    checker_payload = CheckerPayload(
-        generation_state=GenerationState(
-            answer_completeness=trace.manifest.answer_completeness,
-            limitations=limitations,
-            termination_reason=trace.manifest.termination_reason,
-        ),
-        cited_block_ids=cited_ids,
-        missing_block_ids=missing_ids,
-        evidence_block_count=len(evidence),
-        truncation_declared=_declares_truncation(normalized_answer),
-    )
     return BuiltJudgeInput(
-        checker_payload=checker_payload,
-        all_evidence=evidence,
-        citation_annotations=citation_annotations or [],
+        checker_payload=CheckerPayload(
+            generation_state=GenerationState(
+                answer_completeness=trace.manifest.answer_completeness,
+                limitations=list(trace.manifest.limitations),
+                termination_reason=trace.manifest.termination_reason,
+            ),
+            cited_block_ids=[],
+            missing_block_ids=[],
+            evidence_block_count=0,
+            truncation_declared=_declares_truncation(normalized_answer),
+        ),
+        all_evidence=[],
+        citation_annotations=[],
         trace=trace,
     )
 

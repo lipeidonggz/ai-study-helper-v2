@@ -349,6 +349,8 @@ interface CaseAggregateView {
   pass_count: number;
   fail_count: number;
   pending_count: number;
+  x_violation_count: number;
+  check_failure_count: number;
   redline_violation_count: number;
   result: "pass" | "fail" | "pending" | "exploratory";
   reasons: string[];
@@ -363,6 +365,8 @@ interface ResultMatrixAttemptView {
   valid_sample: boolean;
   result: AttemptAggregateView["result"];
   redline_violated: boolean;
+  x_violated: number;
+  check_failures: string[];
   trace_id: string | null;
   trace_status: AttemptView["trace_status"];
   started_at: string;
@@ -389,6 +393,8 @@ interface ResultMatrixCaseView {
   pass_count: number;
   fail_count: number;
   pending_count: number;
+  x_violation_count: number;
+  check_failure_count: number;
   redline_violation_count: number;
   result: CaseAggregateView["result"];
   input_tokens: number;
@@ -413,6 +419,8 @@ interface ResultMatrixTotalsView {
   infrastructure_failures: number;
   canceled_attempts: number;
   unknown_attempts: number;
+  x_violation_count: number;
+  check_failure_count: number;
   redline_violation_count: number;
   input_tokens: number;
   output_tokens: number;
@@ -476,6 +484,8 @@ interface BaselineCaseDeltaView {
   pass_count_delta: number;
   fail_count_delta: number;
   pending_count_delta: number;
+  x_violation_count_delta: number;
+  check_failure_count_delta: number;
   redline_violation_count_delta: number;
   input_tokens_delta: number;
   output_tokens_delta: number;
@@ -491,6 +501,8 @@ interface BaselineComparisonSummaryView {
   case_pending_count_delta: number;
   case_exploratory_count_delta: number;
   valid_samples_delta: number;
+  x_violation_count_delta: number;
+  check_failure_count_delta: number;
   redline_violation_count_delta: number;
   input_tokens_delta: number;
   output_tokens_delta: number;
@@ -4094,9 +4106,12 @@ onBeforeUnmount(() => {
                 </small>
               </article>
               <article :class="{ warning: resultMatrix.totals.redline_violation_count > 0 }">
-                <span>X 红线样本</span>
+                <span>红线失败样本</span>
                 <strong>{{ resultMatrix.totals.redline_violation_count }}</strong>
-                <small>任一违规都不能被通过样本抵消</small>
+                <small>
+                  X 违规 {{ resultMatrix.totals.x_violation_count }} ·
+                  跨项失败 {{ resultMatrix.totals.check_failure_count }}
+                </small>
               </article>
               <article>
                 <span>Token</span>
@@ -4142,7 +4157,11 @@ onBeforeUnmount(() => {
                   <span>失败 {{ category.totals.case_fail_count }}</span>
                   <span>待定 {{ category.totals.case_pending_count }}</span>
                   <span>探索性 {{ category.totals.case_exploratory_count }}</span>
-                  <span>X 红线 {{ category.totals.redline_violation_count }}</span>
+                  <span>
+                    X 违规 {{ category.totals.x_violation_count }} ·
+                    跨项失败 {{ category.totals.check_failure_count }} ·
+                    红线失败 {{ category.totals.redline_violation_count }}
+                  </span>
                   <span>
                     token
                     {{
@@ -4181,7 +4200,11 @@ onBeforeUnmount(() => {
                       通过 {{ matrixCase.pass_count }} · 失败 {{ matrixCase.fail_count }} ·
                       待定 {{ matrixCase.pending_count }}
                     </span>
-                    <span>X 红线 {{ matrixCase.redline_violation_count }}</span>
+                    <span>
+                      X 违规 {{ matrixCase.x_violation_count }} ·
+                      跨项失败 {{ matrixCase.check_failure_count }} ·
+                      红线失败 {{ matrixCase.redline_violation_count }}
+                    </span>
                     <span>
                       {{ formatTokens(matrixCase.input_tokens + matrixCase.output_tokens) }} token
                     </span>
@@ -4219,9 +4242,25 @@ onBeforeUnmount(() => {
                         {{ statusText(attempt.execution_status) }} ·
                         {{ outcomeClassText(attempt.outcome_class) }}
                       </span>
-                      <span v-if="attempt.redline_violated" class="eval-matrix-redline">
-                        X 红线
-                      </span>
+                      <template
+                        v-if="
+                          attempt.x_violated > 0 ||
+                          attempt.check_failures.length
+                        "
+                      >
+                        <span
+                          v-if="attempt.x_violated > 0"
+                          class="eval-matrix-redline"
+                        >
+                          X 违规 {{ attempt.x_violated }}
+                        </span>
+                        <span
+                          v-if="attempt.check_failures.length"
+                          class="eval-matrix-redline"
+                        >
+                          跨项失败 {{ attempt.check_failures.join("、") }}
+                        </span>
+                      </template>
                       <span v-else>无红线</span>
                       <span>
                         {{ formatTokens(attempt.input_tokens + attempt.output_tokens) }} token
@@ -4315,7 +4354,11 @@ onBeforeUnmount(() => {
             <div class="eval-baseline-metrics">
               <span>通过 {{ currentBaseline.totals.case_pass_count }}</span>
               <span>失败 {{ currentBaseline.totals.case_fail_count }}</span>
-              <span>X 红线 {{ currentBaseline.totals.redline_violation_count }}</span>
+              <span>
+                红线失败 {{ currentBaseline.totals.redline_violation_count }}
+                （X {{ currentBaseline.totals.x_violation_count }} ·
+                跨项 {{ currentBaseline.totals.check_failure_count }}）
+              </span>
               <span>
                 Token
                 {{
@@ -4449,11 +4492,14 @@ onBeforeUnmount(() => {
                 <small>正数表示失败数增加</small>
               </article>
               <article>
-                <span>X 红线</span>
+                <span>红线失败</span>
                 <strong>
                   {{ signedNumber(baselineComparison.summary.redline_violation_count_delta) }}
                 </strong>
-                <small>红线变化不从数量上抵消</small>
+                <small>
+                  X {{ signedNumber(baselineComparison.summary.x_violation_count_delta) }} ·
+                  跨项 {{ signedNumber(baselineComparison.summary.check_failure_count_delta) }}
+                </small>
               </article>
               <article>
                 <span>Token</span>
@@ -4515,7 +4561,9 @@ onBeforeUnmount(() => {
                 <small>
                   pass {{ signedNumber(item.pass_count_delta) }} ·
                   fail {{ signedNumber(item.fail_count_delta) }} ·
-                  X {{ signedNumber(item.redline_violation_count_delta) }}
+                  X {{ signedNumber(item.x_violation_count_delta) }} ·
+                  跨项 {{ signedNumber(item.check_failure_count_delta) }} ·
+                  红线 {{ signedNumber(item.redline_violation_count_delta) }}
                 </small>
                 <small>
                   token
@@ -4751,7 +4799,11 @@ onBeforeUnmount(() => {
                   <span>通过 {{ caseAggregate.pass_count }}</span>
                   <span>失败 {{ caseAggregate.fail_count }}</span>
                   <span>待定 {{ caseAggregate.pending_count }}</span>
-                  <span>红线违规 {{ caseAggregate.redline_violation_count }}</span>
+                  <span>
+                    X 违规 {{ caseAggregate.x_violation_count }} ·
+                    跨项失败 {{ caseAggregate.check_failure_count }} ·
+                    红线失败 {{ caseAggregate.redline_violation_count }}
+                  </span>
                 </div>
                 <p v-for="reason in caseAggregate.reasons" :key="reason">
                   {{ reason }}

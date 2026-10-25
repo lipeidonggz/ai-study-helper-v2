@@ -6,9 +6,9 @@
 
 ## 当前状态
 
-- 阶段：实现阶段，026 结构化 ReAct 已完成，027 claim-aware 引用标注正在实现与验收。
+- 阶段：实现阶段，027 claim-aware 引用标注已完成，028 评测失败分类拆分已实现。
 - 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付、检索与 Agent 运行链、流式问答、本地 trace 诊断和逐 criterion 评测判定已实现。
-- 当前工作：027 已完成。
+- 当前工作：028 已确认并完成自动验证，等待合并后复跑真实 N=1。
 
 ## 设计基线
 
@@ -110,6 +110,7 @@
 - [026 · 结构化 ReAct 人工验收清单（已完成）](development/manual-tests/026-structured-react-protocol.md)
 - [027 · Claim-aware 引用标注（已完成）](development/slices/027-claim-aware-citation-annotation.md)
 - [027 · Claim-aware 引用标注人工验收清单（已完成）](development/manual-tests/027-claim-aware-citation-annotation.md)
+- [028 · 拆开边界违规、跨项检查与引用切分版本（已完成，待合并后复跑）](development/slices/028-evaluation-check-separation.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库

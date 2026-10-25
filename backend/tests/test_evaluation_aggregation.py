@@ -185,6 +185,9 @@ def test_attempt_aggregation_uses_fail_priority_and_human_check_review() -> None
 
     assert attempts[0].result == "fail"
     assert attempts[0].check_failures == ["citation_support"]
+    assert _cases[0].x_violation_count == 0
+    assert _cases[0].check_failure_count == 1
+    assert _cases[0].redline_violation_count == 1
 
 
 def test_case_aggregation_applies_k_threshold_exploratory_and_redline() -> None:
@@ -246,7 +249,42 @@ def test_case_aggregation_applies_k_threshold_exploratory_and_redline() -> None:
         reviews=[],
     )[1][0]
     assert redline.result == "fail"
+    assert redline.x_violation_count == 1
+    assert redline.check_failure_count == 0
     assert redline.redline_violation_count == 1
+
+
+def test_case_redline_breakdown_does_not_double_count_same_attempt() -> None:
+    r = _criterion("R", "r1")
+    x = _criterion("X", "x1")
+    case = _case([r, x])
+    run = _run([_attempt("attempt_1")])
+    support_failure = CheckResultView(
+        check_result_id="check_support",
+        attempt_id="attempt_1",
+        checker_id="citation_support",
+        checker_version="3",
+        result="fail",
+        payload={},
+        error_code="citation_not_supported",
+        created_at="2026-10-23T00:00:00+00:00",
+    )
+
+    _attempts, cases = build_aggregates(
+        run=run,
+        plan_cases=[_plan(case, n=1, k=1)],
+        cases={case.revision_id: case},
+        bindings=[
+            _binding("attempt_1", r, "pass"),
+            _binding("attempt_1", x, "fail"),
+        ],
+        checks=[_integrity_check("attempt_1"), support_failure],
+        reviews=[],
+    )
+
+    assert cases[0].x_violation_count == 1
+    assert cases[0].check_failure_count == 1
+    assert cases[0].redline_violation_count == 1
 
 
 def test_result_matrix_groups_categories_and_separates_quality_from_cost() -> None:
@@ -336,6 +374,8 @@ def test_result_matrix_groups_categories_and_separates_quality_from_cost() -> No
     assert matrix.totals.valid_samples == 3
     assert matrix.totals.infrastructure_failures == 1
     assert matrix.totals.input_tokens == 103
+    assert matrix.totals.x_violation_count == 0
+    assert matrix.totals.check_failure_count == 0
 
     first_case_matrix = matrix.categories[0].cases[0]
     assert first_case_matrix.result == "pass"
