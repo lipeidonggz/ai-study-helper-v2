@@ -32,6 +32,7 @@ from app.evaluation.evidence import (
     JudgeCriterionInput,
     JudgeInputError,
     JudgeInputPacket,
+    build_generation_judge_input,
     build_judge_input,
     cited_block_ids,
     split_citation_contexts,
@@ -724,8 +725,19 @@ class EvaluationJudgmentService:
             case = case_views.get(attempt.case_revision_id)
             if case is None:
                 continue
+            generation_built: BuiltJudgeInput | None = None
+            generation_error: JudgeInputError | None = None
             built: BuiltJudgeInput | None = None
             build_error: JudgeInputError | None = None
+            try:
+                generation_built = build_generation_judge_input(
+                    catalog=self._trace_catalog,
+                    trace_id=attempt.trace_id,
+                    trace_status=attempt.trace_status,
+                    answer=attempt.answer,
+                )
+            except JudgeInputError as error:
+                generation_error = error
             try:
                 built = build_judge_input(
                     catalog=self._trace_catalog,
@@ -770,8 +782,16 @@ class EvaluationJudgmentService:
                     code=error.code,
                 )
             for criterion in case.criteria:
-                task_built = built if criterion.evaluator == "checker" else None
-                task_build_error = build_error if criterion.evaluator == "checker" else None
+                if criterion.evaluator == "checker":
+                    if criterion.evaluator_ref == "truncation_declared":
+                        task_built = generation_built
+                        task_build_error = generation_error
+                    else:
+                        task_built = built
+                        task_build_error = build_error
+                else:
+                    task_built = None
+                    task_build_error = None
                 tasks.append(
                     _PreparedTask(
                         attempt=attempt,

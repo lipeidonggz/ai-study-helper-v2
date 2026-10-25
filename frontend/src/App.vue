@@ -263,6 +263,7 @@ interface AgentStreamPayload {
   sources?: AgentChatSource[];
   annotations?: AgentChatCitation[];
   status?: "complete" | "pending" | "not_applicable";
+  span_version?: string;
   error_code?: string | null;
   source_count?: number;
   message?: string;

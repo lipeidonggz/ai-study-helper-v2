@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from app.agent.citations import CitationAnnotationArtifact
 from app.evaluation.database import EvaluationDatabase
 from app.evaluation.evidence import split_citation_contexts
 from app.evaluation.judgment import EvaluationJudgmentService
@@ -59,6 +60,7 @@ class _FakeTraceCatalog:
         *,
         answer_completeness: str = "complete",
         blocks: list[dict[str, object]] | None = None,
+        citation_annotation_artifact: CitationAnnotationArtifact | None = None,
     ) -> None:
         payload = {
             "blocks": blocks
@@ -87,6 +89,26 @@ class _FakeTraceCatalog:
             state="stored",
             relative_path="artifacts/payload.json",
         )
+        artifacts = [artifact]
+        artifact_paths = {artifact.artifact_id: self._artifact_path}
+        if citation_annotation_artifact is not None:
+            annotation_path = root / "annotations.json"
+            annotation_path.write_text(
+                citation_annotation_artifact.model_dump_json(),
+                encoding="utf-8",
+            )
+            annotation_artifact = TraceArtifactRecord(
+                artifact_id="d" * 64,
+                kind="citations",
+                mime_type="application/json",
+                size_bytes=annotation_path.stat().st_size,
+                content_hash=hashlib.sha256(annotation_path.read_bytes()).hexdigest(),
+                state="stored",
+                relative_path="artifacts/annotations.json",
+            )
+            artifacts.append(annotation_artifact)
+            artifact_paths[annotation_artifact.artifact_id] = annotation_path
+        self._artifact_paths = artifact_paths
         started_at = "2026-10-23T00:00:00+00:00"
         self._detail = TraceDetailRecord(
             manifest=TraceManifestRecord(
@@ -109,7 +131,7 @@ class _FakeTraceCatalog:
                 retry_count=0,
                 input_tokens=10,
                 output_tokens=5,
-                artifacts=[artifact],
+                artifacts=artifacts,
                 replay_scope="retrieval",
             ),
             spans=[
@@ -135,8 +157,8 @@ class _FakeTraceCatalog:
 
     def artifact_path(self, trace_id: str, artifact_id: str) -> Path:
         assert trace_id == self._detail.manifest.trace_id
-        assert artifact_id == "a" * 64
-        return self._artifact_path
+        assert artifact_id in self._artifact_paths
+        return self._artifact_paths[artifact_id]
 
 
 class _MissingTraceCatalog:
@@ -1254,6 +1276,71 @@ def test_truncation_checker_judgment(tmp_path: Path) -> None:
         assert checker.normalized_result == "pass"
         assert checker.invocations == []
         assert llm.normalized_result == "pass"
+
+    asyncio.run(scenario())
+
+
+def test_pending_citation_annotation_does_not_block_truncation_checker(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        database = EvaluationDatabase(tmp_path / "eval")
+        repository = EvaluationRepository(database)
+        _add_judgeable_run(
+            database,
+            repository,
+            case_id="cf-003",
+            answer="第一部分内容……（内容未完）",
+            trace_id="b" * 32,
+            run_id="run_checker_citation_pending",
+        )
+        service = EvaluationJudgmentService(
+            database=database,
+            repository=repository,
+            trace_catalog=_FakeTraceCatalog(
+                tmp_path,
+                answer_completeness="partial",
+                citation_annotation_artifact=CitationAnnotationArtifact(
+                    status="pending",
+                    model_id="fake-annotation",
+                    span_count=1,
+                    evidence_count=1,
+                    error_code="citation_annotation_model_failed",
+                    error_message="upstream unavailable",
+                ),
+            ),  # type: ignore[arg-type]
+            credentials=_MemoryCredentials(),
+            chat_provider_factory=lambda _key: FakeChatProvider(
+                [
+                    json.dumps(
+                        {
+                            "verdict": "satisfied",
+                            "reason": "答案明确声明内容未完成。",
+                        },
+                        ensure_ascii=False,
+                    )
+                ]
+            ),
+        )
+        started = await service.start(
+            "run_checker_citation_pending",
+            StartJudgmentRequest(
+                concurrency=1,
+                token_budget=1_000_000,
+                judge_review_confirmed=True,
+            ),
+        )
+        revision = await _wait_revision(service, started.revision_id)
+
+        checker = next(item for item in revision.judgments if item.executor == "checker")
+        citation_integrity = next(
+            check for check in revision.checks if check.checker_id == "citation_integrity"
+        )
+        assert checker.normalized_result == "pass"
+        assert checker.reason == "answer_completeness is partial"
+        assert citation_integrity.result == "pending"
+        assert citation_integrity.error_code == "citation_annotation_model_failed"
+        assert revision.status == "incomplete"
 
     asyncio.run(scenario())
 

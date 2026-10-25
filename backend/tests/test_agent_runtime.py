@@ -181,6 +181,7 @@ def test_agent_runtime_executes_tool_and_finishes(tmp_path: Path) -> None:
         event for event in result.events if event.event_type == "citations_available"
     )
     assert citation_event.payload["status"] == "complete"
+    assert citation_event.payload["span_version"] == "claim-spans-v2"
     assert citation_event.payload["annotations"] == []
     tool_event = next(event for event in result.events if event.event_type == "tool_call")
     assert tool_event.payload["result_tokens"] > 0
@@ -493,6 +494,7 @@ def test_agent_runtime_persists_parented_trace_with_tool_and_budget_data(
     citation_span = next(span for span in detail.spans if span.name == "citation.annotation")
     assert citation_span.status == "ok"
     assert citation_span.attributes["app.citation_annotation_status"] == "complete"
+    assert citation_span.attributes["app.claim_span_version"] == "claim-spans-v2"
     assert citation_span.attributes["app.model_calls"] == 1
     assert citation_span.attributes["llm.token_count.prompt"] > 0
     assert citation_span.attributes["llm.token_count.completion"] > 0
@@ -517,6 +519,7 @@ def test_agent_runtime_persists_parented_trace_with_tool_and_budget_data(
         ).read_text(encoding="utf-8")
     )
     assert citation_payload["status"] == "complete"
+    assert citation_payload["span_version"] == "claim-spans-v2"
 
 
 def test_trace_queue_failure_does_not_break_agent_answer(
