@@ -69,6 +69,15 @@ backend\.venv\Scripts\python.exe scripts\watch_github_delivery.py `
 结果原子写入 `backend/.runtime/delivery-status.json`。退出码：
 `0=已合并`、`1=失败`、`2=超时`。watcher 不保存 GitHub token。
 
+在 Windows PowerShell 中把含中文的 Python 脚本通过管道交给 `python -`
+时，必须先把 `$OutputEncoding` 设为 UTF-8；否则中文会在进入 Python 前被
+系统代码页替换为 `?`，即使 GitHub API 请求本身按 UTF-8 发送也无法恢复：
+
+```powershell
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$code | backend\.venv\Scripts\python.exe -
+```
+
 需要临时验证 DeepSeek 对话连通性、但设置界面尚未完成时，可使用安全提示录入 Key：
 
 ```powershell
