@@ -24,3 +24,4 @@
 - [06 · Agent 评测台落地：为什么真正难的不是跑 10 次，而是证明这 10 次可比较](./06-evaluation-system-implementation.md)
 - [07 · 金标准不是参考答案：为什么最后把判官输入删到只剩答案和一条判据](./07-gold-standard-criterion-contract.md)
 - [08 · 我不再逐行审查 AI 代码，但我知道该在哪里停下来](./08-human-ai-collaboration-retrospective.md)
+- [09 · 模型太会演完整 ReAct：为什么只阻止伪造 Observation 还不够](./09-structured-react-protocol.md)
