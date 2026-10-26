@@ -20,11 +20,13 @@
 3. `require-merged` 只有在 PR 已合并且 merge commit 已包含于目标分支时返回成功。
 4. CI 失败、PR 关闭、auto-merge 未启用、超时和 merge commit 不在目标分支必须返回不同失败状态。
 5. 同时开始依赖工作时必须使用独立 worktree／分支，不能建立在一个尚未合并的基线上。
+6. `delivery:start` 成功后必须结束当前对话轮次；未经负责人明确要求，不得在同一轮继续等待合并。
 
 ### 明确禁止
 
 - 不在主对话中持续运行默认 20～30 分钟的同步 watcher。
 - 不因 PR 创建或检查通过就提前假定已经合并。
+- 不在 `start` 成功后的同一轮执行 `status`、`require-merged` 或 `--wait`，从而阻塞负责人的下一条命令。
 - 不把本地 `latest.json` 直接视为远端事实；执行依赖门禁时必须刷新 GitHub 状态。
 - 不把凭证或完整 API Key 写入状态文件、日志或提交。
 
