@@ -8,7 +8,7 @@
 
 - 阶段：实现阶段，027 claim-aware 引用标注已完成，028 评测失败分类拆分已实现。
 - 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付、检索与 Agent 运行链、流式问答、本地 trace 诊断和逐 criterion 评测判定已实现。
-- 当前工作：028 已确认并完成自动验证，等待合并后复跑真实 N=1。
+- 当前工作：031 已完成 citation judge 与 annotation 校准，基础件和反向解释均已人工确认。
 
 ## 设计基线
 
@@ -111,6 +111,13 @@
 - [027 · Claim-aware 引用标注（已完成）](development/slices/027-claim-aware-citation-annotation.md)
 - [027 · Claim-aware 引用标注人工验收清单（已完成）](development/manual-tests/027-claim-aware-citation-annotation.md)
 - [028 · 拆开边界违规、跨项检查与引用切分版本（已完成，待合并后复跑）](development/slices/028-evaluation-check-separation.md)
+- [029 · 引用标注分批与联合支持判定（已完成，待真实重判）](development/slices/029-citation-evaluation-reliability.md)
+- [029 · 引用评测可靠性人工验收（待验收）](development/manual-tests/029-citation-evaluation-reliability.md)
+- [030 · Agent 证据强度与转折保真（已否决，前提被人工复核推翻）](development/slices/030-agent-claim-strength-fidelity.md)
+- [031 · 引用语义同一性与判官稳定性校准（已完成）](development/slices/031-citation-semantic-calibration.md)
+- [031 · 引用语义与 annotation 校准人工验收（已完成）](development/manual-tests/031-citation-semantic-calibration.md)
+- [2026-10-26 · citation-rubric-v7 语义与稳定性校准](development/experiments/2026-10-26-citation-rubric-v7-calibration.md)
+- [032 · 判定总 Token 用量展示（待人工验收）](development/slices/032-judge-token-usage-visibility.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库

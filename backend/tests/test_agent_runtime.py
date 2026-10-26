@@ -9,6 +9,7 @@ import httpx
 import pytest
 from langgraph.errors import GraphRecursionError
 
+from app.agent.citations import citation_annotation_output_token_cap
 from app.agent.runtime import (
     AgentRunConfig,
     AgentRuntime,
@@ -182,6 +183,8 @@ def test_agent_runtime_executes_tool_and_finishes(tmp_path: Path) -> None:
     )
     assert citation_event.payload["status"] == "complete"
     assert citation_event.payload["span_version"] == "claim-spans-v2"
+    assert citation_event.payload["batch_count"] == 1
+    assert citation_event.payload["batch_version"] == "evidence-blocks-v1"
     assert citation_event.payload["annotations"] == []
     tool_event = next(event for event in result.events if event.event_type == "tool_call")
     assert tool_event.payload["result_tokens"] > 0
@@ -495,6 +498,8 @@ def test_agent_runtime_persists_parented_trace_with_tool_and_budget_data(
     assert citation_span.status == "ok"
     assert citation_span.attributes["app.citation_annotation_status"] == "complete"
     assert citation_span.attributes["app.claim_span_version"] == "claim-spans-v2"
+    assert citation_span.attributes["app.annotation_batch_count"] == 1
+    assert citation_span.attributes["app.annotation_batch_version"] == "evidence-blocks-v1"
     assert citation_span.attributes["app.model_calls"] == 1
     assert citation_span.attributes["llm.token_count.prompt"] > 0
     assert citation_span.attributes["llm.token_count.completion"] > 0
@@ -520,6 +525,9 @@ def test_agent_runtime_persists_parented_trace_with_tool_and_budget_data(
     )
     assert citation_payload["status"] == "complete"
     assert citation_payload["span_version"] == "claim-spans-v2"
+    assert citation_span.attributes["llm.invocation_parameters.max_tokens"] == (
+        citation_annotation_output_token_cap(citation_payload["span_count"])
+    )
 
 
 def test_trace_queue_failure_does_not_break_agent_answer(
@@ -1135,7 +1143,7 @@ def test_agent_api_uses_saved_runtime_settings(tmp_path: Path) -> None:
     assert result["status"] == "succeeded"
     tool_event = next(event for event in result["events"] if event["event_type"] == "tool_call")
     assert tool_event["payload"]["diagnostics"]["search_profile"]["top_k"] == 3
-    assert chat_provider.max_output_requests == [4096, 4096, 4096]
+    assert chat_provider.max_output_requests == [4096, 4096, 640]
 
 
 def test_runtime_settings_do_not_change_an_inflight_request(tmp_path: Path) -> None:

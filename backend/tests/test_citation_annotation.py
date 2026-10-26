@@ -8,8 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from app.agent.citation_annotation_prompt import render_citation_annotation_messages
+from app.agent.citation_annotation_prompt import (
+    CITATION_ANNOTATION_PROMPT_VERSION,
+    CITATION_ANNOTATION_SYSTEM_PROMPT,
+    render_citation_annotation_messages,
+)
 from app.agent.citations import (
+    CITATION_ANNOTATION_BATCH_VERSION,
     CLAIM_SPAN_VERSION,
     LEGACY_CLAIM_SPAN_VERSION,
     CitationAnnotation,
@@ -17,12 +22,14 @@ from app.agent.citations import (
     CitationAnnotationInput,
     CitationAnnotator,
     CitationEvidenceBlock,
+    citation_annotation_output_token_cap,
     split_answer_spans,
 )
 from app.agent.token_counter import ConservativeObservationTokenCounter
 from app.evaluation.citation_prompt import CitationEvidenceInput
 from app.evaluation.evidence import (
     JudgeInputError,
+    _extract_evidence,
     build_generation_judge_input,
     build_judge_input,
 )
@@ -63,11 +70,85 @@ class _FailingProvider:
         *,
         max_output_tokens: int | None = None,
     ) -> ChatCompletionResult:
-        assert max_output_tokens == 4096
+        assert max_output_tokens == citation_annotation_output_token_cap(1)
         raise ChatProviderError(
             code="chat_upstream_unavailable",
             message="annotation upstream unavailable",
             retryable=True,
+        )
+
+
+class _BatchingAnnotationProvider:
+    """为每批全部 span 返回一个合法 annotation，并记录批次边界。"""
+
+    def __init__(self) -> None:
+        self._profile = FakeChatProvider(["unused"]).profile
+        self.span_counts: list[int] = []
+        self.evidence_counts: list[int] = []
+        self.max_output_tokens: list[int | None] = []
+
+    @property
+    def profile(self) -> ChatProviderProfile:
+        return self._profile
+
+    async def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> ChatCompletionResult:
+        payload = json.loads(messages[-1].content)
+        spans = payload["spans"]
+        self.max_output_tokens.append(max_output_tokens)
+        assert max_output_tokens == citation_annotation_output_token_cap(len(spans))
+        evidence_blocks = payload["evidence_blocks"]
+        self.span_counts.append(len(spans))
+        self.evidence_counts.append(len(evidence_blocks))
+        block_id = evidence_blocks[0]["block_id"]
+        content = json.dumps(
+            {
+                "annotations": [
+                    {"span_id": span["span_id"], "block_ids": [block_id]} for span in spans
+                ]
+            },
+            ensure_ascii=False,
+        )
+        return ChatCompletionResult(
+            content=content,
+            request_id=f"batch-{len(self.span_counts)}",
+            actual_model_id=self.profile.model_id,
+            finish_reason="stop",
+            input_tokens=100,
+            output_tokens=50,
+        )
+
+
+class _TruncatedAnnotationProvider:
+    """持续返回被输出上限截断的 annotation 响应。"""
+
+    def __init__(self) -> None:
+        self._profile = FakeChatProvider(["unused"]).profile
+        self.calls = 0
+
+    @property
+    def profile(self) -> ChatProviderProfile:
+        return self._profile
+
+    async def complete(
+        self,
+        _messages: Sequence[ChatMessage],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> ChatCompletionResult:
+        assert max_output_tokens == citation_annotation_output_token_cap(1)
+        self.calls += 1
+        return ChatCompletionResult(
+            content='{"annotations":[{"span_id":"span_0001","block_ids":["bl',
+            request_id=f"truncated-{self.calls}",
+            actual_model_id=self.profile.model_id,
+            finish_reason="length",
+            input_tokens=100,
+            output_tokens=4096,
         )
 
 
@@ -130,7 +211,6 @@ def _annotate(
             spent_output_tokens=5,
             max_context_tokens=max_context_tokens,
             max_request_tokens=max_request_tokens,
-            max_output_tokens=8192,
         )
     )
     return outcome, provider
@@ -231,6 +311,10 @@ def test_annotator_returns_independent_claim_spans_with_exact_offsets() -> None:
 
     assert outcome.artifact.status == "complete"
     assert outcome.artifact.span_version == CLAIM_SPAN_VERSION
+    assert outcome.artifact.batch_count == 1
+    assert outcome.artifact.batch_version == CITATION_ANNOTATION_BATCH_VERSION
+    assert outcome.artifact.prompt_version == CITATION_ANNOTATION_PROMPT_VERSION
+    assert provider.max_output_requests == [citation_annotation_output_token_cap(2)]
     assert outcome.model_calls == 1
     assert [item.text for item in outcome.artifact.annotations] == [
         "第一事实。",
@@ -250,6 +334,89 @@ def test_annotator_returns_independent_claim_spans_with_exact_offsets() -> None:
         "span_0002",
     ]
     assert "answer" in annotation_request
+
+
+def test_annotation_prompt_rejects_underinformative_claim_fragments() -> None:
+    assert CITATION_ANNOTATION_PROMPT_VERSION == "claim-citation-v2"
+    assert "完整、独立、可核验主张" in CITATION_ANNOTATION_SYSTEM_PROMPT
+    assert "单独的确认词" in CITATION_ANNOTATION_SYSTEM_PROMPT
+
+
+def test_long_answer_annotations_are_batched_and_merged_in_answer_order() -> None:
+    answer = "".join(f"事实{index}成立。" for index in range(224))
+    evidence_blocks = [
+        CitationEvidenceBlock(
+            block_id=f"block_{index:02d}",
+            doc_id="doc_1",
+            doc_title="测试文档",
+            source_label="local",
+            section_path=["边界"],
+            text=f"{index}:" + "长证据" * 475,
+        )
+        for index in range(86)
+    ]
+    provider = _BatchingAnnotationProvider()
+
+    outcome = asyncio.run(
+        CitationAnnotator(
+            provider,
+            token_counter=ConservativeObservationTokenCounter(),
+        ).annotate(
+            question="请罗列事实",
+            answer=answer,
+            evidence_blocks=evidence_blocks,
+            spent_input_tokens=199_500,
+            spent_output_tokens=14_093,
+            max_context_tokens=100_000,
+            max_request_tokens=400_000,
+        )
+    )
+
+    assert outcome.artifact.status == "complete"
+    assert outcome.artifact.batch_count == 4
+    assert provider.span_counts == [224, 224, 224, 224]
+    assert provider.evidence_counts == [24, 24, 24, 14]
+    assert provider.max_output_tokens == [citation_annotation_output_token_cap(224)] * 4
+    assert outcome.model_calls == 4
+    assert len(outcome.raw_outputs) == 4
+    assert len(outcome.messages) == 8
+    assert len(outcome.artifact.annotations) == 224
+    assert [item.annotation_id for item in outcome.artifact.annotations] == [
+        f"annotation_{index:04d}" for index in range(1, 225)
+    ]
+    assert [item.span_id for item in outcome.artifact.annotations] == [
+        f"span_{index:04d}" for index in range(1, 225)
+    ]
+    assert outcome.artifact.annotations[0].block_ids == [
+        "block_00",
+        "block_24",
+        "block_48",
+        "block_72",
+    ]
+
+
+def test_annotation_output_length_is_reported_as_truncation() -> None:
+    provider = _TruncatedAnnotationProvider()
+
+    outcome = asyncio.run(
+        CitationAnnotator(
+            provider,
+            token_counter=ConservativeObservationTokenCounter(),
+        ).annotate(
+            question="问题",
+            answer="唯一事实。",
+            evidence_blocks=_evidence(),
+            spent_input_tokens=10,
+            spent_output_tokens=5,
+            max_context_tokens=100_000,
+            max_request_tokens=100_000,
+        )
+    )
+
+    assert outcome.artifact.status == "pending"
+    assert outcome.artifact.error_code == "citation_annotation_output_truncated"
+    assert outcome.model_calls == 2
+    assert provider.calls == 2
 
 
 @pytest.mark.parametrize(
@@ -356,7 +523,6 @@ def test_annotation_provider_failure_is_retried_once_then_pending() -> None:
             spent_output_tokens=5,
             max_context_tokens=100_000,
             max_request_tokens=400_000,
-            max_output_tokens=4096,
         )
     )
 
@@ -382,7 +548,7 @@ def test_retry_that_would_exceed_request_budget_stops_before_second_call() -> No
     outcome, provider = _annotate(
         answer=answer,
         responses=["not-json", "unused"],
-        max_request_tokens=15 + estimated_input_tokens + 4096,
+        max_request_tokens=(15 + estimated_input_tokens + citation_annotation_output_token_cap(1)),
     )
 
     assert outcome.artifact.status == "pending"
@@ -489,6 +655,119 @@ def _artifact_record(
     )
 
 
+def test_duplicate_block_prefers_full_text_over_search_snippet(tmp_path: Path) -> None:
+    snippet_path = tmp_path / "snippet.json"
+    full_path = tmp_path / "full.json"
+    snippet_path.write_text(
+        json.dumps(
+            {
+                "matches": [
+                    {
+                        "block_id": "block_1",
+                        "doc_id": "doc_1",
+                        "doc_title": "测试文档",
+                        "source_label": "local",
+                        "section_path": ["边界"],
+                        "snippet": "… 在容器与宿主内核之间增加隔离层 …",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    full_path.write_text(
+        json.dumps(
+            {
+                "blocks": [
+                    {
+                        "block_id": "block_1",
+                        "doc_id": "doc_1",
+                        "doc_title": "测试文档",
+                        "source_label": "local",
+                        "section_path": ["边界"],
+                        "text": (
+                            "gVisor 是一种容器沙箱运行时，在容器与宿主内核之间增加隔离层。"
+                            "后续完整上下文仍在同一个 block 中。"
+                        ),
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    snippet_artifact = _artifact_record("a", "tool.payload", snippet_path)
+    full_artifact = _artifact_record("f", "tool.payload", full_path)
+    started_at = "2026-10-25T00:00:00+00:00"
+    trace = TraceDetailRecord(
+        manifest=TraceManifestRecord(
+            trace_id="e" * 32,
+            mode="full",
+            app_version="0.1.0",
+            started_at=started_at,
+            ended_at="2026-10-25T00:00:02+00:00",
+            duration_ms=2000,
+            status="succeeded",
+            termination_reason="finish",
+            answer_completeness="complete",
+            question_preview="问题",
+            snapshot_id="s_0123456789abcdef",
+            snapshot_status="ready",
+            completeness="complete",
+            agent_turns=2,
+            tool_calls=2,
+            model_calls=3,
+            retry_count=0,
+            input_tokens=10,
+            output_tokens=5,
+            artifacts=[snippet_artifact, full_artifact],
+            replay_scope="retrieval",
+        ),
+        spans=[
+            TraceSpanRecord(
+                trace_id="e" * 32,
+                span_id="1" * 16,
+                parent_span_id=None,
+                name="tool",
+                kind="TOOL",
+                start_time_unix_nano=1,
+                end_time_unix_nano=2,
+                started_at=started_at,
+                ended_at="2026-10-25T00:00:01+00:00",
+                status="ok",
+                attributes={"app.payload_artifact": snippet_artifact.model_dump(mode="json")},
+            ),
+            TraceSpanRecord(
+                trace_id="e" * 32,
+                span_id="2" * 16,
+                parent_span_id=None,
+                name="tool",
+                kind="TOOL",
+                start_time_unix_nano=3,
+                end_time_unix_nano=4,
+                started_at=started_at,
+                ended_at="2026-10-25T00:00:02+00:00",
+                status="ok",
+                attributes={"app.payload_artifact": full_artifact.model_dump(mode="json")},
+            ),
+        ],
+    )
+    catalog = _MemoryTraceCatalog(
+        trace,
+        {
+            snippet_artifact.artifact_id: snippet_path,
+            full_artifact.artifact_id: full_path,
+        },
+    )
+
+    evidence = _extract_evidence(trace, catalog, ["block_1"])  # type: ignore[arg-type]
+
+    assert len(evidence) == 1
+    assert evidence[0].text.startswith("gVisor 是一种容器沙箱运行时")
+    assert "后续完整上下文仍在同一个 block 中" in evidence[0].text
+
+
 def test_structured_annotation_is_the_exact_citation_judge_claim_context(
     tmp_path: Path,
 ) -> None:
@@ -536,6 +815,7 @@ def test_structured_annotation_is_the_exact_citation_judge_claim_context(
 
     assert built.checker_payload.cited_block_ids == ["block_1"]
     assert task is not None
+    assert task.occurrences[0].block_ids == ["block_1"]
     assert task.batches[0].contexts[0].context_id == "annotation_0001"
     assert task.batches[0].contexts[0].kind == "claim"
     assert task.batches[0].contexts[0].text == "第二事实。"
@@ -614,6 +894,7 @@ def test_legacy_artifact_without_span_version_is_marked_unknown(tmp_path: Path) 
     artifact = CitationAnnotationArtifact.model_validate(payload)
 
     assert artifact.span_version == LEGACY_CLAIM_SPAN_VERSION
+    assert artifact.batch_version == "legacy-unknown"
 
 
 def test_historical_trace_without_annotation_artifact_uses_inline_fallback(

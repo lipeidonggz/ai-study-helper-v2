@@ -219,7 +219,7 @@ citation artifact
 
 ### 5.1 冻结正文，确定性切 claim
 
-主回答提示词升级为 `chat-v5`，不再要求模型输出 block ID：
+主回答提示词为 `chat-v5`，不再要求模型输出 block ID：
 
 ```text
 不要在 finish.answer 中输出“来源”、block_id、引用角标。
@@ -431,7 +431,7 @@ citation_support
 → 每个 block 是否支持对应 claim
 ```
 
-完整性失败是确定性红线；支持性由 `citation-rubric-v4` 判断。
+完整性失败是确定性红线；支持性由 `citation-rubric-v7` 判断。
 
 引用核验模型的输入是：
 

@@ -12,7 +12,7 @@ from app.retrieval.errors import RetrievalFailure
 from app.retrieval.hybrid import DEFAULT_HYBRID_RETRIEVAL_PROFILE, HybridRetrievalProfile
 from app.retrieval.service import RetrievalSnapshotReader
 
-TOOL_CONTRACT_VERSION = "retrieval-tools-v1"
+TOOL_CONTRACT_VERSION = "retrieval-tools-v2"
 TOOL_WHITELIST = (
     "list_documents",
     "get_outline",
@@ -181,7 +181,7 @@ def tool_descriptors() -> list[ToolDescriptor]:
             description=(
                 "需要确认某个具体字符串在指定范围内是否存在，或核对字面归属时调用；"
                 "按原文字符串扫描，大小写不敏感，不做分词、词干或同义扩展。"
-                "工具返回当前范围的全部命中块与命中数，不做上下文预算判断。"
+                "工具返回当前范围的全部命中块、命中数及句界完整上下文，不做上下文预算判断。"
                 "需要概念或语义匹配时使用 search_blocks；count=0 只表示该字符串没有出现。"
             ),
             input_schema={

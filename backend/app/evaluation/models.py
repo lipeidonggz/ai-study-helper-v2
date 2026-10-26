@@ -635,6 +635,15 @@ class EvaluationResultMatrixView(BaseModel):
     categories: list[ResultMatrixCategoryView]
 
 
+class JudgeTokenUsageView(BaseModel):
+    """一个判定 revision 内所有已记录判官调用的 Token 用量。"""
+
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    total_tokens: int = Field(default=0, ge=0)
+    invocation_count: int = Field(default=0, ge=0)
+
+
 class EvaluationRevisionView(BaseModel):
     """一次判定任务的进度、版本和逐项结果。"""
 
@@ -658,6 +667,7 @@ class EvaluationRevisionView(BaseModel):
     attempt_aggregates: list[AttemptAggregateView] = Field(default_factory=list)
     case_aggregates: list[CaseAggregateView] = Field(default_factory=list)
     result_matrix: EvaluationResultMatrixView | None = None
+    judge_usage: JudgeTokenUsageView = Field(default_factory=JudgeTokenUsageView)
 
 
 class JudgePromptView(BaseModel):

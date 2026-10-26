@@ -306,7 +306,7 @@ def _extract_evidence(
     cited_ids: list[str],
 ) -> list[EvidenceBlock]:
     cited_set = set(cited_ids)
-    by_block_id: dict[str, EvidenceBlock] = {}
+    by_block_id: dict[str, tuple[EvidenceBlock, bool]] = {}
     for span in trace.spans:
         if span.kind != "TOOL":
             continue
@@ -343,6 +343,7 @@ def _extract_evidence(
                 text = candidate.get("snippet")
             if not isinstance(block_id, str) or not isinstance(text, str):
                 continue
+            is_full_text = isinstance(candidate.get("text"), str)
             block = EvidenceBlock(
                 block_id=block_id,
                 doc_id=str(candidate.get("doc_id") or ""),
@@ -352,10 +353,20 @@ def _extract_evidence(
                 text=text,
                 cited_in_answer=block_id in cited_set,
             )
+            candidate_priority = _evidence_priority(block, is_full_text=is_full_text)
             existing = by_block_id.get(block_id)
-            if existing is None or (not existing.cited_in_answer and block.cited_in_answer):
-                by_block_id[block_id] = block
-    return list(by_block_id.values())
+            if existing is None or candidate_priority > _evidence_priority(
+                existing[0],
+                is_full_text=existing[1],
+            ):
+                by_block_id[block_id] = (block, is_full_text)
+    return [block for block, _is_full_text in by_block_id.values()]
+
+
+def _evidence_priority(block: EvidenceBlock, *, is_full_text: bool) -> tuple[bool, bool, int]:
+    """优先保留被引用的完整正文；同等级再用长度打破平局。"""
+
+    return (block.cited_in_answer, is_full_text, len(block.text))
 
 
 def _artifact_ref(value: object) -> TraceArtifactRecord | None:

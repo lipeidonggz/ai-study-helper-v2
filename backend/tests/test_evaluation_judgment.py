@@ -9,7 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from app.agent.citations import CitationAnnotationArtifact
+from app.agent.citations import CitationAnnotation, CitationAnnotationArtifact
+from app.evaluation.citation_prompt import (
+    CITATION_SUPPORT_PROMPT_VERSION,
+    CITATION_SUPPORT_SYSTEM_PROMPT,
+)
 from app.evaluation.database import EvaluationDatabase
 from app.evaluation.evidence import split_citation_contexts
 from app.evaluation.judgment import EvaluationJudgmentService
@@ -195,10 +199,14 @@ class _CitationBatchAwareProvider:
         *,
         first_batch_verdicts: list[str] | None = None,
         omit_last_occurrence: bool = False,
+        invalid_first_citation_output: bool = False,
+        invalid_first_citation_quote: bool = False,
     ) -> None:
         self._profile = FakeChatProvider(["unused"]).profile
         self._first_batch_verdicts = first_batch_verdicts
         self._omit_last_occurrence = omit_last_occurrence
+        self._invalid_first_citation_output = invalid_first_citation_output
+        self._invalid_first_citation_quote = invalid_first_citation_quote
         self.requests: list[tuple[ChatMessage, ...]] = []
         self.max_output_tokens: list[int | None] = []
         self.citation_request_count = 0
@@ -217,14 +225,25 @@ class _CitationBatchAwareProvider:
         self.max_output_tokens.append(max_output_tokens)
         payload = json.loads(messages[-1].content)
         if "occurrences" in payload:
+            first_request = self.citation_request_count == 0
+            self.citation_request_count += 1
+            if first_request and self._invalid_first_citation_output:
+                content = '{"citations":['
+                return ChatCompletionResult(
+                    content=content,
+                    request_id=f"fake-citation-{self.citation_request_count:04d}",
+                    actual_model_id=self.profile.model_id,
+                    finish_reason="stop",
+                    input_tokens=sum(max(1, len(message.content) // 4) for message in messages),
+                    output_tokens=max(1, len(content) // 4),
+                )
             occurrence_by_id = {item["occurrence_id"]: item for item in payload["occurrences"]}
             evidence_by_id = {item["block_id"]: item["text"] for item in payload["citations"]}
             verdicts = (
                 self._first_batch_verdicts
-                if self.citation_request_count == 0 and self._first_batch_verdicts is not None
+                if first_request and self._first_batch_verdicts is not None
                 else ["supported"] * len(occurrence_by_id)
             )
-            self.citation_request_count += 1
             occurrence_items = list(occurrence_by_id.items())
             if self._omit_last_occurrence and occurrence_items:
                 occurrence_items = occurrence_items[:-1]
@@ -239,7 +258,15 @@ class _CitationBatchAwareProvider:
                             "occurrence_id": occurrence_id,
                             "verdict": selected_verdicts[index],
                             "reason": f"测试 verdict {selected_verdicts[index]}",
-                            "evidence_quotes": [evidence_by_id[occurrence["block_id"]][:12]],
+                            "evidence_quotes": [
+                                (
+                                    "不存在的证据原文"
+                                    if first_request
+                                    and self._invalid_first_citation_quote
+                                    and index == 0
+                                    else evidence_by_id[occurrence["block_ids"][-1]][:12]
+                                )
+                            ],
                         }
                         for index, (occurrence_id, occurrence) in enumerate(occurrence_items)
                     ]
@@ -451,6 +478,17 @@ def test_llm_judge_builds_whitelist_input_and_judgments(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_citation_prompt_uses_semantic_equivalence_and_isolates_occurrences() -> None:
+    assert CITATION_SUPPORT_PROMPT_VERSION == "citation-rubric-v7"
+    assert "中文近义转述不要求逐词对应" in CITATION_SUPPORT_SYSTEM_PROMPT
+    assert "该问题本身合理／有道理／是对的" in CITATION_SUPPORT_SYSTEM_PROMPT
+    assert "不能只因 claim 使用了“正确／对”等概括词就判定增强" in CITATION_SUPPORT_SYSTEM_PROMPT
+    assert "删除必要限制" in CITATION_SUPPORT_SYSTEM_PROMPT
+    assert "不得使用同批其他 occurrence" in CITATION_SUPPORT_SYSTEM_PROMPT
+    assert "c1-001" not in CITATION_SUPPORT_SYSTEM_PROMPT
+    assert "good question" not in CITATION_SUPPORT_SYSTEM_PROMPT
+
+
 def test_human_override_appends_judgment_and_switches_effective_binding(
     tmp_path: Path,
 ) -> None:
@@ -532,6 +570,7 @@ def test_human_override_appends_judgment_and_switches_effective_binding(
             ),
         )
 
+        assert updated.judge_usage == initial.judge_usage
         assert original_ids.issubset({item.judgment_id for item in updated.judgments})
         effective = next(
             item
@@ -569,6 +608,7 @@ def test_human_override_appends_judgment_and_switches_effective_binding(
         )
         assert final_effective.executor == "human"
         assert final_effective.normalized_result == "pass"
+        assert final.judge_usage == initial.judge_usage
         final_history = [
             item
             for item in final.judgment_bindings
@@ -912,7 +952,7 @@ def test_citation_support_is_separate_from_criterion_judgments(tmp_path: Path) -
         assert citation_request["citations"][0]["block_id"] == "block_1"
         assert citation_request["occurrences"][0] == {
             "occurrence_id": "citation_0001",
-            "block_id": "block_1",
+            "block_ids": ["block_1"],
             "context_id": "context_0001",
         }
         assert set(citation_request["citations"][0]) == {
@@ -921,6 +961,232 @@ def test_citation_support_is_separate_from_criterion_judgments(tmp_path: Path) -
             "section_path",
             "text",
         }
+
+    asyncio.run(scenario())
+
+
+def test_citation_support_judges_one_claim_with_multiple_blocks_as_a_group(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        database = EvaluationDatabase(tmp_path / "eval")
+        repository = EvaluationRepository(database)
+        answer = "两项隔离共同保护系统。"
+        blocks = [
+            {
+                "block_id": "block_1",
+                "doc_id": "doc_1",
+                "doc_title": "测试文档",
+                "source_label": "doc",
+                "section_path": ["隔离"],
+                "text": "第一项隔离限制文件访问。",
+            },
+            {
+                "block_id": "block_2",
+                "doc_id": "doc_1",
+                "doc_title": "测试文档",
+                "source_label": "doc",
+                "section_path": ["隔离"],
+                "text": "第二项隔离限制网络访问。",
+            },
+        ]
+        _add_judgeable_run(
+            database,
+            repository,
+            case_id="c1-001",
+            answer=answer,
+            trace_id="b" * 32,
+            run_id="run_citation_group",
+        )
+        provider = _CitationBatchAwareProvider()
+        service = EvaluationJudgmentService(
+            database=database,
+            repository=repository,
+            trace_catalog=_FakeTraceCatalog(
+                tmp_path,
+                blocks=blocks,
+                citation_annotation_artifact=CitationAnnotationArtifact(
+                    status="complete",
+                    model_id="fake-annotation",
+                    span_count=1,
+                    evidence_count=2,
+                    annotations=[
+                        CitationAnnotation(
+                            annotation_id="annotation_0001",
+                            span_id="span_0001",
+                            kind="sentence",
+                            start_index=0,
+                            end_index=len(answer),
+                            text=answer,
+                            block_ids=["block_1", "block_2"],
+                        )
+                    ],
+                ),
+            ),  # type: ignore[arg-type]
+            credentials=_MemoryCredentials(),
+            chat_provider_factory=lambda _key: provider,
+        )
+
+        started = await service.start(
+            "run_citation_group",
+            StartJudgmentRequest(
+                concurrency=1,
+                token_budget=1_000_000,
+                request_budget=100,
+                judge_review_confirmed=True,
+            ),
+        )
+        revision = await _wait_revision(service, started.revision_id)
+
+        citation_support = next(
+            check for check in revision.checks if check.checker_id == "citation_support"
+        )
+        citation_request = json.loads(provider.requests[-1][1].content)
+        assert citation_request["occurrences"] == [
+            {
+                "occurrence_id": "citation_0001",
+                "block_ids": ["block_1", "block_2"],
+                "context_id": "annotation_0001",
+            }
+        ]
+        assert citation_support.result == "pass"
+        assert citation_support.checker_version == "6"
+        assert citation_support.payload["prompt_version"] == "citation-rubric-v7"
+        assert citation_support.payload["claim_results"][0]["block_ids"] == [
+            "block_1",
+            "block_2",
+        ]
+        assert citation_support.payload["claim_results"][0]["verdict"] == "supported"
+        assert {item["block_id"] for item in citation_support.payload["citations"]} == {
+            "block_1",
+            "block_2",
+        }
+        block_projections = {
+            item["block_id"]: item for item in citation_support.payload["citations"]
+        }
+        assert block_projections["block_1"]["evidence_quotes"] == []
+        assert block_projections["block_2"]["evidence_quotes"] == ["第二项隔离限制网络访问。"[:12]]
+        assert citation_support.payload["batching"]["occurrence_count"] == 1
+        assert citation_support.payload["batching"]["citation_relation_count"] == 2
+
+    asyncio.run(scenario())
+
+
+def test_citation_support_retries_invalid_output_once_then_passes(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        database = EvaluationDatabase(tmp_path / "eval")
+        repository = EvaluationRepository(database)
+        _add_judgeable_run(
+            database,
+            repository,
+            case_id="c1-001",
+            answer="MCP 是外部内容边界。【来源：block_1】",
+            trace_id="b" * 32,
+            run_id="run_citation_retry",
+        )
+        provider = _CitationBatchAwareProvider(invalid_first_citation_output=True)
+        service = EvaluationJudgmentService(
+            database=database,
+            repository=repository,
+            trace_catalog=_FakeTraceCatalog(tmp_path),  # type: ignore[arg-type]
+            credentials=_MemoryCredentials(),
+            chat_provider_factory=lambda _key: provider,
+        )
+
+        started = await service.start(
+            "run_citation_retry",
+            StartJudgmentRequest(
+                concurrency=1,
+                token_budget=1_000_000,
+                request_budget=100,
+                judge_review_confirmed=True,
+            ),
+        )
+        revision = await _wait_revision(service, started.revision_id)
+
+        citation_support = next(
+            check for check in revision.checks if check.checker_id == "citation_support"
+        )
+        assert revision.status == "complete"
+        assert citation_support.result == "pass"
+        assert [
+            invocation["status"]
+            for invocation in citation_support.payload["batches"][0]["invocations"]
+        ] == ["output_invalid", "succeeded"]
+        assert provider.citation_request_count == 2
+        criterion_invocations = [
+            invocation for judgment in revision.judgments for invocation in judgment.invocations
+        ]
+        citation_invocations = [
+            invocation
+            for batch in citation_support.payload["batches"]
+            for invocation in batch["invocations"]
+        ]
+        assert revision.judge_usage.invocation_count == (
+            len(criterion_invocations) + len(citation_invocations)
+        )
+        assert revision.judge_usage.input_tokens == (
+            sum(invocation.input_tokens for invocation in criterion_invocations)
+            + sum(invocation["input_tokens"] for invocation in citation_invocations)
+        )
+        assert revision.judge_usage.output_tokens == (
+            sum(invocation.output_tokens for invocation in criterion_invocations)
+            + sum(invocation["output_tokens"] for invocation in citation_invocations)
+        )
+        assert revision.judge_usage.total_tokens == (
+            revision.judge_usage.input_tokens + revision.judge_usage.output_tokens
+        )
+
+    asyncio.run(scenario())
+
+
+def test_citation_support_retries_invalid_quote_once_then_passes(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        database = EvaluationDatabase(tmp_path / "eval")
+        repository = EvaluationRepository(database)
+        _add_judgeable_run(
+            database,
+            repository,
+            case_id="c1-001",
+            answer="MCP 是外部内容边界。【来源：block_1】",
+            trace_id="b" * 32,
+            run_id="run_citation_quote_retry",
+        )
+        provider = _CitationBatchAwareProvider(invalid_first_citation_quote=True)
+        service = EvaluationJudgmentService(
+            database=database,
+            repository=repository,
+            trace_catalog=_FakeTraceCatalog(tmp_path),  # type: ignore[arg-type]
+            credentials=_MemoryCredentials(),
+            chat_provider_factory=lambda _key: provider,
+        )
+
+        started = await service.start(
+            "run_citation_quote_retry",
+            StartJudgmentRequest(
+                concurrency=1,
+                token_budget=1_000_000,
+                request_budget=100,
+                judge_review_confirmed=True,
+            ),
+        )
+        revision = await _wait_revision(service, started.revision_id)
+
+        citation_support = next(
+            check for check in revision.checks if check.checker_id == "citation_support"
+        )
+        assert citation_support.result == "pass"
+        assert [
+            (invocation["status"], invocation["error_code"])
+            for invocation in citation_support.payload["batches"][0]["invocations"]
+        ] == [
+            ("output_invalid", "citation_evidence_quote_invalid"),
+            ("succeeded", None),
+        ]
 
     asyncio.run(scenario())
 
@@ -1014,7 +1280,7 @@ def test_citation_support_splits_large_answer_and_covers_every_occurrence(
             )
             if "occurrences" in json.loads(request[-1].content)
         )
-        assert len(citation_support.payload["occurrence_results"]) == 22
+        assert len(citation_support.payload["claim_results"]) == 22
 
     asyncio.run(scenario())
 
@@ -1222,8 +1488,8 @@ def test_citation_support_missing_occurrence_output_is_pending(
         )
         assert citation_support.result == "pending"
         assert citation_support.error_code == "citation_occurrence_set_invalid"
-        occurrence_results = citation_support.payload["occurrence_results"]
-        assert occurrence_results[0]["verdict"] == "unknown"
+        claim_results = citation_support.payload["claim_results"]
+        assert claim_results[0]["verdict"] == "unknown"
 
     asyncio.run(scenario())
 

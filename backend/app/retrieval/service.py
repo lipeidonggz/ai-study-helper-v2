@@ -52,6 +52,8 @@ SCAN_SNIPPET_CONTEXT_CHARS = 80
 _ASCII_UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 _ASCII_LOWER = "abcdefghijklmnopqrstuvwxyz"
 _ASCII_FOLD_TABLE = str.maketrans(_ASCII_UPPER, _ASCII_LOWER)
+_SENTENCE_TERMINATORS = frozenset("。！？!?")
+_SENTENCE_CLOSERS = frozenset("\"'”’」』）)]}")
 
 
 class RetrievalReadService:
@@ -653,8 +655,45 @@ def _validate_query_vector(vector: list[float], dimension: int) -> None:
 
 
 def _snippet(text: str, start: int, end: int) -> str:
-    snippet_start = max(0, start - SCAN_SNIPPET_CONTEXT_CHARS)
-    snippet_end = min(len(text), end + SCAN_SNIPPET_CONTEXT_CHARS)
+    target_start = max(0, start - SCAN_SNIPPET_CONTEXT_CHARS)
+    target_end = min(len(text), end + SCAN_SNIPPET_CONTEXT_CHARS)
+    boundaries = _sentence_boundaries(text)
+    snippet_start = max(
+        (boundary for boundary in boundaries if boundary <= target_start),
+        default=0,
+    )
+    snippet_end = min(
+        (boundary for boundary in boundaries if boundary >= target_end),
+        default=len(text),
+    )
+    while snippet_start < start and text[snippet_start].isspace():
+        snippet_start += 1
+    while snippet_end > end and text[snippet_end - 1].isspace():
+        snippet_end -= 1
     prefix = "…" if snippet_start > 0 else ""
     suffix = "…" if snippet_end < len(text) else ""
     return f"{prefix}{text[snippet_start:snippet_end]}{suffix}"
+
+
+def _sentence_boundaries(text: str) -> list[int]:
+    """返回可安全切开的句末位置，保留结尾引号和括号。"""
+
+    boundaries: list[int] = []
+    for index, char in enumerate(text):
+        if char == "\n":
+            boundaries.append(index + 1)
+            continue
+        if char not in _SENTENCE_TERMINATORS and char != ".":
+            continue
+        if char == ".":
+            previous = text[index - 1] if index > 0 else ""
+            following = text[index + 1] if index + 1 < len(text) else ""
+            if previous.isdigit() and following.isdigit():
+                continue
+            if following and not following.isspace() and following not in _SENTENCE_CLOSERS:
+                continue
+        boundary = index + 1
+        while boundary < len(text) and text[boundary] in _SENTENCE_CLOSERS:
+            boundary += 1
+        boundaries.append(boundary)
+    return boundaries

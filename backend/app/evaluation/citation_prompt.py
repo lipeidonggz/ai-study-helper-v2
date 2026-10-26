@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from app.providers.chat import ChatMessage
 
-CITATION_SUPPORT_PROMPT_VERSION = "citation-rubric-v4"
+CITATION_SUPPORT_PROMPT_VERSION = "citation-rubric-v7"
 
 CITATION_SUPPORT_SYSTEM_PROMPT = """<role>
 你是本地文档问答的引用支持检查器。
@@ -18,8 +18,8 @@ CITATION_SUPPORT_SYSTEM_PROMPT = """<role>
 <inputs>
 你只会收到：
 1. contexts：Harness 切出的 claim，或历史答案中的局部语义上下文；
-2. citations：本次 occurrence 对应的真实工具证据块；
-3. occurrences：一个 context 与一个 citation 的关系。
+2. citations：本次 occurrence 引用的真实工具证据块；
+3. occurrences：一个 context 与一组 citation 的关系。
 
 每个 context 只包含：
 - context_id；
@@ -34,7 +34,7 @@ CITATION_SUPPORT_SYSTEM_PROMPT = """<role>
 
 每个 occurrence 只包含：
 - occurrence_id；
-- block_id；
+- block_ids；
 - context_id。
 </inputs>
 
@@ -54,11 +54,22 @@ CITATION_SUPPORT_SYSTEM_PROMPT = """<role>
    不得扩展到前后句或同段其他内容。
 4. context.kind 为其他值时，context 可能包含多句话或多个列表内容；应识别由该 occurrence
    引用标记承诺支持的相关主张，不能默认只检查紧邻引用前的一句话。
-5. supported：该 citation 能支持该 occurrence 对应的全部可识别相关主张。
-6. unsupported：证据原文不能支持或明确反驳任一相关主张，或者答案声称的文档归属与 citation 不符。
-7. unknown：无法从 context 确定该引用对应的主张，或仅凭该 citation 无法可靠判断。
-8. reason 必须直接说明证据如何支持、反驳或不支持相关主张。
-9. evidence_quotes 必须逐字来自该 occurrence 对应 citation 的 text，不得改写、拼接或跨 block 引用。
+5. occurrence.block_ids 是一组需要联合判断的引用；不得把组内 block 拆成独立 occurrence。
+6. supported：组内证据联合覆盖 occurrence 对应的全部可识别相关主张；单个 block 不必独自覆盖整段。
+7. unsupported：组内证据仍不能支持任一必需子主张、明确反驳相关主张，或答案声称的文档归属与引用不符。
+8. unknown：无法从 context 确定该引用对应的主张，或联合证据仍不足以可靠判断。
+9. reason 必须直接说明证据如何支持、反驳或不支持相关主张。
+10. evidence_quotes 必须逐字来自该 occurrence 的某个 block_ids 对应 citation 的 text，
+    不得改写或拼接。
+11. 按核心命题、限定范围和语义强度判断 claim 与 evidence 是否等价；
+    中文近义转述不要求逐词对应。若转述保留了原文的转折、范围和不确定性，应判 supported。
+12. 正面评价的强度要看完整命题：原文肯定某个问题、方向或局部判断合理、有道理、是好的，
+    而 claim 写成“该问题本身合理／有道理／是对的”且仍保留转折与更宽范围时，二者等价；
+    不能只因 claim 使用了“正确／对”等概括词就判定增强。
+13. 只有 claim 删除必要限制，或把局部、部分、可能、候选提升为唯一答案、完整覆盖、
+    排他正确时，才判语义增强。
+14. 每个 occurrence 的 verdict 只能由该 occurrence 的 context 和 block_ids 决定；
+    不得使用同批其他 occurrence 的内容或结论影响当前判断。
 </judgment_rules>
 
 <output>
@@ -71,7 +82,7 @@ citations 必须与输入中的 occurrence_id 集合完全一致，不得增加�
       "occurrence_id": "citation_0001",
       "verdict": "supported | unsupported | unknown",
       "reason": "简短且可核验的理由",
-      "evidence_quotes": ["逐字引用该 block 的原文"]
+      "evidence_quotes": ["逐字引用任一组成 block 的原文"]
     }
   ]
 }
@@ -99,10 +110,10 @@ class CitationContextInput(BaseModel):
 
 
 class CitationOccurrenceInput(BaseModel):
-    """一个引用 block 在一个答案上下文中的一次检查关系。"""
+    """一个引用 block 组在一个答案上下文中的一次联合检查关系。"""
 
     occurrence_id: str
-    block_id: str
+    block_ids: list[str] = Field(min_length=1)
     context_id: str
 
 

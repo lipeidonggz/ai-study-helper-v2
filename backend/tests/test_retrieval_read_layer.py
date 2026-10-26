@@ -9,7 +9,7 @@ import pytest
 
 from app.main import create_app
 from app.providers.embeddings import FakeEmbeddingProvider
-from app.retrieval.service import RetrievalFailure, RetrievalReadService
+from app.retrieval.service import RetrievalFailure, RetrievalReadService, _snippet
 
 TOKEN = "retrieval-read-test-token"
 
@@ -206,6 +206,34 @@ def test_scan_term_distinguishes_zero_matches_from_missing_scope(
     with pytest.raises(RetrievalFailure) as missing_scope:
         reader.scan_term("MCP", ["doc_missing"])
     assert missing_scope.value.code == "scope_not_found"
+
+
+def test_scan_snippet_expands_to_complete_sentence_boundaries() -> None:
+    text = (
+        "Enterprises often ask us how to secure MCP connections. "
+        "It's a good question, but "
+        + "the surrounding discussion remains relevant "
+        * 4
+        + "the right one is broader than MCP specifically. "
+        "This following sentence provides additional context for the reader."
+    )
+    start = text.rindex("MCP")
+
+    snippet = _snippet(text, start, start + len("MCP"))
+
+    assert snippet.startswith("…It's a good question")
+    assert "broader than MCP specifically." in snippet
+    assert "This following sentence provides additional context for the reader." in snippet
+    assert snippet.endswith(".")
+
+
+def test_scan_snippet_keeps_opening_and_closing_sentence_punctuation() -> None:
+    text = "First context sentence. “The target MCP answer.” Final context sentence."
+    start = text.index("MCP")
+
+    snippet = _snippet(text, start, start + len("MCP"))
+
+    assert "“The target MCP answer.”" in snippet
 
 
 def test_empty_arguments_and_missing_sections_return_stable_errors(
