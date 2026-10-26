@@ -182,7 +182,7 @@ def test_agent_runtime_executes_tool_and_finishes(tmp_path: Path) -> None:
         event for event in result.events if event.event_type == "citations_available"
     )
     assert citation_event.payload["status"] == "complete"
-    assert citation_event.payload["span_version"] == "claim-spans-v2"
+    assert citation_event.payload["span_version"] == "claim-spans-v3"
     assert citation_event.payload["batch_count"] == 1
     assert citation_event.payload["batch_version"] == "evidence-blocks-v1"
     assert citation_event.payload["annotations"] == []
@@ -497,7 +497,7 @@ def test_agent_runtime_persists_parented_trace_with_tool_and_budget_data(
     citation_span = next(span for span in detail.spans if span.name == "citation.annotation")
     assert citation_span.status == "ok"
     assert citation_span.attributes["app.citation_annotation_status"] == "complete"
-    assert citation_span.attributes["app.claim_span_version"] == "claim-spans-v2"
+    assert citation_span.attributes["app.claim_span_version"] == "claim-spans-v3"
     assert citation_span.attributes["app.annotation_batch_count"] == 1
     assert citation_span.attributes["app.annotation_batch_version"] == "evidence-blocks-v1"
     assert citation_span.attributes["app.model_calls"] == 1
@@ -524,7 +524,7 @@ def test_agent_runtime_persists_parented_trace_with_tool_and_budget_data(
         ).read_text(encoding="utf-8")
     )
     assert citation_payload["status"] == "complete"
-    assert citation_payload["span_version"] == "claim-spans-v2"
+    assert citation_payload["span_version"] == "claim-spans-v3"
     assert citation_span.attributes["llm.invocation_parameters.max_tokens"] == (
         citation_annotation_output_token_cap(citation_payload["span_count"])
     )
@@ -1089,7 +1089,7 @@ def test_protected_agent_api_runs_with_injected_providers(tmp_path: Path) -> Non
     assert result["answer"] == "API 运行成功"
     assert result["answer_completeness"] == "complete"
     assert result["limitations"] == []
-    assert result["prompt_bundle_version"] == "chat-v5"
+    assert result["prompt_bundle_version"] == "chat-v7"
     assert result["observation_token_counter_version"] == "chat-budget-conservative-v1"
     assert result["citation_annotations"]["status"] == "not_applicable"
     assert result["citation_annotation_model_calls"] == 0

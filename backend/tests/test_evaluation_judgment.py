@@ -11,12 +11,34 @@ import pytest
 
 from app.agent.citations import CitationAnnotation, CitationAnnotationArtifact
 from app.evaluation.citation_prompt import (
+    CITATION_CLAIM_ROLES_PROMPT_VERSION,
+    CITATION_CLAIM_ROLES_SYSTEM_PROMPT,
+    CITATION_EVIDENCE_ROLES_PROMPT_VERSION,
+    CITATION_EVIDENCE_ROLES_SYSTEM_PROMPT,
+    CITATION_RELATION_PROMPT_VERSION,
+    CITATION_RELATION_SYSTEM_PROMPT,
     CITATION_SUPPORT_PROMPT_VERSION,
     CITATION_SUPPORT_SYSTEM_PROMPT,
+    CitationClaimRoleInput,
+    CitationContextInput,
+    CitationEvidenceInput,
+    CitationEvidenceRoleInput,
+    CitationOccurrenceInput,
+    CitationRelationComparisonInput,
+    CitationRoleAssertionInput,
+    CitationSupportInput,
 )
 from app.evaluation.database import EvaluationDatabase
 from app.evaluation.evidence import split_citation_contexts
-from app.evaluation.judgment import EvaluationJudgmentService
+from app.evaluation.judgment import (
+    CitationRelationCheckOutput,
+    EvaluationJudgmentService,
+    _has_substantive_unmatched_roles,
+    _normalize_claim_role,
+    _numeric_role_conflict,
+    _parse_citation_output,
+    _parse_relation_review,
+)
 from app.evaluation.models import (
     CheckReviewRequest,
     CitationReviewItem,
@@ -201,15 +223,22 @@ class _CitationBatchAwareProvider:
         omit_last_occurrence: bool = False,
         invalid_first_citation_output: bool = False,
         invalid_first_citation_quote: bool = False,
+        relation_review_present: bool = False,
+        relation_review_direction_preserved: bool | None = True,
     ) -> None:
         self._profile = FakeChatProvider(["unused"]).profile
         self._first_batch_verdicts = first_batch_verdicts
         self._omit_last_occurrence = omit_last_occurrence
         self._invalid_first_citation_output = invalid_first_citation_output
         self._invalid_first_citation_quote = invalid_first_citation_quote
+        self._relation_review_present = relation_review_present
+        self._relation_review_direction_preserved = relation_review_direction_preserved
         self.requests: list[tuple[ChatMessage, ...]] = []
         self.max_output_tokens: list[int | None] = []
         self.citation_request_count = 0
+        self.claim_role_request_count = 0
+        self.evidence_role_request_count = 0
+        self.relation_review_request_count = 0
 
     @property
     def profile(self) -> ChatProviderProfile:
@@ -223,8 +252,82 @@ class _CitationBatchAwareProvider:
     ) -> ChatCompletionResult:
         self.requests.append(tuple(messages))
         self.max_output_tokens.append(max_output_tokens)
-        payload = json.loads(messages[-1].content)
-        if "occurrences" in payload:
+        payload = next(
+            json.loads(message.content)
+            for message in reversed(messages)
+            if message.role == "user" and message.content.startswith("{")
+        )
+        if messages[0].content == CITATION_CLAIM_ROLES_SYSTEM_PROMPT:
+            self.claim_role_request_count += 1
+            content = json.dumps(
+                {
+                    "claims": [
+                        {
+                            "occurrence_id": item["occurrence_id"],
+                            "relation_present": self._relation_review_present,
+                            "relation_type": (
+                                "benefit_cost" if self._relation_review_present else None
+                            ),
+                            "claim_objective": (
+                                "比较收益与代价" if self._relation_review_present else None
+                            ),
+                            "claim_roles": (
+                                [
+                                    {"fact": "风险减少", "role": "benefit"},
+                                    {"fact": "摩擦增加", "role": "cost"},
+                                ]
+                                if self._relation_review_present
+                                else []
+                            ),
+                        }
+                        for item in payload["occurrences"]
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        elif messages[0].content == CITATION_EVIDENCE_ROLES_SYSTEM_PROMPT:
+            self.evidence_role_request_count += 1
+            content = json.dumps(
+                {
+                    "evidence": [
+                        {
+                            "occurrence_id": item["occurrence_id"],
+                            "source_objective": "比较收益与代价",
+                            "evidence_roles": [
+                                {"fact": "风险减少", "role": "benefit"},
+                                {"fact": "摩擦增加", "role": "cost"},
+                            ],
+                            "reason": "测试 evidence 角色",
+                        }
+                        for item in payload["occurrences"]
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        elif messages[0].content == CITATION_RELATION_SYSTEM_PROMPT:
+            self.relation_review_request_count += 1
+            content = json.dumps(
+                {
+                    "relations": [
+                        {
+                            "occurrence_id": item["occurrence_id"],
+                            "direction_preserved": self._relation_review_direction_preserved,
+                            "explicit_conflict": (
+                                self._relation_review_direction_preserved is False
+                            ),
+                            "unmatched_claim_roles": (
+                                ["测试未匹配角色"]
+                                if self._relation_review_direction_preserved is None
+                                else []
+                            ),
+                            "reason": "测试关系方向结论",
+                        }
+                        for item in payload["claims"]
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        elif "occurrences" in payload:
             first_request = self.citation_request_count == 0
             self.citation_request_count += 1
             if first_request and self._invalid_first_citation_output:
@@ -364,6 +467,32 @@ def _add_judgeable_run(
         )
 
 
+def _single_claim_annotation(
+    answer: str,
+    *,
+    block_ids: list[str],
+) -> CitationAnnotationArtifact:
+    """为整段测试答案构造一个冻结 claim annotation。"""
+
+    return CitationAnnotationArtifact(
+        status="complete",
+        model_id="fake-annotation",
+        span_count=1,
+        evidence_count=len(block_ids),
+        annotations=[
+            CitationAnnotation(
+                annotation_id="annotation_0001",
+                span_id="span_0001",
+                kind="sentence",
+                start_index=0,
+                end_index=len(answer),
+                text=answer,
+                block_ids=block_ids,
+            )
+        ],
+    )
+
+
 async def _wait_revision(
     service: EvaluationJudgmentService,
     revision_id: str,
@@ -479,27 +608,256 @@ def test_llm_judge_builds_whitelist_input_and_judgments(tmp_path: Path) -> None:
 
 
 def test_citation_prompt_uses_semantic_equivalence_and_isolates_occurrences() -> None:
-    assert CITATION_SUPPORT_PROMPT_VERSION == "citation-rubric-v7"
+    assert CITATION_SUPPORT_PROMPT_VERSION == "citation-rubric-v9"
     assert "中文近义转述不要求逐词对应" in CITATION_SUPPORT_SYSTEM_PROMPT
     assert "该问题本身合理／有道理／是对的" in CITATION_SUPPORT_SYSTEM_PROMPT
     assert "不能只因 claim 使用了“正确／对”等概括词就判定增强" in CITATION_SUPPORT_SYSTEM_PROMPT
     assert "删除必要限制" in CITATION_SUPPORT_SYSTEM_PROMPT
+    assert "context_fragments" in CITATION_SUPPORT_SYSTEM_PROMPT
+    assert "不能替 focus_text 获得支持" in CITATION_SUPPORT_SYSTEM_PROMPT
+    assert "relation_check" not in CITATION_SUPPORT_SYSTEM_PROMPT
     assert "不得使用同批其他 occurrence" in CITATION_SUPPORT_SYSTEM_PROMPT
     assert "c1-001" not in CITATION_SUPPORT_SYSTEM_PROMPT
+    assert "c2-001" not in CITATION_SUPPORT_SYSTEM_PROMPT
     assert "good question" not in CITATION_SUPPORT_SYSTEM_PROMPT
+    for case_specific_token in ("83%", "93%", "17%", "0.4%"):
+        assert case_specific_token not in CITATION_SUPPORT_SYSTEM_PROMPT
+
+
+def test_relation_prompt_uses_objective_frame_and_allows_unknown_direction() -> None:
+    assert CITATION_CLAIM_ROLES_PROMPT_VERSION == "citation-claim-roles-v1"
+    assert "不会收到 citations" in CITATION_CLAIM_ROLES_SYSTEM_PROMPT
+    assert "claim_roles 必须逐项列出" in CITATION_CLAIM_ROLES_SYSTEM_PROMPT
+    assert CITATION_EVIDENCE_ROLES_PROMPT_VERSION == "citation-evidence-roles-v3"
+    assert "不会收到 contexts 或 claim" in CITATION_EVIDENCE_ROLES_SYSTEM_PROMPT
+    assert "把 A 记录为 cause" in CITATION_EVIDENCE_ROLES_SYSTEM_PROMPT
+    assert "evidence_roles 返回空数组" in CITATION_EVIDENCE_ROLES_SYSTEM_PROMPT
+    assert CITATION_RELATION_PROMPT_VERSION == "citation-relation-v8"
+    assert "claim_roles" in CITATION_RELATION_SYSTEM_PROMPT
+    assert "evidence_roles" in CITATION_RELATION_SYSTEM_PROMPT
+    assert "不得重新解释原始文本" in CITATION_RELATION_SYSTEM_PROMPT
+    assert "direction_preserved=null" in CITATION_RELATION_SYSTEM_PROMPT
+    assert "所有显式角色都必须覆盖" in CITATION_RELATION_SYSTEM_PROMPT
+    assert "证据没有列出该角色" in CITATION_RELATION_SYSTEM_PROMPT
+    assert "explicit_conflict" in CITATION_RELATION_SYSTEM_PROMPT
+
+
+def test_numeric_role_guard_rejects_same_metric_in_opposite_roles() -> None:
+    conflict = _numeric_role_conflict(
+        claim_roles=[
+            CitationRoleAssertionInput(
+                fact="约 0.4% 的良性命令被误拦",
+                role="cost",
+            )
+        ],
+        evidence_roles=[
+            CitationRoleAssertionInput(
+                fact="降低摩擦，约 0.4% 的良性命令被拦",
+                role="benefit",
+            ),
+            CitationRoleAssertionInput(
+                fact="约 17% 的风险行为漏过",
+                role="cost",
+            ),
+        ],
+    )
+
+    assert conflict is not None
+    assert "0.4%" in conflict
+    assert (
+        _numeric_role_conflict(
+            claim_roles=[
+                CitationRoleAssertionInput(
+                    fact="约 0.4% 的良性命令被误拦",
+                    role="benefit",
+                )
+            ],
+            evidence_roles=[
+                CitationRoleAssertionInput(
+                    fact="降低摩擦，约 0.4% 的良性命令被拦",
+                    role="benefit",
+                )
+            ],
+        )
+        is None
+    )
+
+
+def test_claim_role_normalization_drops_low_information_other_relation() -> None:
+    normalized = _normalize_claim_role(
+        CitationClaimRoleInput(
+            occurrence_id="citation_0001",
+            relation_present=True,
+            relation_type="other",
+            claim_objective=None,
+            claim_roles=[
+                CitationRoleAssertionInput(
+                    fact="The system uses a classifier",
+                    role="other",
+                )
+            ],
+        )
+    )
+
+    assert normalized.relation_present is False
+    assert normalized.relation_type is None
+    assert normalized.claim_roles == []
+
+
+def test_unmatched_other_role_does_not_block_matched_benefit_cost() -> None:
+    claim_roles = [
+        CitationRoleAssertionInput(fact="system mechanism", role="other"),
+        CitationRoleAssertionInput(fact="low friction", role="benefit"),
+        CitationRoleAssertionInput(fact="missed risk", role="cost"),
+    ]
+
+    assert (
+        _has_substantive_unmatched_roles(
+            claim_roles,
+            ["system mechanism"],
+        )
+        is False
+    )
+    assert _has_substantive_unmatched_roles(claim_roles, ["missed risk"]) is True
+
+
+def test_relation_check_allows_evidence_without_explicit_objective() -> None:
+    relation = CitationRelationCheckOutput(
+        relation_present=True,
+        relation_type="cause_effect",
+        source_objective=None,
+        claim_objective=None,
+        evidence_roles=[CitationRoleAssertionInput(fact="risk increases", role="effect")],
+        claim_roles=[CitationRoleAssertionInput(fact="risk increases", role="effect")],
+        direction_preserved=True,
+        explicit_conflict=False,
+    )
+
+    assert relation.source_objective is None
+    assert relation.direction_preserved is True
+
+
+def test_inconsistent_relation_output_is_narrowed_to_unknown() -> None:
+    packet = CitationRelationComparisonInput(
+        claims=[
+            CitationClaimRoleInput(
+                occurrence_id="citation_0001",
+                relation_present=True,
+                relation_type="cause_effect",
+                claim_roles=[
+                    CitationRoleAssertionInput(fact="change", role="cause"),
+                    CitationRoleAssertionInput(fact="risk", role="effect"),
+                ],
+            )
+        ],
+        evidence=[
+            CitationEvidenceRoleInput(
+                occurrence_id="citation_0001",
+                evidence_roles=[
+                    CitationRoleAssertionInput(fact="risk", role="effect"),
+                ],
+                reason="same role",
+            )
+        ],
+        occurrences=[
+            CitationOccurrenceInput(
+                occurrence_id="citation_0001",
+                block_ids=["block_1"],
+                context_id="context_1",
+            )
+        ],
+    )
+    result = ChatCompletionResult(
+        content=json.dumps(
+            {
+                "relations": [
+                    {
+                        "occurrence_id": "citation_0001",
+                        "direction_preserved": False,
+                        "explicit_conflict": False,
+                        "unmatched_claim_roles": [
+                            {"fact": "risk", "role": "effect"},
+                        ],
+                        "reason": "inconsistent test output",
+                    }
+                ]
+            }
+        ),
+        request_id="relation-normalize",
+        actual_model_id="fake",
+        finish_reason="stop",
+        input_tokens=1,
+        output_tokens=1,
+    )
+
+    parsed = _parse_relation_review(result, packet)
+
+    assert parsed["citation_0001"].direction_preserved is None
+    assert "判官未给出明确冲突依据" in parsed["citation_0001"].unmatched_claim_roles
+
+
+def test_citation_output_allows_relation_free_main_result() -> None:
+    packet = CitationSupportInput(
+        contexts=[
+            CitationContextInput(
+                context_id="context_relation",
+                kind="claim",
+                text="方案以减少摩擦为代价，换来风险漏过。",
+            )
+        ],
+        citations=[
+            CitationEvidenceInput(
+                block_id="block_relation",
+                doc_title="calibration",
+                section_path=[],
+                text="收益是减少摩擦，代价是漏过风险。",
+            )
+        ],
+        occurrences=[
+            CitationOccurrenceInput(
+                occurrence_id="citation_relation",
+                block_ids=["block_relation"],
+                context_id="context_relation",
+            )
+        ],
+    )
+    result = ChatCompletionResult(
+        content=json.dumps(
+            {
+                "citations": [
+                    {
+                        "occurrence_id": "citation_relation",
+                        "verdict": "supported",
+                        "reason": "测试缺少关系字段",
+                        "evidence_quotes": ["收益是减少摩擦，代价是漏过风险。"],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        request_id="relation-missing",
+        actual_model_id="fake",
+        finish_reason="stop",
+        input_tokens=1,
+        output_tokens=1,
+    )
+
+    parsed = _parse_citation_output(result, packet)
+    assert parsed.citations[0].relation_check is None
 
 
 def test_human_override_appends_judgment_and_switches_effective_binding(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
+        answer = "MCP 是外部内容边界。【来源：block_1】"
         database = EvaluationDatabase(tmp_path / "eval")
         repository = EvaluationRepository(database)
         _add_judgeable_run(
             database,
             repository,
             case_id="c1-001",
-            answer="MCP 是外部内容边界。【来源：block_1】",
+            answer=answer,
             trace_id="b" * 32,
             run_id="run_human_override",
         )
@@ -1050,8 +1408,8 @@ def test_citation_support_judges_one_claim_with_multiple_blocks_as_a_group(
             }
         ]
         assert citation_support.result == "pass"
-        assert citation_support.checker_version == "6"
-        assert citation_support.payload["prompt_version"] == "citation-rubric-v7"
+        assert citation_support.checker_version == "11"
+        assert citation_support.payload["prompt_version"] == "citation-rubric-v9"
         assert citation_support.payload["claim_results"][0]["block_ids"] == [
             "block_1",
             "block_2",
@@ -1068,6 +1426,9 @@ def test_citation_support_judges_one_claim_with_multiple_blocks_as_a_group(
         assert block_projections["block_2"]["evidence_quotes"] == ["第二项隔离限制网络访问。"[:12]]
         assert citation_support.payload["batching"]["occurrence_count"] == 1
         assert citation_support.payload["batching"]["citation_relation_count"] == 2
+        assert provider.claim_role_request_count == 1
+        assert provider.evidence_role_request_count == 0
+        assert provider.relation_review_request_count == 0
 
     asyncio.run(scenario())
 
@@ -1187,6 +1548,209 @@ def test_citation_support_retries_invalid_quote_once_then_passes(
             ("output_invalid", "citation_evidence_quote_invalid"),
             ("succeeded", None),
         ]
+
+    asyncio.run(scenario())
+
+
+def test_citation_support_relation_judge_rejects_swapped_direction(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        answer = "MCP 是外部内容边界。【来源：block_1】"
+        database = EvaluationDatabase(tmp_path / "eval")
+        repository = EvaluationRepository(database)
+        _add_judgeable_run(
+            database,
+            repository,
+            case_id="c1-001",
+            answer=answer,
+            trace_id="b" * 32,
+            run_id="run_citation_relation_retry",
+        )
+        provider = _CitationBatchAwareProvider(
+            relation_review_present=True,
+            relation_review_direction_preserved=False,
+        )
+        service = EvaluationJudgmentService(
+            database=database,
+            repository=repository,
+            trace_catalog=_FakeTraceCatalog(
+                tmp_path,
+                citation_annotation_artifact=_single_claim_annotation(
+                    answer,
+                    block_ids=["block_1"],
+                ),
+            ),  # type: ignore[arg-type]
+            credentials=_MemoryCredentials(),
+            chat_provider_factory=lambda _key: provider,
+        )
+
+        started = await service.start(
+            "run_citation_relation_retry",
+            StartJudgmentRequest(
+                concurrency=1,
+                token_budget=1_000_000,
+                request_budget=100,
+                judge_review_confirmed=True,
+            ),
+        )
+        revision = await _wait_revision(service, started.revision_id)
+
+        citation_support = next(
+            check for check in revision.checks if check.checker_id == "citation_support"
+        )
+        assert citation_support.result == "fail"
+        assert citation_support.error_code == "citation_not_supported"
+        assert [
+            (invocation["status"], invocation["error_code"])
+            for invocation in citation_support.payload["batches"][0]["invocations"]
+        ] == [
+            ("succeeded", None),
+            ("succeeded", None),
+            ("succeeded", None),
+            ("succeeded", None),
+        ]
+        assert provider.claim_role_request_count == 1
+        assert provider.evidence_role_request_count == 1
+        assert provider.relation_review_request_count == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("direction_preserved", "expected_result", "expected_error"),
+    [
+        (True, "pass", None),
+        (False, "fail", "citation_not_supported"),
+        (None, "pending", "citation_support_unknown"),
+    ],
+)
+def test_citation_support_always_runs_relation_judge_for_supported_claim(
+    tmp_path: Path,
+    direction_preserved: bool | None,
+    expected_result: str,
+    expected_error: str | None,
+) -> None:
+    async def scenario() -> None:
+        answer = (
+            "The approach increases friction at the cost of reducing risk."
+            "\u3010\u6765\u6e90\uff1ablock_1\u3011"
+        )
+        run_suffix = "unknown" if direction_preserved is None else str(direction_preserved).lower()
+        run_id = f"run_citation_relation_review_{run_suffix}"
+        database = EvaluationDatabase(tmp_path / run_suffix / "eval")
+        repository = EvaluationRepository(database)
+        blocks = [
+            {
+                "block_id": "block_1",
+                "doc_id": "doc_1",
+                "doc_title": "tradeoff calibration",
+                "source_label": "doc",
+                "section_path": ["tradeoff"],
+                "text": "The approach increases friction while reducing risk.",
+            }
+        ]
+        _add_judgeable_run(
+            database,
+            repository,
+            case_id="c1-001",
+            answer=answer,
+            trace_id="b" * 32,
+            run_id=run_id,
+        )
+        provider = _CitationBatchAwareProvider(
+            relation_review_present=True,
+            relation_review_direction_preserved=direction_preserved,
+        )
+        service = EvaluationJudgmentService(
+            database=database,
+            repository=repository,
+            trace_catalog=_FakeTraceCatalog(
+                tmp_path / run_suffix,
+                blocks=blocks,
+                citation_annotation_artifact=_single_claim_annotation(
+                    answer,
+                    block_ids=["block_1"],
+                ),
+            ),  # type: ignore[arg-type]
+            credentials=_MemoryCredentials(),
+            chat_provider_factory=lambda _key: provider,
+        )
+
+        started = await service.start(
+            run_id,
+            StartJudgmentRequest(
+                concurrency=1,
+                token_budget=1_000_000,
+                request_budget=100,
+                judge_review_confirmed=True,
+            ),
+        )
+        revision = await _wait_revision(service, started.revision_id)
+
+        citation_support = next(
+            check for check in revision.checks if check.checker_id == "citation_support"
+        )
+        assert citation_support.result == expected_result
+        assert citation_support.error_code == expected_error
+        assert provider.citation_request_count == 1
+        assert provider.claim_role_request_count == 1
+        assert provider.evidence_role_request_count == 1
+        assert provider.relation_review_request_count == 1
+        assert [
+            invocation["status"]
+            for invocation in citation_support.payload["batches"][0]["invocations"]
+        ] == ["succeeded", "succeeded", "succeeded", "succeeded"]
+        relation_projection = citation_support.payload["claim_results"][0]["relation_check"]
+        assert relation_projection["direction_preserved"] is direction_preserved
+
+        relation_output = json.loads(
+            citation_support.payload["batches"][0]["invocations"][3]["raw_output"]
+        )
+        assert relation_output["relations"][0]["direction_preserved"] is direction_preserved
+        claim_role_request = next(
+            request
+            for request in provider.requests
+            if request[0].content == CITATION_CLAIM_ROLES_SYSTEM_PROMPT
+        )
+        assert set(json.loads(claim_role_request[-1].content)) == {
+            "occurrences",
+            "contexts",
+        }
+        evidence_role_request = next(
+            request
+            for request in provider.requests
+            if request[0].content == CITATION_EVIDENCE_ROLES_SYSTEM_PROMPT
+        )
+        assert set(json.loads(evidence_role_request[-1].content)) == {
+            "occurrences",
+            "citations",
+        }
+        relation_request = next(
+            request
+            for request in provider.requests
+            if request[0].content == CITATION_RELATION_SYSTEM_PROMPT
+        )
+        assert (
+            json.loads(relation_request[-1].content)["occurrences"][0]["occurrence_id"]
+            == "citation_0001"
+        )
+
+        criterion_invocations = [
+            invocation for judgment in revision.judgments for invocation in judgment.invocations
+        ]
+        citation_invocations = citation_support.payload["batches"][0]["invocations"]
+        assert revision.judge_usage.invocation_count == (
+            len(criterion_invocations) + len(citation_invocations)
+        )
+        assert revision.judge_usage.input_tokens == (
+            sum(invocation.input_tokens for invocation in criterion_invocations)
+            + sum(invocation["input_tokens"] for invocation in citation_invocations)
+        )
+        assert revision.judge_usage.output_tokens == (
+            sum(invocation.output_tokens for invocation in criterion_invocations)
+            + sum(invocation["output_tokens"] for invocation in citation_invocations)
+        )
 
     asyncio.run(scenario())
 

@@ -21,6 +21,7 @@ from app.agent.citations import (
     CitationAnnotationArtifact,
     CitationAnnotationInput,
     CitationAnnotator,
+    CitationContextFragment,
     CitationEvidenceBlock,
     citation_annotation_output_token_cap,
     split_answer_spans,
@@ -232,14 +233,12 @@ def test_split_answer_spans_covers_claims_without_headings_or_code() -> None:
     assert [span.text for span in spans] == [
         "第一句说明事实。",
         "第二句补充边界。",
-        "- 列表第一项；",
-        "列表第二项。",
+        "- 列表第一项；列表第二项。",
         "| 甲 | 乙 |",
     ]
     assert [span.kind for span in spans] == [
         "sentence",
         "sentence",
-        "list_item",
         "list_item",
         "table_row",
     ]
@@ -249,8 +248,81 @@ def test_split_answer_spans_covers_claims_without_headings_or_code() -> None:
         "span_0002",
         "span_0003",
         "span_0004",
-        "span_0005",
     ]
+
+
+def test_list_annotation_attaches_complete_list_context_without_model_selection() -> None:
+    answer = (
+        "以下三个数字含义不同：\n\n"
+        "- 约 83% 表示拦截率。\n"
+        "- 约 17% 表示漏过率。\n"
+        "- 后者之外，约 0.4% 的良性命令被误拦。\n"
+    )
+    outcome, provider = _annotate(
+        answer=answer,
+        responses=[
+            json.dumps(
+                {
+                    "annotations": [
+                        {"span_id": "span_0004", "block_ids": ["block_1"]},
+                    ]
+                }
+            )
+        ],
+    )
+
+    assert outcome.artifact.status == "complete"
+    annotation = outcome.artifact.annotations[0]
+    assert annotation.text == "- 后者之外，约 0.4% 的良性命令被误拦。"
+    assert len(annotation.context_fragments) == 1
+    context = annotation.context_fragments[0]
+    assert context.kind == "list"
+    assert context.text.startswith("以下三个数字含义不同：")
+    assert "- 约 17% 表示漏过率。" in context.text
+    assert context.text.endswith("- 后者之外，约 0.4% 的良性命令被误拦。")
+    task = _build_citation_task(
+        attempt_id="attempt_context",
+        answer=answer,
+        citations=[
+            CitationEvidenceInput(
+                block_id="block_1",
+                doc_title="calibration",
+                section_path=[],
+                text="约 0.4% 的良性命令被误拦。",
+            )
+        ],
+        annotations=outcome.artifact.annotations,
+    )
+    assert task is not None
+    judge_context = task.batches[0].contexts[0]
+    assert judge_context.focus_text == annotation.text
+    assert judge_context.context_fragments[0].text == context.text
+    annotation_request = json.loads(provider.requests[0][1].content)
+    assert "context_fragment_ids" not in json.dumps(annotation_request)
+
+
+def test_table_row_annotation_attaches_table_header_and_complete_table() -> None:
+    answer = "| 指标 | 含义 |\n| --- | --- |\n| 83% | 拦截率 |\n| 17% | 漏过率 |\n"
+    outcome, _provider = _annotate(
+        answer=answer,
+        responses=[
+            json.dumps(
+                {
+                    "annotations": [
+                        {"span_id": "span_0002", "block_ids": ["block_1"]},
+                    ]
+                }
+            )
+        ],
+    )
+
+    annotation = outcome.artifact.annotations[0]
+    assert annotation.text == "| 17% | 漏过率 |"
+    assert len(annotation.context_fragments) == 1
+    context = annotation.context_fragments[0]
+    assert context.kind == "table"
+    assert context.text.startswith("| 指标 | 含义 |")
+    assert context.text.endswith("| 17% | 漏过率 |")
 
 
 def test_split_answer_spans_keeps_inline_code_inside_one_sentence() -> None:
@@ -337,8 +409,8 @@ def test_annotator_returns_independent_claim_spans_with_exact_offsets() -> None:
 
 
 def test_annotation_prompt_rejects_underinformative_claim_fragments() -> None:
-    assert CITATION_ANNOTATION_PROMPT_VERSION == "claim-citation-v2"
-    assert "完整、独立、可核验主张" in CITATION_ANNOTATION_SYSTEM_PROMPT
+    assert CITATION_ANNOTATION_PROMPT_VERSION == "claim-citation-v3"
+    assert "列表项内部的分号子句不得再拆分" in CITATION_ANNOTATION_SYSTEM_PROMPT
     assert "单独的确认词" in CITATION_ANNOTATION_SYSTEM_PROMPT
 
 
@@ -819,6 +891,49 @@ def test_structured_annotation_is_the_exact_citation_judge_claim_context(
     assert task.batches[0].contexts[0].context_id == "annotation_0001"
     assert task.batches[0].contexts[0].kind == "claim"
     assert task.batches[0].contexts[0].text == "第二事实。"
+
+
+def test_invalid_answer_context_fragment_is_rejected(tmp_path: Path) -> None:
+    answer = "第一事实。第二事实。"
+    annotation = CitationAnnotation(
+        annotation_id="annotation_0001",
+        span_id="span_0002",
+        kind="sentence",
+        start_index=5,
+        end_index=10,
+        text="第二事实。",
+        block_ids=["block_1"],
+        context_fragments=[
+            CitationContextFragment(
+                fragment_id="context_invalid",
+                kind="paragraph",
+                start_index=0,
+                end_index=10,
+                text="不是答案原文",
+            )
+        ],
+    )
+    catalog = _trace_with_annotation(
+        tmp_path,
+        answer=answer,
+        annotation_artifact=CitationAnnotationArtifact(
+            status="complete",
+            model_id="fake-annotation",
+            span_count=2,
+            evidence_count=1,
+            annotations=[annotation],
+        ),
+    )
+
+    with pytest.raises(JudgeInputError) as error:
+        build_judge_input(
+            catalog=catalog,  # type: ignore[arg-type]
+            trace_id="c" * 32,
+            trace_status="complete",
+            answer=answer,
+        )
+
+    assert error.value.code == "citation_annotation_context_invalid"
 
 
 def test_complete_empty_annotation_does_not_fall_back_to_inline_marker(

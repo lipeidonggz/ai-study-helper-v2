@@ -14,8 +14,8 @@ from app.agent.citation_annotation_prompt import (
 from app.agent.token_counter import ObservationTokenCounter
 from app.providers.chat import ChatMessage, ChatProvider, ChatProviderError
 
-CITATION_ANNOTATION_SCHEMA_VERSION = "citation-annotation-v1"
-CLAIM_SPAN_VERSION = "claim-spans-v2"
+CITATION_ANNOTATION_SCHEMA_VERSION = "citation-annotation-v2"
+CLAIM_SPAN_VERSION = "claim-spans-v3"
 LEGACY_CLAIM_SPAN_VERSION = "legacy-unknown"
 CITATION_ANNOTATION_BATCH_VERSION = "evidence-blocks-v1"
 LEGACY_CITATION_ANNOTATION_BATCH_VERSION = "legacy-unknown"
@@ -28,6 +28,7 @@ MAX_CITATION_ANNOTATION_ATTEMPTS = 2
 MAX_CITATION_ANNOTATION_EVIDENCE_BLOCKS_PER_BATCH = 24
 
 CitationSpanKind = Literal["sentence", "list_item", "table_row", "line"]
+CitationContextKind = Literal["paragraph", "list", "table"]
 
 
 class CitationSpan(BaseModel):
@@ -66,6 +67,18 @@ class CitationAnnotationInput(BaseModel):
     evidence_blocks: list[CitationEvidenceBlock]
 
 
+class CitationContextFragment(BaseModel):
+    """Harness 从答案原文中确定性截取、仅供判官解释 focus claim 的上下文。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    fragment_id: str
+    kind: CitationContextKind
+    start_index: int = Field(ge=0)
+    end_index: int = Field(gt=0)
+    text: str = Field(min_length=1)
+
+
 class CitationAnnotation(BaseModel):
     """一个答案 claim span 与一组支持证据的结构化绑定。"""
 
@@ -78,6 +91,7 @@ class CitationAnnotation(BaseModel):
     end_index: int = Field(gt=0)
     text: str = Field(min_length=1)
     block_ids: list[str] = Field(min_length=1)
+    context_fragments: list[CitationContextFragment] = Field(default_factory=list)
 
 
 class CitationAnnotationArtifact(BaseModel):
@@ -364,6 +378,7 @@ class CitationAnnotator:
                 end_index=span.end_index,
                 text=span.text,
                 block_ids=merged_block_ids[span.span_id],
+                context_fragments=_context_fragments_for_span(answer, span),
             )
             for span_id, _block_ids in merged_block_ids.items()
             if (span := span_by_id.get(span_id)) is not None
@@ -514,7 +529,7 @@ def split_answer_spans(answer: str) -> list[CitationSpan]:
                 raw_line,
                 line_start,
                 kind="list_item",
-                split_semicolons=True,
+                split_semicolons=False,
             )
             continue
         if not paragraph:
@@ -525,6 +540,190 @@ def split_answer_spans(answer: str) -> list[CitationSpan]:
         span.model_copy(update={"span_id": f"span_{index:04d}"})
         for index, span in enumerate(spans, start=1)
     ]
+
+
+def _context_fragments_for_span(
+    answer: str,
+    span: CitationSpan,
+) -> list[CitationContextFragment]:
+    """按 Markdown 容器为 focus span 附加确定性上下文，不调用模型猜测依赖。"""
+
+    lines = _indexed_answer_lines(answer)
+    focus_line = next(
+        (
+            index
+            for index, (_start, end, _text, kind) in enumerate(lines)
+            if kind != "blank" and span.start_index < end
+        ),
+        None,
+    )
+    if focus_line is None:
+        return []
+    if span.kind == "list_item":
+        bounds = _list_context_bounds(answer, lines, focus_line)
+        kind: CitationContextKind = "list"
+    elif span.kind == "table_row":
+        bounds = _table_context_bounds(lines, focus_line)
+        kind = "table"
+    elif span.kind == "sentence":
+        bounds = _paragraph_context_bounds(lines, focus_line)
+        kind = "paragraph"
+    else:
+        return []
+    if bounds is None:
+        return []
+    start, end = _trim_answer_range(answer, *bounds)
+    if start >= end:
+        return []
+    return [
+        CitationContextFragment(
+            fragment_id=f"context_{kind}_{start:08d}_{end:08d}",
+            kind=kind,
+            start_index=start,
+            end_index=end,
+            text=answer[start:end],
+        )
+    ]
+
+
+def _indexed_answer_lines(
+    answer: str,
+) -> list[tuple[int, int, str, Literal["blank", "heading", "list_item", "table", "text"]]]:
+    """记录答案每一行的精确范围与结构类型。"""
+
+    lines: list[
+        tuple[int, int, str, Literal["blank", "heading", "list_item", "table", "text"]]
+    ] = []
+    offset = 0
+    for raw_line in answer.splitlines(keepends=True):
+        content = raw_line.rstrip("\r\n")
+        stripped = content.strip()
+        if not stripped:
+            kind: Literal["blank", "heading", "list_item", "table", "text"] = "blank"
+        elif _HEADING_PATTERN.match(content):
+            kind = "heading"
+        elif _LIST_ITEM_PATTERN.match(content):
+            kind = "list_item"
+        elif _TABLE_ROW_PATTERN.match(content) or _TABLE_SEPARATOR_PATTERN.match(content):
+            kind = "table"
+        else:
+            kind = "text"
+        lines.append((offset, offset + len(content), content, kind))
+        offset += len(raw_line)
+    if not lines and answer:
+        lines.append((0, len(answer), answer, "text"))
+    return lines
+
+
+def _paragraph_context_bounds(
+    lines: list[tuple[int, int, str, Literal["blank", "heading", "list_item", "table", "text"]]],
+    focus_line: int,
+) -> tuple[int, int] | None:
+    """返回焦点句子所在连续正文段落的精确范围。"""
+
+    if lines[focus_line][3] != "text":
+        return None
+    start_line = focus_line
+    while start_line > 0 and lines[start_line - 1][3] == "text":
+        start_line -= 1
+    end_line = focus_line
+    while end_line + 1 < len(lines) and lines[end_line + 1][3] == "text":
+        end_line += 1
+    return lines[start_line][0], lines[end_line][1]
+
+
+def _list_context_bounds(
+    answer: str,
+    lines: list[tuple[int, int, str, Literal["blank", "heading", "list_item", "table", "text"]]],
+    focus_line: int,
+) -> tuple[int, int] | None:
+    """返回列表项所属连续列表容器，并在需要时并入紧邻的列表引导段。"""
+
+    block_start = focus_line
+    while block_start > 0 and lines[block_start - 1][3] in {"list_item", "text"}:
+        block_start -= 1
+    block_end = focus_line
+    while block_end + 1 < len(lines) and lines[block_end + 1][3] in {"list_item", "text"}:
+        block_end += 1
+    if not any(lines[index][3] == "list_item" for index in range(block_start, block_end + 1)):
+        return None
+
+    first_item = next(
+        index for index in range(block_start, block_end + 1) if lines[index][3] == "list_item"
+    )
+    context_start = lines[block_start][0]
+    if block_start < first_item and not _is_adjacent_list_lead_in(
+        "".join(line[2] for line in lines[block_start:first_item]),
+    ):
+        context_start = lines[first_item][0]
+        block_start = first_item
+
+    if block_start == first_item:
+        candidate_end = block_start
+        while candidate_end > 0 and lines[candidate_end - 1][3] == "blank":
+            candidate_end -= 1
+        lead_start = candidate_end
+        while lead_start > 0 and lines[lead_start - 1][3] == "text":
+            lead_start -= 1
+        if lead_start < candidate_end:
+            lead_text = answer[lines[lead_start][0] : lines[candidate_end - 1][1]]
+            if _is_adjacent_list_lead_in(lead_text):
+                context_start = lines[lead_start][0]
+
+    return context_start, lines[block_end][1]
+
+
+def _is_adjacent_list_lead_in(text: str) -> bool:
+    """判断紧邻文本是否明确承担列表引导作用。"""
+
+    normalized = text.rstrip()
+    if normalized.endswith((":", "\uff1a")):
+        return True
+    return any(
+        cue in normalized
+        for cue in (
+            "\u4ee5\u4e0b",
+            "\u5982\u4e0b",
+            "\u4e0b\u5217",
+            "\u5305\u62ec",
+            "\u5206\u522b\u662f",
+            "\u5206\u4e3a",
+            "\u82e5\u5e72",
+            "\u4e09\u4e2a",
+            "\u4e09\u9879",
+            "\u4e09\u70b9",
+            "\u51e0\u4e2a",
+            "\u51e0\u9879",
+            "\u591a\u4e2a",
+        )
+    )
+
+
+def _table_context_bounds(
+    lines: list[tuple[int, int, str, Literal["blank", "heading", "list_item", "table", "text"]]],
+    focus_line: int,
+) -> tuple[int, int] | None:
+    """返回表格行所属完整表格容器的精确范围。"""
+
+    if lines[focus_line][3] != "table":
+        return None
+    start_line = focus_line
+    while start_line > 0 and lines[start_line - 1][3] == "table":
+        start_line -= 1
+    end_line = focus_line
+    while end_line + 1 < len(lines) and lines[end_line + 1][3] == "table":
+        end_line += 1
+    return lines[start_line][0], lines[end_line][1]
+
+
+def _trim_answer_range(answer: str, start: int, end: int) -> tuple[int, int]:
+    """去除结构容器边缘的空白，同时保持片段与答案原文严格对应。"""
+
+    while start < end and answer[start].isspace():
+        start += 1
+    while end > start and answer[end - 1].isspace():
+        end -= 1
+    return start, end
 
 
 def _append_text_spans(

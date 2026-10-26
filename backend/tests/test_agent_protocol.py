@@ -130,13 +130,20 @@ def test_release_prompt_bundle_has_stable_version_and_hash() -> None:
     first = release_prompt_bundle()
     second = release_prompt_bundle()
 
-    assert first.version == "chat-v5"
+    assert first.version == "chat-v7"
     assert first.template_hash == second.template_hash
     assert len(first.template_hash) == 64
     assert '"type":"tool_call"' in first.template
     assert '"type":"finish"' in first.template
     assert "GitHub Flavored Markdown" in first.template
     assert "禁止输出原始 HTML" in first.template
+    assert "收益与代价" in first.template
+    assert "原因与结果" in first.template
+    assert "不能改变各事实在关系中的角色" in first.template
+    assert "收益是……；代价是……" in first.template
+    assert "不得使用“以……为代价”等单一连接词" in first.template
+    for case_specific_token in ("83%", "93%", "17%", "0.4%", "84%"):
+        assert case_specific_token not in first.template
 
 
 def test_finalization_prompt_requires_structured_finish() -> None:
