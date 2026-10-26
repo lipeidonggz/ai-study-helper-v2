@@ -22,6 +22,7 @@ from app.agent.citations import (
     CitationAnnotationArtifact,
     CitationAnnotator,
     CitationEvidenceBlock,
+    citation_annotation_output_token_cap,
     split_answer_spans,
 )
 from app.agent.finish_stream import FinishAnswerDeltaExtractor
@@ -612,7 +613,9 @@ class _AgentGraphExecution:
                 attributes={
                     "llm.provider": self._chat_provider.profile.provider,
                     "llm.request.model": self._chat_provider.profile.model_id,
-                    "llm.invocation_parameters.max_tokens": (self._config.max_output_tokens),
+                    "llm.invocation_parameters.max_tokens": (
+                        citation_annotation_output_token_cap(len(split_answer_spans(answer)))
+                    ),
                     "app.answer_span_count": len(split_answer_spans(answer)),
                     "app.evidence_block_count": len(evidence_blocks),
                 },
@@ -632,7 +635,6 @@ class _AgentGraphExecution:
                 spent_output_tokens=current_output_tokens,
                 max_context_tokens=self._config.max_context_tokens,
                 max_request_tokens=self._config.max_request_tokens,
-                max_output_tokens=self._config.max_output_tokens,
             )
         except asyncio.CancelledError:
             if annotation_span is not None and self._trace_session is not None:
@@ -676,6 +678,8 @@ class _AgentGraphExecution:
                     "app.claim_span_version": outcome.artifact.span_version,
                     "app.citation_annotation_prompt_version": (outcome.artifact.prompt_version),
                     "app.citation_annotation_prompt_hash": outcome.artifact.prompt_hash,
+                    "app.annotation_batch_count": outcome.artifact.batch_count,
+                    "app.annotation_batch_version": outcome.artifact.batch_version,
                     "app.model_calls": outcome.model_calls,
                     "llm.token_count.prompt": outcome.input_tokens,
                     "llm.token_count.completion": outcome.output_tokens,
@@ -728,6 +732,8 @@ class _AgentGraphExecution:
         public_payload = {
             "status": artifact_payload["status"],
             "span_version": artifact_payload["span_version"],
+            "batch_count": artifact_payload["batch_count"],
+            "batch_version": artifact_payload["batch_version"],
             "annotations": artifact_payload["annotations"],
             "error_code": artifact_payload["error_code"],
             "message": artifact_payload["error_message"],

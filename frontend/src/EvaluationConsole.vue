@@ -549,6 +549,12 @@ interface EvaluationRevisionView {
   attempt_aggregates: AttemptAggregateView[];
   case_aggregates: CaseAggregateView[];
   result_matrix: EvaluationResultMatrixView | null;
+  judge_usage?: {
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    invocation_count: number;
+  };
 }
 
 /** 判官 prompt 原文与版本。 */
@@ -596,6 +602,7 @@ const plan = ref<ExecutionPlanView | null>(null);
 const runs = ref<RunView[]>([]);
 const historySuiteFilter = ref("all");
 const selectedRun = ref<RunView | null>(null);
+const liveRunPanel = ref<HTMLElement | null>(null);
 const evaluationRevisions = ref<EvaluationRevisionView[]>([]);
 const evaluationRevision = ref<EvaluationRevisionView | null>(null);
 const isJudgmentFormOpen = ref(false);
@@ -825,6 +832,20 @@ const suiteActiveCaseOptions = computed(() =>
 const plannedAttempts = computed(() =>
   (plan.value?.cases ?? []).reduce((total, item) => total + item.n, 0),
 );
+
+/** 返回当前计划已经启动的 ExecutionRun，防止同一计划重复提交。 */
+const planRun = computed<RunView | null>(() => {
+  const currentPlan = plan.value;
+  if (!currentPlan) {
+    return null;
+  }
+  return (
+    runs.value.find((run) => run.plan_id === currentPlan.plan_id) ??
+    (selectedRun.value?.plan_id === currentPlan.plan_id
+      ? selectedRun.value
+      : null)
+  );
+});
 
 const failedChecks = computed(
   () => plan.value?.checks.filter((check) => check.status === "failed") ?? [],
@@ -1108,7 +1129,7 @@ function citationBatchSummary(check: CheckResultView): string {
   const failureText = preflightFailureCount
     ? ` · ${preflightFailureCount} 个超限项`
     : "";
-  return `${batchCount} 批 · ${contextCount} 个上下文 · ${occurrenceCount} 个引用关系 · ${blockCount} 个 block${failureText}`;
+  return `${batchCount} 批 · ${contextCount} 个上下文 · ${occurrenceCount} 个引用组 · ${blockCount} 个 block${failureText}`;
 }
 
 /** 读取检查 payload 中的字符串数组。 */
@@ -1129,6 +1150,57 @@ function checkCitationResults(
   evidenceQuotes: string[];
 }> {
   return citationResultsFromPayload(check.payload);
+}
+
+/** 读取引用判官的 claim 引用组联合结论。 */
+function checkCitationGroups(check: CheckResultView): Array<{
+  contextId: string;
+  contextText: string;
+  blockIds: string[];
+  verdict: string;
+  reason: string;
+  evidenceQuotes: string[];
+}> {
+  const value = check.payload.claim_results;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((item) => {
+    if (
+      !item ||
+      typeof item !== "object" ||
+      !("context_id" in item) ||
+      !("block_ids" in item) ||
+      !("verdict" in item) ||
+      !("reason" in item) ||
+      typeof item.context_id !== "string" ||
+      !Array.isArray(item.block_ids) ||
+      !item.block_ids.every((blockId: unknown) => typeof blockId === "string") ||
+      typeof item.verdict !== "string" ||
+      typeof item.reason !== "string"
+    ) {
+      return [];
+    }
+    const evidenceQuotes =
+      "evidence_quotes" in item &&
+      Array.isArray(item.evidence_quotes) &&
+      item.evidence_quotes.every((quote: unknown) => typeof quote === "string")
+        ? item.evidence_quotes
+        : [];
+    return [
+      {
+        contextId: item.context_id,
+        contextText:
+          "context_text" in item && typeof item.context_text === "string"
+            ? item.context_text
+            : "",
+        blockIds: item.block_ids,
+        verdict: item.verdict,
+        reason: item.reason,
+        evidenceQuotes,
+      },
+    ];
+  });
 }
 
 /** 从检查或人工复核 payload 中读取逐 block 引用结论。 */
@@ -2538,9 +2610,14 @@ async function startRun(): Promise<void> {
       method: "POST",
       body: JSON.stringify({ plan_id: plan.value.plan_id }),
     });
-    message.value = "评测运行已启动。";
+    message.value = `评测运行已启动：${selectedRun.value.run_id}`;
     schedulePolling();
     await refreshRuns();
+    await nextTick();
+    liveRunPanel.value?.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
   } catch (reason) {
     error.value = String(reason);
   } finally {
@@ -3880,11 +3957,23 @@ onBeforeUnmount(() => {
             <button
               type="button"
               class="eval-primary"
-              :disabled="busy || plan.status !== 'planned' || Boolean(activeRun)"
+              :disabled="
+                busy ||
+                plan.status !== 'planned' ||
+                Boolean(activeRun) ||
+                Boolean(planRun)
+              "
               @click="startRun"
             >
-              启动执行批次（{{ plannedAttempts }} 个样本）
+              {{
+                planRun
+                  ? "该计划已生成执行批次"
+                  : `启动执行批次（${plannedAttempts} 个样本）`
+              }}
             </button>
+            <p v-if="planRun" class="eval-success">
+              执行批次 {{ planRun.run_id }} · {{ statusText(planRun.status) }}
+            </p>
           </template>
           <p v-else-if="failedChecks.length" class="eval-error">
             {{ failedChecks.length }} 个预检项失败。
@@ -3894,6 +3983,7 @@ onBeforeUnmount(() => {
         <section
           v-if="selectedRun"
           v-show="['execute', 'history'].includes(evaluationTab)"
+          ref="liveRunPanel"
           class="eval-panel eval-live-panel"
         >
           <div class="eval-live-head">
@@ -4630,7 +4720,7 @@ onBeforeUnmount(() => {
                 <span>
                   <strong>引用支持判官 · {{ citationPrompt.version }}</strong>
                   <small>
-                    只在答案存在合法显式引用时触发，逐 block 检查证据是否支持对应主张。
+                    对结构化引用组检查证据是否联合支持对应 claim；历史答案按 inline 引用回退。
                   </small>
                 </span>
                 <code>{{ citationPrompt.content_hash.slice(0, 12) }}</code>
@@ -4762,6 +4852,10 @@ onBeforeUnmount(() => {
               <span>通过 {{ evaluationRevision.summary.pass ?? 0 }}</span>
               <span>不通过 {{ evaluationRevision.summary.fail ?? 0 }}</span>
               <span>待定 {{ evaluationRevision.summary.pending ?? 0 }}</span>
+              <span>判官调用 {{ evaluationRevision.judge_usage?.invocation_count ?? 0 }} 次</span>
+              <span>输入 {{ formatTokens(evaluationRevision.judge_usage?.input_tokens ?? 0) }} token</span>
+              <span>输出 {{ formatTokens(evaluationRevision.judge_usage?.output_tokens ?? 0) }} token</span>
+              <span>合计 {{ formatTokens(evaluationRevision.judge_usage?.total_tokens ?? 0) }} token</span>
               <span>{{ evaluationRevision.revision_id }}</span>
             </div>
             <p v-if="judgingError || evaluationRevision.error_message" class="eval-error">
@@ -4934,13 +5028,34 @@ onBeforeUnmount(() => {
                   </template>
                   <template v-if="check.checker_id === 'citation_support'">
                     <article
+                      v-for="group in checkReviewFor(check)
+                        ? []
+                        : checkCitationGroups(check)"
+                      :key="group.contextId"
+                      class="eval-citation-result"
+                    >
+                      <header>
+                        <code>{{ group.contextId }}</code>
+                        <span>{{ statusText(group.verdict) }}</span>
+                      </header>
+                      <p v-if="group.contextText">{{ group.contextText }}</p>
+                      <p>引用组：{{ group.blockIds.join("、") }}</p>
+                      <p>{{ group.reason }}</p>
+                      <blockquote
+                        v-for="(quote, index) in group.evidenceQuotes"
+                        :key="index"
+                      >
+                        {{ quote }}
+                      </blockquote>
+                    </article>
+                    <article
                       v-for="citation in effectiveCitationResults(check)"
                       :key="citation.blockId"
                       class="eval-citation-result"
                     >
                       <header>
                         <code>{{ citation.blockId }}</code>
-                        <span>{{ statusText(citation.verdict) }}</span>
+                        <span>逐 block 投影：{{ statusText(citation.verdict) }}</span>
                       </header>
                       <p>{{ citation.reason }}</p>
                       <blockquote

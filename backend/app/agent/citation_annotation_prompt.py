@@ -9,7 +9,7 @@ from app.providers.chat import ChatMessage
 if TYPE_CHECKING:
     from app.agent.citations import CitationAnnotationInput
 
-CITATION_ANNOTATION_PROMPT_VERSION = "claim-citation-v1"
+CITATION_ANNOTATION_PROMPT_VERSION = "claim-citation-v2"
 
 CITATION_ANNOTATION_SYSTEM_PROMPT = """<role>
 你是 Agent Harness 的后置引用标注器。答案正文已经生成且不可修改；
@@ -19,7 +19,8 @@ CITATION_ANNOTATION_SYSTEM_PROMPT = """<role>
 <rules>
 1. 只能返回输入中已经存在的 span_id 与 block_id。
 2. 不得返回、重写、总结或补全答案正文。
-3. 只标注由文档事实支持的主张；标题、过渡句、纯分析、用户建议和无证据内容不要标注。
+3. 只标注 span.text 本身包含完整、独立、可核验主张的内容；单独的确认词、
+   承接语、标题、过渡句、纯分析、用户建议和无证据内容不要标注。
 4. 一个 span 可以由多个 block 联合支持；将同一 span 需要的 block_id 放在同一数组中。
 5. block 必须直接支持该 span，不得因为主题相近、共同关键词或同属一篇文档而引用。
 6. 同一 span 最多返回一次；block_ids 不得重复。

@@ -53,6 +53,7 @@ from app.evaluation.models import (
     EvaluationRevisionView,
     JudgeInvocationView,
     JudgeOverrideRequest,
+    JudgeTokenUsageView,
     JudgmentView,
     PlanCaseView,
     RunView,
@@ -83,11 +84,64 @@ from app.tracing.catalog import TraceCatalog
 
 CHECKER_VERSIONS = {
     "citation_integrity": "1",
-    "citation_support": "3",
+    "citation_support": "6",
     "truncation_declared": "1",
 }
 JUDGE_MAX_OUTPUT_TOKENS = 2_048
 CITATION_SUPPORT_MAX_OUTPUT_TOKENS = 4_096
+
+
+def _build_judge_token_usage(
+    judgments: Sequence[JudgmentView],
+    checks: Sequence[CheckResultView],
+) -> JudgeTokenUsageView:
+    """汇总全部已记录判官调用；重试和引用批次各计一次，人工判定不计。"""
+
+    criterion_invocations = [
+        invocation for judgment in judgments for invocation in judgment.invocations
+    ]
+    input_tokens = sum(invocation.input_tokens for invocation in criterion_invocations)
+    output_tokens = sum(invocation.output_tokens for invocation in criterion_invocations)
+    invocation_count = len(criterion_invocations)
+
+    for check in checks:
+        if check.checker_id != "citation_support":
+            continue
+        batches = check.payload.get("batches", [])
+        if not isinstance(batches, list):
+            raise RuntimeError(f"citation judge batching is invalid: {check.check_result_id}")
+        for batch in batches:
+            if not isinstance(batch, dict):
+                raise RuntimeError(f"citation judge batch is invalid: {check.check_result_id}")
+            invocations = batch.get("invocations", [])
+            if not isinstance(invocations, list):
+                raise RuntimeError(
+                    f"citation judge invocations are invalid: {check.check_result_id}"
+                )
+            for invocation in invocations:
+                if not isinstance(invocation, dict):
+                    raise RuntimeError(
+                        f"citation judge invocation is invalid: {check.check_result_id}"
+                    )
+                input_tokens += _invocation_token_count(invocation, "input_tokens")
+                output_tokens += _invocation_token_count(invocation, "output_tokens")
+                invocation_count += 1
+
+    return JudgeTokenUsageView(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=input_tokens + output_tokens,
+        invocation_count=invocation_count,
+    )
+
+
+def _invocation_token_count(invocation: dict[str, Any], field: str) -> int:
+    """读取 citation judge payload 中的非负 Token 数，损坏数据不得静默归零。"""
+
+    value = invocation.get(field)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RuntimeError(f"citation judge invocation has invalid {field}")
+    return value
 
 
 class JudgeOutput(BaseModel):
@@ -401,6 +455,7 @@ class EvaluationJudgmentService:
                 )
                 for review in review_rows
             ]
+            judge_usage = _build_judge_token_usage(judgment_views, check_views)
             run = self._repository.get_run(row.execution_run_id)
             case_revision_ids = list(
                 dict.fromkeys(attempt.case_revision_id for attempt in run.attempts)
@@ -466,6 +521,7 @@ class EvaluationJudgmentService:
                 attempt_aggregates=attempt_aggregates,
                 case_aggregates=case_aggregates,
                 result_matrix=result_matrix,
+                judge_usage=judge_usage,
             )
 
     def override_judgment(
@@ -1142,6 +1198,8 @@ class EvaluationJudgmentService:
                     status="output_invalid",
                     error_code=last_error,
                 )
+                if attempt_number < 2:
+                    continue
                 break
             break
 
@@ -1459,6 +1517,8 @@ class _PreparedCitationTask:
     occurrences: tuple[CitationOccurrenceInput, ...]
     preflight_failures: tuple[_CitationPreflightFailure, ...]
     context_count: int
+    evidence_text_by_id: dict[str, str]
+    context_text_by_id: dict[str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1540,36 +1600,42 @@ def _build_citation_task(
             for annotation in annotations
         ]
         for annotation in annotations:
-            for block_id in annotation.block_ids:
-                if block_id not in evidence_by_id:
-                    continue
-                occurrences.append(
-                    CitationOccurrenceInput(
-                        occurrence_id=f"citation_{len(occurrences) + 1:04d}",
-                        block_id=block_id,
-                        context_id=annotation.annotation_id,
-                    )
+            block_ids = [
+                block_id for block_id in annotation.block_ids if block_id in evidence_by_id
+            ]
+            if not block_ids:
+                continue
+            occurrences.append(
+                CitationOccurrenceInput(
+                    occurrence_id=f"citation_{len(occurrences) + 1:04d}",
+                    block_ids=block_ids,
+                    context_id=annotation.annotation_id,
                 )
+            )
     else:
         contexts = split_citation_contexts(answer)
         for context in contexts:
-            for block_id in cited_block_ids(context.text):
-                if block_id not in evidence_by_id:
-                    continue
-                occurrences.append(
-                    CitationOccurrenceInput(
-                        occurrence_id=f"citation_{len(occurrences) + 1:04d}",
-                        block_id=block_id,
-                        context_id=context.context_id,
-                    )
+            block_ids = [
+                block_id for block_id in cited_block_ids(context.text) if block_id in evidence_by_id
+            ]
+            if not block_ids:
+                continue
+            occurrences.append(
+                CitationOccurrenceInput(
+                    occurrence_id=f"citation_{len(occurrences) + 1:04d}",
+                    block_ids=block_ids,
+                    context_id=context.context_id,
                 )
-        covered_block_ids = {item.block_id for item in occurrences}
+            )
+        covered_block_ids = {
+            block_id for occurrence in occurrences for block_id in occurrence.block_ids
+        }
         for block_id in cited_block_ids(answer):
             if block_id in covered_block_ids:
                 continue
             occurrence = CitationOccurrenceInput(
                 occurrence_id=f"citation_{len(occurrences) + 1:04d}",
-                block_id=block_id,
+                block_ids=[block_id],
                 context_id="context_missing",
             )
             occurrences.append(occurrence)
@@ -1647,6 +1713,10 @@ def _build_citation_task(
         occurrences=tuple(occurrences),
         preflight_failures=tuple(preflight_failures),
         context_count=len(contexts),
+        evidence_text_by_id={
+            block_id: citation.text for block_id, citation in evidence_by_id.items()
+        },
+        context_text_by_id={context.context_id: context.text for context in contexts},
     )
 
 
@@ -1657,7 +1727,9 @@ def _citation_packet(
     evidence_by_id: dict[str, CitationEvidenceInput],
 ) -> CitationSupportInput:
     context_ids = list(dict.fromkeys(item.context_id for item in occurrences))
-    block_ids = list(dict.fromkeys(item.block_id for item in occurrences))
+    block_ids = list(
+        dict.fromkeys(block_id for occurrence in occurrences for block_id in occurrence.block_ids)
+    )
     return CitationSupportInput(
         contexts=[context_by_id[context_id] for context_id in context_ids],
         citations=[evidence_by_id[block_id] for block_id in block_ids],
@@ -1669,7 +1741,7 @@ def _merge_citation_outcomes(
     task: _PreparedCitationTask,
     batches: list[_CitationBatchOutcome],
 ) -> _CitationAttemptOutcome:
-    """把 occurrence 级批次结果按 fail > pending > pass 合并到 block。"""
+    """把引用组批次结果按 fail > pending > pass 合并，并投影到 block 视图。"""
 
     occurrence_results: dict[str, CitationResultOutput] = {}
     occurrence_errors: dict[str, str] = {}
@@ -1682,9 +1754,11 @@ def _merge_citation_outcomes(
     for failure in task.preflight_failures:
         occurrence_errors[failure.occurrence.occurrence_id] = failure.error_code
 
+    claim_results: list[dict[str, Any]] = []
     block_verdicts: dict[str, list[str]] = {}
     block_reasons: dict[str, list[str]] = {}
     block_quotes: dict[str, list[str]] = {}
+    all_verdicts: list[str] = []
     for occurrence in task.occurrences:
         verdict_result = occurrence_results.get(occurrence.occurrence_id)
         verdict = verdict_result.verdict if verdict_result is not None else "unknown"
@@ -1696,16 +1770,29 @@ def _merge_citation_outcomes(
                 "citation_support_occurrence_missing",
             )
         )
-        block_verdicts.setdefault(occurrence.block_id, []).append(verdict)
-        block_reasons.setdefault(occurrence.block_id, []).append(reason)
-        if verdict_result is not None:
-            quotes = block_quotes.setdefault(occurrence.block_id, [])
-            for quote in verdict_result.evidence_quotes:
-                if quote not in quotes:
-                    quotes.append(quote)
+        all_verdicts.append(verdict)
+        quotes = [] if verdict_result is None else list(verdict_result.evidence_quotes)
+        claim_results.append(
+            {
+                "occurrence_id": occurrence.occurrence_id,
+                "context_id": occurrence.context_id,
+                "context_text": task.context_text_by_id.get(occurrence.context_id, ""),
+                "block_ids": occurrence.block_ids,
+                "verdict": verdict,
+                "reason": reason,
+                "evidence_quotes": quotes,
+            }
+        )
+        for block_id in occurrence.block_ids:
+            block_verdicts.setdefault(block_id, []).append(verdict)
+            block_reasons.setdefault(block_id, []).append(reason)
+            block_text = task.evidence_text_by_id.get(block_id, "")
+            block_quote_values = block_quotes.setdefault(block_id, [])
+            for quote in quotes:
+                if quote in block_text and quote not in block_quote_values:
+                    block_quote_values.append(quote)
 
     merged_citations: list[dict[str, Any]] = []
-    all_verdicts: list[str] = []
     for block_id, verdicts in block_verdicts.items():
         merged_verdict = (
             "unsupported"
@@ -1714,7 +1801,6 @@ def _merge_citation_outcomes(
             if "unknown" in verdicts
             else "supported"
         )
-        all_verdicts.append(merged_verdict)
         merged_citations.append(
             {
                 "block_id": block_id,
@@ -1768,39 +1854,24 @@ def _merge_citation_outcomes(
             "prompt_hash": CITATION_SUPPORT_PROMPT_HASH,
             "model_ids": model_ids,
             "batching": {
-                "strategy": "citation-context-v1",
+                "strategy": "citation-context-group-v1",
                 "context_count": task.context_count,
                 "occurrence_count": len(task.occurrences),
+                "citation_relation_count": sum(
+                    len(occurrence.block_ids) for occurrence in task.occurrences
+                ),
                 "block_count": len(block_verdicts),
                 "batch_count": len(batches),
                 "preflight_failure_count": len(task.preflight_failures),
                 "max_occurrences_per_batch": MAX_CITATION_BATCH_OCCURRENCES,
                 "max_input_chars_per_batch": MAX_CITATION_BATCH_INPUT_CHARS,
             },
+            "claim_results": claim_results,
             "citations": merged_citations,
-            "occurrence_results": [
-                {
-                    **occurrence.model_dump(mode="json"),
-                    "verdict": (
-                        occurrence_results[occurrence.occurrence_id].verdict
-                        if occurrence.occurrence_id in occurrence_results
-                        else "unknown"
-                    ),
-                    "reason": (
-                        occurrence_results[occurrence.occurrence_id].reason
-                        if occurrence.occurrence_id in occurrence_results
-                        else occurrence_errors.get(
-                            occurrence.occurrence_id,
-                            "citation_support_occurrence_missing",
-                        )
-                    ),
-                }
-                for occurrence in task.occurrences
-            ],
             "preflight_failures": [
                 {
                     "occurrence_id": item.occurrence.occurrence_id,
-                    "block_id": item.occurrence.block_id,
+                    "block_ids": item.occurrence.block_ids,
                     "context_id": item.occurrence.context_id,
                     "input_chars": item.input_chars,
                     "error": item.error_code,
@@ -1900,7 +1971,7 @@ def _parse_citation_output(
     for item in parsed.citations:
         occurrence = occurrence_by_id[item.occurrence_id]
         for quote in item.evidence_quotes:
-            if quote not in evidence_by_id[occurrence.block_id]:
+            if not any(quote in evidence_by_id[block_id] for block_id in occurrence.block_ids):
                 raise ValueError("citation_evidence_quote_invalid")
     return parsed
 
