@@ -1,6 +1,6 @@
 # 033 · 异步 GitHub 交付与依赖门禁
 
-- 状态：待后台验证
+- 状态：已完成
 - 开始日期：2026-10-26
 - 关联设计：[08 评测台](../../design/08-evaluation-console-design.md)
 - 前置切片：[032 判定总 Token 用量展示](./032-judge-token-usage-visibility.md)
@@ -49,20 +49,20 @@
 ```powershell
 corepack pnpm delivery:start --branch fix/example
 corepack pnpm delivery:status --delivery-id delivery_YYYYMMDDTHHMMSSZ_abcdef12
-corepack pnpm delivery:require --delivery-id delivery_YYYYMMDDTHHMMSSZ_abcdef12
-corepack pnpm delivery:require --delivery-id delivery_YYYYMMDDTHHMMSSZ_abcdef12 --wait
+backend\.venv\Scripts\python.exe -m scripts.github_async_delivery require-merged --delivery-id delivery_YYYYMMDDTHHMMSSZ_abcdef12
+backend\.venv\Scripts\python.exe -m scripts.github_async_delivery require-merged --delivery-id delivery_YYYYMMDDTHHMMSSZ_abcdef12 --wait
 ```
 
 `delivery:start` 不等待 checks。只有在后续步骤确实需要该合并时，才使用 `delivery:require`。
 
 ## 验收条件
 
-- [ ] `start` 创建远端 commit、branch、PR 并开启 auto-merge。
-- [ ] `status` 刷新 `checks_pending`、`merge_pending`、`merged`、`failed`。
-- [ ] `require-merged` 在 pending 时返回 blocked，在 merged 时返回 ready。
-- [ ] merge commit 已进入 base 的验证不依赖本地远端分支引用。
-- [ ] 状态文件和 latest 指针原子更新，非法 delivery ID 不能路径穿越。
-- [ ] 定向测试、完整后端测试和项目质量门通过。
+- [x] `start` 创建远端 commit、branch、PR 并开启 auto-merge。
+- [x] `status` 刷新 `checks_pending`、`merge_pending`、`merged`、`failed`。
+- [x] `require-merged` 在 pending 时返回 blocked，在 merged 时返回 ready。
+- [x] merge commit 已进入 base 的验证不依赖本地远端分支引用。
+- [x] 状态文件和 latest 指针原子更新，非法 delivery ID 不能路径穿越。
+- [x] 定向测试、完整后端测试和项目质量门通过。
 
 ## 证据包
 
@@ -75,7 +75,13 @@ corepack pnpm delivery:require --delivery-id delivery_YYYYMMDDTHHMMSSZ_abcdef12 
 
 ### 后台交付演练
 
-- 待使用 `delivery:start` 发布本次切片后填写 delivery ID、PR 和最终状态。
+- Delivery：`delivery_20261026T042845Z_4d5e116d`
+- PR：[#32](https://github.com/lipeidonggz/ai-study-helper-v2/pull/32)
+- `delivery:start` 约 19 秒返回 `checks_pending`，主流程未等待 CI。
+- `delivery:status` 非阻塞查询约 3 秒，正确返回两个 required checks 正在执行。
+- 依赖点直接调用 Python `require-merged --wait`，约 48 秒后返回 `ready`。
+- Required checks：`backend-and-frontend`、`desktop` 均 success。
+- Merge commit：`6f70979921e540643992b3a14da731b97fb7d01e`，GitHub compare 验证已进入 `main`。
 
 ## 已有优化
 

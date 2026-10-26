@@ -78,7 +78,9 @@ class GitHubClient:
             with urlopen(request, timeout=30) as response:
                 raw = response.read().decode("utf-8")
         except HTTPError as error:
-            raise GitHubApiError(f"GitHub API returned HTTP {error.code}") from error
+            detail = error.read().decode("utf-8", errors="replace").strip()
+            suffix = f": {detail[:1_000]}" if detail else ""
+            raise GitHubApiError(f"GitHub API returned HTTP {error.code}{suffix}") from error
         except TimeoutError as error:
             raise GitHubApiError("GitHub API request timed out") from error
         except URLError as error:

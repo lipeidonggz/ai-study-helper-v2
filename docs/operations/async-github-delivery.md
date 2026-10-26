@@ -45,7 +45,7 @@ corepack pnpm delivery:status --delivery-id <delivery_id>
 新工作依赖该 PR 已合并时：
 
 ```powershell
-corepack pnpm delivery:require --delivery-id <delivery_id>
+backend\.venv\Scripts\python.exe -m scripts.github_async_delivery require-merged --delivery-id <delivery_id>
 ```
 
 退出码：
@@ -56,6 +56,9 @@ corepack pnpm delivery:require --delivery-id <delivery_id>
 - `3`：仍在执行，当前不允许依赖它继续。
 
 只有确实无法绕开依赖时才追加 `--wait`。不依赖合并的新工作应使用独立分支或 worktree。
+
+门禁通过直接执行 Python 调用以保留稳定退出码。`corepack pnpm delivery:require`
+适合人工查看，但 pnpm 会把子进程的非零码统一报告为 1，不适合作为机械依赖门禁。
 
 ## 安全边界
 
