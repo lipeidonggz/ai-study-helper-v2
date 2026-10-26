@@ -26,6 +26,8 @@ corepack pnpm delivery:start --branch fix/example
 
 默认以 `HEAD^` 作为本地基线，并通过默认的 `main` 校验远端基线。只有当前分支包含多个待交付 commit 时，才显式传 `--base-commit <完整 SHA>`；不要在 PowerShell 参数中使用未加保护的 `HEAD^`。
 
+`start` 成功输出 delivery ID、PR 和初始状态后，当前对话轮次应立即结束。不要在同一轮继续执行 status 或 wait，否则负责人无法提交下一条命令，后台交付失去意义。
+
 默认状态目录为 `backend/.runtime/delivery/`：
 
 - 每次交付一个 `<delivery_id>.json`；
@@ -56,6 +58,8 @@ backend\.venv\Scripts\python.exe -m scripts.github_async_delivery require-merged
 - `3`：仍在执行，当前不允许依赖它继续。
 
 只有确实无法绕开依赖时才追加 `--wait`。不依赖合并的新工作应使用独立分支或 worktree。
+
+等待权限属于负责人：只有负责人明确要求等待合并完成时才能使用 `--wait`。如果只是新任务依赖旧交付，先做一次非等待检查；未完成时返回 `blocked`，结束当前轮并等待负责人决定。
 
 门禁通过直接执行 Python 调用以保留稳定退出码。`corepack pnpm delivery:require`
 适合人工查看，但 pnpm 会把子进程的非零码统一报告为 1，不适合作为机械依赖门禁。
