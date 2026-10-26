@@ -282,6 +282,16 @@ GitHub Issue、Project 和 PR 用于临时任务、进行中状态和开放式�
 - 不再先尝试普通 Git 端口，也不对已知会超时的 `git fetch`、`git push` 或远端探测进行反复重试；只有 API 无法完成必要的对象传输时，才评估 Git 协议回退。
 - API 认证凭证只从本机凭据存储临时读取，不得输出、写入文件或进入日志。
 
+### 异步 GitHub 交付（试行）
+
+远端交付默认使用 `corepack pnpm delivery:start`：创建远端分支、PR 并启用 auto-merge 后立即返回。主对话不得继续运行同步 watcher 等待 CI；状态由 `backend/.runtime/delivery/` 中的交付 ID 与 `latest.json` 跟踪。
+
+- 后续工作不依赖该 PR 时，可直接在独立分支或 worktree 继续，但不得基于尚未合并的代码建立隐式依赖。
+- 后续工作依赖该 PR 时，先执行 `corepack pnpm delivery:require --delivery-id <id>`；只有确实必须等待时才加 `--wait`。
+- `ready` 必须同时满足 PR 已合并、required checks 成功、merge commit 已包含于目标分支；不能只看 CI 通过或状态文件。
+- 失败、冲突、PR 关闭和超时必须显式报告，不能假定后台任务成功。
+- 该规则用于解决同步等待 2～6 分钟占用主对话的问题。试行 3～5 次交付后，根据实际等待次数、失败恢复和绕过成本决定保留、调整或删除。
+
 ## 当前阶段
 
 设计阶段完成，已进入实现。前三个垂直切片完成桌面运行链、PyInstaller one-folder release 分发以及 NSIS 按用户安装，004 完成 HTML 导入预览。005 已完成 SQLite 文档身份与版本登记、迁移保护、保存交互、正式 SectionTree／BlockSet 身份和预览一致性屏障。006 已完成 Qwen embedding provider、版本化输入模板、固定关键词 analyzer、最多 3 批并发和 LanceDB dense／关键词候选双索引。007 已完成 collection 快照、manifest、SQLite CAS 活动指针、发布审计与回滚。008 已完成后台入库任务编排、暂停／恢复／取消、中断恢复和自动发布。009 已完成 embedding Key 安全设置、状态展示和连通性测试。010 已完成批量来源入库工作台、当前知识库清单、操作历史、高危清空和单篇完整入库。011 已完成只读文档详情页。012 已完成单 dispatcher 串行调度、持久任务队列 UI、历史任务恢复入口和 partial 状态统一。013 已完成顶部压缩、入库双栏、队列直接操作、来源与耗时展示。014 已修复 SQLite 读取后丢失时区导致的用户可见时间偏差。015 已完成 PR auto-merge、后台交付 watcher、失败状态可见和 CI 去重。016 已完成快照绑定的文档清单、章节大纲、完整块枚举与字面扫描。017 已完成 `search_blocks` 的 query embedding、dense＋FTS、范围过滤、RRF 和 Top-5 全文返回。018 已完成 LangGraph Agent Runtime、五工具适配、DeepSeek 真实调用、Harness Observation token、增量上下文估算、预算 limitations 与 partial 回答警告。019 已完成统一模型／Agent 设置页、运行时 Key 隔离、参数持久化、范围校验和请求超时。020 已完成真实流式问答、运行状态、实时 token、安全 Markdown、取消／续传、结构化引用和原文 block 定位。021 已完成本地 trace、manifest、artifact、可重建索引、保留策略、诊断 Viewer 和 off／metadata／full 模式。ADR 0008 已把工具结果 token 计数统一收敛到 Harness，ADR 0009 确定单开发壳加编译期评测裁剪，ADR 0010 确定评测草稿、不可变修订版、suite 选择与快速试跑语义。检索与评测基线已切换为当前 15 篇 HTML 快照。022A 执行内核与只读用例目录、022B 用例／用例集编写与快速试跑、023A checker／LLM Judge、023B 生效判定绑定与 N/K 聚合、024A 结果矩阵、024B 基线与跨 run 比较、025 引用支持分批、026 结构化 ReAct 和 027 claim-aware 引用标注均已完成实现与人工验收；多轮会话尚未开始。
