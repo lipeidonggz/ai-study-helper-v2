@@ -287,7 +287,7 @@ GitHub Issue、Project 和 PR 用于临时任务、进行中状态和开放式�
 远端交付默认使用 `corepack pnpm delivery:start`：创建远端分支、PR 并启用 auto-merge 后立即返回。主对话不得继续运行同步 watcher 等待 CI；状态由 `backend/.runtime/delivery/` 中的交付 ID 与 `latest.json` 跟踪。
 
 - 后续工作不依赖该 PR 时，可直接在独立分支或 worktree 继续，但不得基于尚未合并的代码建立隐式依赖。
-- 后续工作依赖该 PR 时，先执行 `corepack pnpm delivery:require --delivery-id <id>`；只有确实必须等待时才加 `--wait`。
+- 后续工作依赖该 PR 时，先执行 `backend\.venv\Scripts\python.exe -m scripts.github_async_delivery require-merged --delivery-id <id>`；只有确实必须等待时才加 `--wait`。直接执行 Python 才能保留 `ready／failed／timed_out／blocked` 的独立退出码。
 - `ready` 必须同时满足 PR 已合并、required checks 成功、merge commit 已包含于目标分支；不能只看 CI 通过或状态文件。
 - 失败、冲突、PR 关闭和超时必须显式报告，不能假定后台任务成功。
 - 该规则用于解决同步等待 2～6 分钟占用主对话的问题。试行 3～5 次交付后，根据实际等待次数、失败恢复和绕过成本决定保留、调整或删除。

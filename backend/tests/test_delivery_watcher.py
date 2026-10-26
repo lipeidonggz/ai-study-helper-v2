@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from io import BytesIO
+from urllib.error import HTTPError
+
 import pytest
 from scripts.watch_github_delivery import (
     GitHubApiError,
@@ -125,4 +128,22 @@ def test_github_read_timeout_becomes_stable_api_error(
     monkeypatch.setattr("scripts.watch_github_delivery.urlopen", raise_timeout)
 
     with pytest.raises(GitHubApiError, match="request timed out"):
+        GitHubClient("test-token").get_json("https://api.github.com/test")
+
+
+def test_github_http_error_includes_sanitized_response_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raise_bad_request(*_args: object, **_kwargs: object) -> None:
+        raise HTTPError(
+            "https://api.github.com/test",
+            400,
+            "Bad Request",
+            {},
+            BytesIO(b'{"message":"tree.sha is invalid"}'),
+        )
+
+    monkeypatch.setattr("scripts.watch_github_delivery.urlopen", raise_bad_request)
+
+    with pytest.raises(GitHubApiError, match="tree\\.sha is invalid"):
         GitHubClient("test-token").get_json("https://api.github.com/test")

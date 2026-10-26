@@ -63,6 +63,35 @@ def git_text(*args: str) -> str:
     return git(*args).decode("utf-8").strip()
 
 
+def _api_get_object(
+    client: GitHubClient,
+    url: str,
+    *,
+    operation: str,
+) -> dict[str, Any]:
+    """调用 GitHub GET，并给失败附加稳定的操作上下文。"""
+
+    try:
+        return client.get_json(url)
+    except GitHubApiError as error:
+        raise DeliveryError(f"{operation}: {error}") from error
+
+
+def _api_post_object(
+    client: GitHubClient,
+    url: str,
+    payload: dict[str, Any],
+    *,
+    operation: str,
+) -> dict[str, Any]:
+    """调用 GitHub POST，并给失败附加稳定的操作上下文。"""
+
+    try:
+        return client.post_json(url, payload)
+    except GitHubApiError as error:
+        raise DeliveryError(f"{operation}: {error}") from error
+
+
 def write_delivery(record: dict[str, Any], status_dir: Path) -> Path:
     """原子写入一个交付记录，并更新 latest 指针。"""
 
@@ -174,12 +203,14 @@ def build_tree_entries(
         if observed_path != path or object_type != "blob":
             raise DeliveryError(f"unsupported changed path type: {path}")
         content = git("cat-file", "blob", object_sha)
-        blob = client.post_json(
+        blob = _api_post_object(
+            client,
             f"{GITHUB_API_ROOT}/repos/{repository}/git/blobs",
             {
                 "content": base64.b64encode(content).decode("ascii"),
                 "encoding": "base64",
             },
+            operation=f"upload changed blob {path}",
         )
         blob_sha = blob.get("sha")
         if not isinstance(blob_sha, str) or not blob_sha:
@@ -257,14 +288,18 @@ def start_delivery(args: argparse.Namespace) -> int:
     base_commit = git_text("rev-parse", f"{args.base_commit}^{{commit}}")
     client = GitHubClient(load_github_token())
 
-    base_ref = client.get_json(
-        f"{GITHUB_API_ROOT}/repos/{args.repo}/git/ref/heads/{quote(args.base_ref, safe='')}"
+    base_ref = _api_get_object(
+        client,
+        f"{GITHUB_API_ROOT}/repos/{args.repo}/git/ref/heads/{quote(args.base_ref, safe='')}",
+        operation="read base branch",
     )
     base_sha = ((base_ref.get("object") or {}).get("sha")) if isinstance(base_ref, dict) else None
     if not isinstance(base_sha, str) or not base_sha:
         raise DeliveryError("base branch has no commit")
-    base_commit_payload = client.get_json(
-        f"{GITHUB_API_ROOT}/repos/{args.repo}/git/commits/{base_sha}"
+    base_commit_payload = _api_get_object(
+        client,
+        f"{GITHUB_API_ROOT}/repos/{args.repo}/git/commits/{base_sha}",
+        operation="read base commit",
     )
     base_tree_sha = (base_commit_payload.get("tree") or {}).get("sha")
     if not isinstance(base_tree_sha, str) or not base_tree_sha:
@@ -280,9 +315,11 @@ def start_delivery(args: argparse.Namespace) -> int:
         base_commit=base_commit,
         head_commit=commit,
     )
-    tree = client.post_json(
+    tree = _api_post_object(
+        client,
         f"{GITHUB_API_ROOT}/repos/{args.repo}/git/trees",
         {"base_tree": base_tree_sha, "tree": tree_entries},
+        operation="create remote tree",
     )
     tree_sha = tree.get("sha")
     if not isinstance(tree_sha, str) or not tree_sha:
@@ -303,7 +340,8 @@ def start_delivery(args: argparse.Namespace) -> int:
         "email": identity_fields[1],
         "date": identity_fields[2],
     }
-    remote_commit = client.post_json(
+    remote_commit = _api_post_object(
+        client,
         f"{GITHUB_API_ROOT}/repos/{args.repo}/git/commits",
         {
             "message": message,
@@ -312,19 +350,24 @@ def start_delivery(args: argparse.Namespace) -> int:
             "author": identity,
             "committer": identity,
         },
+        operation="create remote commit",
     )
     remote_sha = remote_commit.get("sha")
     if not isinstance(remote_sha, str) or not remote_sha:
         raise DeliveryError("GitHub did not return a commit")
-    client.post_json(
+    _api_post_object(
+        client,
         f"{GITHUB_API_ROOT}/repos/{args.repo}/git/refs",
         {"ref": f"refs/heads/{args.branch}", "sha": remote_sha},
+        operation="create remote branch",
     )
     title = message.splitlines()[0]
     body = "\n".join(message.splitlines()[1:]).strip()
-    pull_request = client.post_json(
+    pull_request = _api_post_object(
+        client,
         f"{GITHUB_API_ROOT}/repos/{args.repo}/pulls",
         {"title": title, "head": args.branch, "base": args.base_ref, "body": body},
+        operation="create pull request",
     )
     enable_auto_merge(client, pull_request)
     pr_number = pull_request.get("number")
