@@ -83,6 +83,15 @@ backend\.venv\Scripts\python.exe -m scripts.github_async_delivery require-merged
 - Required checks：`backend-and-frontend`、`desktop` 均 success。
 - Merge commit：`6f70979921e540643992b3a14da731b97fb7d01e`，GitHub compare 验证已进入 `main`。
 
+第二次真实交付用于验证依赖修复和完整状态迁移：
+
+- Delivery：`delivery_20261026T043455Z_c564e232`
+- PR：[#33](https://github.com/lipeidonggz/ai-study-helper-v2/pull/33)
+- `delivery:start` 约 17 秒返回 `checks_pending`。
+- 非阻塞状态依次观测到 `checks_pending` 和 `merge_pending`。
+- 依赖点 `require-merged --wait` 返回 `ready`，没有只凭 checks success 提前放行。
+- Merge commit：`aaae654cafd6ee30cfd055236882fce11ec77650`，已进入 `main`。
+
 ## 已有优化
 
 - 当前 GitHub CI 实际执行约 2 分 14 秒，两个 job 并行。
