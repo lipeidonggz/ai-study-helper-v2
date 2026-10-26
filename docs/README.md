@@ -120,6 +120,7 @@
 - [2026-10-26 · citation-rubric-v7 语义与稳定性校准](development/experiments/2026-10-26-citation-rubric-v7-calibration.md)
 - [032 · 判定总 Token 用量展示（待人工验收）](development/slices/032-judge-token-usage-visibility.md)
 - [033 · 异步 GitHub 交付与依赖门禁（已完成）](development/slices/033-async-github-delivery-gate.md)
+- [034 · c2-001 指标归属金标准修订（待确认）](development/slices/034-c2-metric-attribution.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库
