@@ -296,7 +296,7 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 
 ### 8.3 初版系统提示词：ReAct ＋ 产品约束
 
-下面是模型可见的提示词骨架，采用结构化 ReAct 协议。外层引擎负责注入工具、校验 JSON、执行工具并追加 Runtime-only `tool_result`；收到 `finish` 后冻结正文并停止循环，再由独立 citation annotator 选择 `claim span → block_ids`。`response_protocol`、`tool_result_protocol`、`scope`、`evidence`、`coverage`、`citation`、`answer`、`termination` 各自只承担一类规则，工具自身的局部选择条件放在工具描述中。完整发布文本以代码中的 `chat-v5` 为准，并受 [ADR 0011](../decisions/0011-structured-react-response-protocol.md) 与 [ADR 0012](../decisions/0012-harness-owned-claim-citation-annotation.md) 约束。
+下面是模型可见的提示词骨架，采用结构化 ReAct 协议。外层引擎负责注入工具、校验 JSON、执行工具并追加 Runtime-only `tool_result`；收到 `finish` 后冻结正文并停止循环，再由独立 citation annotator 选择 `claim span → block_ids`。`response_protocol`、`tool_result_protocol`、`scope`、`evidence`、`coverage`、`citation`、`answer`、`termination` 各自只承担一类规则，工具自身的局部选择条件放在工具描述中。`chat-v7` 在 `evidence` 中进一步要求保留因果、条件、比较、取舍和方向关系的语义角色。完整发布文本以代码中的 `chat-v7` 为准，并受 [ADR 0011](../decisions/0011-structured-react-response-protocol.md) 与 [ADR 0012](../decisions/0012-harness-owned-claim-citation-annotation.md) 约束。
 
 `{collection_status}` 由 Harness 从请求开始时固定的 collection 快照注入，模型不能修改。其结构为 `{"snapshot_id":"...","completeness":"complete|partial","failed_documents":[{"doc_id":"...","title":"...","reason":"..."}]}`；`complete` 时列表为空，`partial` 时必须列出未成功入库的文档，供模型执行遗漏透明。
 

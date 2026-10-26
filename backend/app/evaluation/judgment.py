@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -10,19 +11,33 @@ from datetime import datetime
 from typing import Any, Literal, cast
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from sqlalchemy import func, select
 
 from app.agent.citations import CitationAnnotation
 from app.evaluation.aggregation import build_aggregates, build_result_matrix
 from app.evaluation.citation_prompt import (
+    CITATION_CLAIM_ROLES_PROMPT_HASH,
+    CITATION_CLAIM_ROLES_PROMPT_VERSION,
+    CITATION_EVIDENCE_ROLES_PROMPT_HASH,
+    CITATION_EVIDENCE_ROLES_PROMPT_VERSION,
+    CITATION_RELATION_PROMPT_HASH,
+    CITATION_RELATION_PROMPT_VERSION,
     CITATION_SUPPORT_PROMPT_HASH,
     CITATION_SUPPORT_PROMPT_VERSION,
+    CitationClaimRoleInput,
+    CitationContextFragmentInput,
     CitationContextInput,
     CitationEvidenceInput,
+    CitationEvidenceRoleInput,
     CitationOccurrenceInput,
+    CitationRelationComparisonInput,
+    CitationRoleAssertionInput,
     CitationSupportInput,
+    render_citation_claim_role_messages,
+    render_citation_evidence_role_messages,
     render_citation_messages,
+    render_citation_relation_messages,
 )
 from app.evaluation.database import EvaluationDatabase
 from app.evaluation.evidence import (
@@ -74,6 +89,7 @@ from app.evaluation.storage_models import (
 )
 from app.providers.chat import (
     ChatCompletionResult,
+    ChatMessage,
     ChatProvider,
     ChatProviderError,
     DeepSeekChatProvider,
@@ -84,7 +100,7 @@ from app.tracing.catalog import TraceCatalog
 
 CHECKER_VERSIONS = {
     "citation_integrity": "1",
-    "citation_support": "6",
+    "citation_support": "11",
     "truncation_declared": "1",
 }
 JUDGE_MAX_OUTPUT_TOKENS = 2_048
@@ -153,6 +169,91 @@ class JudgeOutput(BaseModel):
     reason: str = Field(min_length=1)
 
 
+class CitationRelationCheckOutput(BaseModel):
+    """claim 与 evidence 各自角色，以及关系方向和目标框架的审计结果。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    relation_present: bool
+    relation_type: (
+        Literal[
+            "benefit_cost",
+            "cause_effect",
+            "condition_result",
+            "direction",
+            "other",
+        ]
+        | None
+    ) = None
+    source_objective: str | None = None
+    claim_objective: str | None = None
+    evidence_roles: list[CitationRoleAssertionInput] = Field(default_factory=list)
+    claim_roles: list[CitationRoleAssertionInput] = Field(default_factory=list)
+    direction_preserved: bool | None = None
+    explicit_conflict: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_relation_fields(self) -> CitationRelationCheckOutput:
+        """保证关系存在时角色字段完整，非关系时统一为空。"""
+
+        if self.relation_present:
+            if (
+                self.relation_type is None
+                or not self.evidence_roles
+                or not self.claim_roles
+                or self.explicit_conflict is None
+            ):
+                raise ValueError("citation_relation_fields_missing")
+            return self
+        if (
+            self.relation_type is not None
+            or self.source_objective is not None
+            or self.claim_objective is not None
+            or self.evidence_roles
+            or self.claim_roles
+            or self.direction_preserved is not None
+            or self.explicit_conflict is not None
+        ):
+            raise ValueError("citation_relation_fields_unexpected")
+        return self
+
+
+class CitationClaimRolePacket(BaseModel):
+    """关系判官第一阶段对一批 claim 的独立角色解析。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    claims: list[CitationClaimRoleInput]
+
+
+class CitationEvidenceRolePacket(BaseModel):
+    """关系判官对一批 evidence 的独立角色解析。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    evidence: list[CitationEvidenceRoleInput]
+
+
+class CitationRelationReviewOutput(BaseModel):
+    """最终比较器对单个 occurrence 的方向判断。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    occurrence_id: str
+    direction_preserved: bool | None
+    explicit_conflict: bool = False
+    unmatched_claim_roles: list[str | CitationRoleAssertionInput] = Field(default_factory=list)
+    reason: str = Field(min_length=1)
+
+
+class CitationRelationReviewPacket(BaseModel):
+    """窄关系核验器的一次完整输出。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    relations: list[CitationRelationReviewOutput]
+
+
 class CitationResultOutput(BaseModel):
     """引用判官对单个 occurrence 的结构化结论。"""
 
@@ -162,6 +263,7 @@ class CitationResultOutput(BaseModel):
     verdict: Literal["supported", "unsupported", "unknown"]
     reason: str = Field(min_length=1)
     evidence_quotes: list[str]
+    relation_check: CitationRelationCheckOutput | None = None
 
 
 class CitationSupportOutput(BaseModel):
@@ -1036,6 +1138,7 @@ class EvaluationJudgmentService:
             actual_tokens=sum(
                 invocation.input_tokens + invocation.output_tokens for invocation in invocations
             ),
+            reserved_requests=2,
             actual_requests=len(invocations),
         )
         return _TaskOutcome(
@@ -1084,7 +1187,7 @@ class EvaluationJudgmentService:
         """执行一个有界引用支持批次。"""
 
         messages = render_citation_messages(packet)
-        input_json = _json(
+        reserved_input_json = _json(
             {
                 "prompt_version": CITATION_SUPPORT_PROMPT_VERSION,
                 "messages": [
@@ -1092,8 +1195,10 @@ class EvaluationJudgmentService:
                 ],
             }
         )
-        reserved_tokens = 2 * (_estimate_tokens(input_json) + CITATION_SUPPORT_MAX_OUTPUT_TOKENS)
-        if not budget.reserve(tokens=reserved_tokens, requests=2):
+        reserved_tokens = 5 * (
+            _estimate_tokens(reserved_input_json) + CITATION_SUPPORT_MAX_OUTPUT_TOKENS
+        )
+        if not budget.reserve(tokens=reserved_tokens, requests=5):
             return _CitationBatchOutcome(
                 attempt_id=task.attempt_id,
                 batch_index=batch_index,
@@ -1114,6 +1219,14 @@ class EvaluationJudgmentService:
         last_error: str | None = None
         for attempt_number in range(1, 3):
             started_at = utc_now()
+            input_json = _json(
+                {
+                    "prompt_version": CITATION_SUPPORT_PROMPT_VERSION,
+                    "messages": [
+                        {"role": message.role, "content": message.content} for message in messages
+                    ],
+                }
+            )
             try:
                 result = await asyncio.wait_for(
                     provider.complete(
@@ -1199,8 +1312,287 @@ class EvaluationJudgmentService:
                     error_code=last_error,
                 )
                 if attempt_number < 2:
+                    messages = tuple(messages) + (
+                        ChatMessage(role="assistant", content=result.content),
+                        ChatMessage(
+                            role="user",
+                            content=(
+                                "上一次输出未通过结构化校验："
+                                f"{last_error}。请只修正 JSON 输出，保持 occurrence_id 集合不变。"
+                            ),
+                        ),
+                    )
                     continue
                 break
+            relation_packet = _supported_relation_packet(packet, parsed)
+            if relation_packet is not None:
+                claim_role_messages = render_citation_claim_role_messages(relation_packet)
+                claim_role_input_json = _json(
+                    {
+                        "prompt_version": CITATION_CLAIM_ROLES_PROMPT_VERSION,
+                        "prompt_hash": CITATION_CLAIM_ROLES_PROMPT_HASH,
+                        "messages": [
+                            {"role": message.role, "content": message.content}
+                            for message in claim_role_messages
+                        ],
+                    }
+                )
+                claim_role_started_at = utc_now()
+                try:
+                    claim_role_result = await asyncio.wait_for(
+                        provider.complete(
+                            claim_role_messages,
+                            max_output_tokens=CITATION_SUPPORT_MAX_OUTPUT_TOKENS,
+                        ),
+                        timeout=timeout_seconds,
+                    )
+                except TimeoutError:
+                    invocations.append(
+                        _InvocationDraft(
+                            attempt_number=attempt_number + 1,
+                            status="timeout",
+                            input_json=claim_role_input_json,
+                            raw_output=None,
+                            error_code="judge_timeout",
+                            input_tokens=0,
+                            output_tokens=0,
+                            request_id=None,
+                            started_at=claim_role_started_at,
+                            finished_at=utc_now(),
+                        )
+                    )
+                    parsed = None
+                    last_error = "citation_relation_review_failed"
+                    break
+                except ChatProviderError as error:
+                    invocations.append(
+                        _InvocationDraft(
+                            attempt_number=attempt_number + 1,
+                            status="provider_error",
+                            input_json=claim_role_input_json,
+                            raw_output=None,
+                            error_code=error.code,
+                            input_tokens=0,
+                            output_tokens=0,
+                            request_id=None,
+                            started_at=claim_role_started_at,
+                            finished_at=utc_now(),
+                        )
+                    )
+                    parsed = None
+                    last_error = "citation_relation_review_failed"
+                    break
+                invocations.append(
+                    _InvocationDraft(
+                        attempt_number=attempt_number + 1,
+                        status="succeeded",
+                        input_json=claim_role_input_json,
+                        raw_output=claim_role_result.content,
+                        error_code=None,
+                        input_tokens=claim_role_result.input_tokens,
+                        output_tokens=claim_role_result.output_tokens,
+                        request_id=claim_role_result.request_id,
+                        started_at=claim_role_started_at,
+                        finished_at=utc_now(),
+                    )
+                )
+                try:
+                    claim_roles = _parse_claim_roles(
+                        claim_role_result,
+                        relation_packet,
+                    )
+                except ValueError as error:
+                    last_error = str(error)
+                    invocations[-1] = replace_invocation(
+                        invocations[-1],
+                        status="output_invalid",
+                        error_code=last_error,
+                    )
+                    parsed = None
+                    break
+                related_packet = _related_relation_packet(relation_packet, claim_roles)
+                evidence_roles: dict[str, CitationEvidenceRoleInput] = {}
+                relation_checks: dict[str, CitationRelationReviewOutput] = {}
+                if related_packet is not None:
+                    evidence_messages = render_citation_evidence_role_messages(related_packet)
+                    evidence_input_json = _json(
+                        {
+                            "prompt_version": CITATION_EVIDENCE_ROLES_PROMPT_VERSION,
+                            "prompt_hash": CITATION_EVIDENCE_ROLES_PROMPT_HASH,
+                            "messages": [
+                                {"role": message.role, "content": message.content}
+                                for message in evidence_messages
+                            ],
+                        }
+                    )
+                    evidence_started_at = utc_now()
+                    try:
+                        evidence_result = await asyncio.wait_for(
+                            provider.complete(
+                                evidence_messages,
+                                max_output_tokens=CITATION_SUPPORT_MAX_OUTPUT_TOKENS,
+                            ),
+                            timeout=timeout_seconds,
+                        )
+                    except TimeoutError:
+                        invocations.append(
+                            _InvocationDraft(
+                                attempt_number=attempt_number + 2,
+                                status="timeout",
+                                input_json=evidence_input_json,
+                                raw_output=None,
+                                error_code="judge_timeout",
+                                input_tokens=0,
+                                output_tokens=0,
+                                request_id=None,
+                                started_at=evidence_started_at,
+                                finished_at=utc_now(),
+                            )
+                        )
+                        parsed = None
+                        last_error = "citation_relation_review_failed"
+                        break
+                    except ChatProviderError as error:
+                        invocations.append(
+                            _InvocationDraft(
+                                attempt_number=attempt_number + 2,
+                                status="provider_error",
+                                input_json=evidence_input_json,
+                                raw_output=None,
+                                error_code=error.code,
+                                input_tokens=0,
+                                output_tokens=0,
+                                request_id=None,
+                                started_at=evidence_started_at,
+                                finished_at=utc_now(),
+                            )
+                        )
+                        parsed = None
+                        last_error = "citation_relation_review_failed"
+                        break
+                    invocations.append(
+                        _InvocationDraft(
+                            attempt_number=attempt_number + 2,
+                            status="succeeded",
+                            input_json=evidence_input_json,
+                            raw_output=evidence_result.content,
+                            error_code=None,
+                            input_tokens=evidence_result.input_tokens,
+                            output_tokens=evidence_result.output_tokens,
+                            request_id=evidence_result.request_id,
+                            started_at=evidence_started_at,
+                            finished_at=utc_now(),
+                        )
+                    )
+                    try:
+                        evidence_roles = _parse_evidence_roles(
+                            evidence_result,
+                            related_packet,
+                        )
+                    except ValueError as error:
+                        last_error = str(error)
+                        invocations[-1] = replace_invocation(
+                            invocations[-1],
+                            status="output_invalid",
+                            error_code=last_error,
+                        )
+                        parsed = None
+                        break
+                    comparison_packet = _relation_comparison_packet(
+                        related_packet,
+                        claim_roles,
+                        evidence_roles,
+                    )
+                    relation_messages = render_citation_relation_messages(comparison_packet)
+                    relation_input_json = _json(
+                        {
+                            "prompt_version": CITATION_RELATION_PROMPT_VERSION,
+                            "prompt_hash": CITATION_RELATION_PROMPT_HASH,
+                            "messages": [
+                                {"role": message.role, "content": message.content}
+                                for message in relation_messages
+                            ],
+                        }
+                    )
+                    relation_started_at = utc_now()
+                    try:
+                        relation_result = await asyncio.wait_for(
+                            provider.complete(
+                                relation_messages,
+                                max_output_tokens=CITATION_SUPPORT_MAX_OUTPUT_TOKENS,
+                            ),
+                            timeout=timeout_seconds,
+                        )
+                    except TimeoutError:
+                        invocations.append(
+                            _InvocationDraft(
+                                attempt_number=attempt_number + 3,
+                                status="timeout",
+                                input_json=relation_input_json,
+                                raw_output=None,
+                                error_code="judge_timeout",
+                                input_tokens=0,
+                                output_tokens=0,
+                                request_id=None,
+                                started_at=relation_started_at,
+                                finished_at=utc_now(),
+                            )
+                        )
+                        parsed = None
+                        last_error = "citation_relation_review_failed"
+                        break
+                    except ChatProviderError as error:
+                        invocations.append(
+                            _InvocationDraft(
+                                attempt_number=attempt_number + 3,
+                                status="provider_error",
+                                input_json=relation_input_json,
+                                raw_output=None,
+                                error_code=error.code,
+                                input_tokens=0,
+                                output_tokens=0,
+                                request_id=None,
+                                started_at=relation_started_at,
+                                finished_at=utc_now(),
+                            )
+                        )
+                        parsed = None
+                        last_error = "citation_relation_review_failed"
+                        break
+                    invocations.append(
+                        _InvocationDraft(
+                            attempt_number=attempt_number + 3,
+                            status="succeeded",
+                            input_json=relation_input_json,
+                            raw_output=relation_result.content,
+                            error_code=None,
+                            input_tokens=relation_result.input_tokens,
+                            output_tokens=relation_result.output_tokens,
+                            request_id=relation_result.request_id,
+                            started_at=relation_started_at,
+                            finished_at=utc_now(),
+                        )
+                    )
+                    try:
+                        relation_checks = _parse_relation_review(
+                            relation_result,
+                            comparison_packet,
+                        )
+                    except ValueError as error:
+                        last_error = str(error)
+                        invocations[-1] = replace_invocation(
+                            invocations[-1],
+                            status="output_invalid",
+                            error_code=last_error,
+                        )
+                        parsed = None
+                        break
+                parsed = _apply_relation_review(
+                    parsed,
+                    claim_roles,
+                    evidence_roles,
+                    relation_checks,
+                )
             break
 
         budget.settle(
@@ -1208,6 +1600,7 @@ class EvaluationJudgmentService:
             actual_tokens=sum(
                 invocation.input_tokens + invocation.output_tokens for invocation in invocations
             ),
+            reserved_requests=5,
             actual_requests=len(invocations),
         )
         invocation_payload = [
@@ -1572,10 +1965,11 @@ class _JudgeBudget:
         *,
         reserved_tokens: int,
         actual_tokens: int,
+        reserved_requests: int,
         actual_requests: int,
     ) -> None:
         self._tokens += max(0, reserved_tokens - actual_tokens)
-        self._requests += max(0, 2 - actual_requests)
+        self._requests += max(0, reserved_requests - actual_requests)
 
 
 def _build_citation_task(
@@ -1596,6 +1990,15 @@ def _build_citation_task(
                 context_id=annotation.annotation_id,
                 kind="claim",
                 text=annotation.text,
+                focus_text=annotation.text,
+                context_fragments=[
+                    CitationContextFragmentInput(
+                        fragment_id=fragment.fragment_id,
+                        kind=fragment.kind,
+                        text=fragment.text,
+                    )
+                    for fragment in annotation.context_fragments
+                ],
             )
             for annotation in annotations
         ]
@@ -1772,6 +2175,11 @@ def _merge_citation_outcomes(
         )
         all_verdicts.append(verdict)
         quotes = [] if verdict_result is None else list(verdict_result.evidence_quotes)
+        relation_check = (
+            None
+            if verdict_result is None or verdict_result.relation_check is None
+            else verdict_result.relation_check.model_dump(mode="json")
+        )
         claim_results.append(
             {
                 "occurrence_id": occurrence.occurrence_id,
@@ -1781,6 +2189,7 @@ def _merge_citation_outcomes(
                 "verdict": verdict,
                 "reason": reason,
                 "evidence_quotes": quotes,
+                "relation_check": relation_check,
             }
         )
         for block_id in occurrence.block_ids:
@@ -1974,6 +2383,371 @@ def _parse_citation_output(
             if not any(quote in evidence_by_id[block_id] for block_id in occurrence.block_ids):
                 raise ValueError("citation_evidence_quote_invalid")
     return parsed
+
+
+def _supported_relation_packet(
+    packet: CitationSupportInput,
+    parsed: CitationSupportOutput,
+) -> CitationSupportInput | None:
+    """提取主判官判为 supported、需要独立关系核验的 occurrence。"""
+
+    supported_ids = {item.occurrence_id for item in parsed.citations if item.verdict == "supported"}
+    context_by_id = {item.context_id: item for item in packet.contexts}
+    occurrence_by_id = {item.occurrence_id: item for item in packet.occurrences}
+    supported_ids = {
+        occurrence_id
+        for occurrence_id in supported_ids
+        if context_by_id[occurrence_by_id[occurrence_id].context_id].focus_text is not None
+    }
+    if not supported_ids:
+        return None
+    supported_occurrences = [
+        item for item in packet.occurrences if item.occurrence_id in supported_ids
+    ]
+    context_ids = list(dict.fromkeys(item.context_id for item in supported_occurrences))
+    block_ids = list(
+        dict.fromkeys(block_id for item in supported_occurrences for block_id in item.block_ids)
+    )
+    return CitationSupportInput(
+        contexts=[item for item in packet.contexts if item.context_id in context_ids],
+        citations=[item for item in packet.citations if item.block_id in block_ids],
+        occurrences=supported_occurrences,
+    )
+
+
+def _parse_claim_roles(
+    result: ChatCompletionResult,
+    packet: CitationSupportInput,
+) -> dict[str, CitationClaimRoleInput]:
+    """严格校验不读取 evidence 的 claim 角色解析结果。"""
+
+    try:
+        parsed = CitationClaimRolePacket.model_validate_json(result.content)
+    except ValidationError as error:
+        raise ValueError("citation_claim_roles_output_invalid") from error
+    result_ids = [item.occurrence_id for item in parsed.claims]
+    expected_ids = {item.occurrence_id for item in packet.occurrences}
+    if len(result_ids) != len(set(result_ids)) or set(result_ids) != expected_ids:
+        raise ValueError("citation_claim_roles_occurrence_set_invalid")
+    return {item.occurrence_id: _normalize_claim_role(item) for item in parsed.claims}
+
+
+def _normalize_claim_role(item: CitationClaimRoleInput) -> CitationClaimRoleInput:
+    """移除连接词伪角色，并拒绝没有对应角色对的低信息关系。"""
+
+    roles = [
+        assertion
+        for assertion in item.claim_roles
+        if assertion.fact.strip().casefold()
+        not in {"因此", "所以", "因而", "于是", "therefore", "thus", "so"}
+    ]
+    if not item.relation_present:
+        return item
+    required_roles = {
+        "benefit_cost": {"benefit", "cost"},
+        "cause_effect": {"cause", "effect"},
+        "condition_result": {"condition", "result"},
+        "direction": {"direction"},
+        "other": {
+            "benefit",
+            "cost",
+            "cause",
+            "effect",
+            "condition",
+            "result",
+            "direction",
+        },
+    }[item.relation_type or "other"]
+    present_roles = {assertion.role for assertion in roles}
+    if not roles or not present_roles.intersection(required_roles):
+        return item.model_copy(
+            update={
+                "relation_present": False,
+                "relation_type": None,
+                "claim_objective": None,
+                "claim_roles": [],
+            }
+        )
+    if item.relation_type == "cause_effect" and not {"cause", "effect"}.issubset(present_roles):
+        return item.model_copy(
+            update={
+                "relation_present": False,
+                "relation_type": None,
+                "claim_objective": None,
+                "claim_roles": [],
+            }
+        )
+    if item.relation_type == "condition_result" and not {
+        "condition",
+        "result",
+    }.issubset(present_roles):
+        return item.model_copy(
+            update={
+                "relation_present": False,
+                "relation_type": None,
+                "claim_objective": None,
+                "claim_roles": [],
+            }
+        )
+    return item.model_copy(update={"claim_roles": roles})
+
+
+def _related_relation_packet(
+    packet: CitationSupportInput,
+    claim_roles: dict[str, CitationClaimRoleInput],
+) -> CitationSupportInput | None:
+    """提取明确存在关系、需要继续解析 evidence 角色的 occurrence。"""
+
+    related_ids = {
+        occurrence_id for occurrence_id, claim in claim_roles.items() if claim.relation_present
+    }
+    if not related_ids:
+        return None
+    occurrences = [item for item in packet.occurrences if item.occurrence_id in related_ids]
+    block_ids = list(
+        dict.fromkeys(block_id for occurrence in occurrences for block_id in occurrence.block_ids)
+    )
+    context_ids = list(dict.fromkeys(item.context_id for item in occurrences))
+    return CitationSupportInput(
+        contexts=[item for item in packet.contexts if item.context_id in context_ids],
+        citations=[item for item in packet.citations if item.block_id in block_ids],
+        occurrences=occurrences,
+    )
+
+
+def _parse_evidence_roles(
+    result: ChatCompletionResult,
+    packet: CitationSupportInput,
+) -> dict[str, CitationEvidenceRoleInput]:
+    """严格校验不读取 claim 的 evidence 角色解析结果。"""
+
+    try:
+        parsed = CitationEvidenceRolePacket.model_validate_json(result.content)
+    except ValidationError as error:
+        raise ValueError("citation_evidence_roles_output_invalid") from error
+    result_ids = [item.occurrence_id for item in parsed.evidence]
+    expected_ids = {item.occurrence_id for item in packet.occurrences}
+    if len(result_ids) != len(set(result_ids)) or set(result_ids) != expected_ids:
+        raise ValueError("citation_evidence_roles_occurrence_set_invalid")
+    return {item.occurrence_id: item for item in parsed.evidence}
+
+
+def _relation_comparison_packet(
+    packet: CitationSupportInput,
+    claim_roles: dict[str, CitationClaimRoleInput],
+    evidence_roles: dict[str, CitationEvidenceRoleInput],
+) -> CitationRelationComparisonInput:
+    """组合两份独立角色结果，供最终比较器使用。"""
+
+    occurrences = [
+        item for item in packet.occurrences if claim_roles[item.occurrence_id].relation_present
+    ]
+    return CitationRelationComparisonInput(
+        claims=[claim_roles[item.occurrence_id] for item in occurrences],
+        evidence=[evidence_roles[item.occurrence_id] for item in occurrences],
+        occurrences=occurrences,
+    )
+
+
+def _parse_relation_review(
+    result: ChatCompletionResult,
+    packet: CitationRelationComparisonInput,
+) -> dict[str, CitationRelationReviewOutput]:
+    """严格校验 claim 角色与 evidence 角色的比较结果。"""
+
+    try:
+        parsed = CitationRelationReviewPacket.model_validate_json(result.content)
+    except ValidationError as error:
+        raise ValueError("citation_relation_output_invalid") from error
+    result_ids = [item.occurrence_id for item in parsed.relations]
+    expected_ids = {item.occurrence_id for item in packet.claims}
+    if len(result_ids) != len(set(result_ids)) or set(result_ids) != expected_ids:
+        raise ValueError("citation_relation_occurrence_set_invalid")
+    normalized: dict[str, CitationRelationReviewOutput] = {}
+    for item in parsed.relations:
+        if item.direction_preserved is False and not item.explicit_conflict:
+            item = item.model_copy(
+                update={
+                    "direction_preserved": None,
+                    "unmatched_claim_roles": [
+                        *item.unmatched_claim_roles,
+                        "判官未给出明确冲突依据",
+                    ],
+                }
+            )
+        elif item.explicit_conflict and item.direction_preserved is not False:
+            item = item.model_copy(
+                update={
+                    "direction_preserved": None,
+                    "unmatched_claim_roles": [
+                        *item.unmatched_claim_roles,
+                        "明确冲突标记与方向结论不一致",
+                    ],
+                }
+            )
+        normalized[item.occurrence_id] = item
+    return normalized
+
+
+def _apply_relation_review(
+    parsed: CitationSupportOutput,
+    claim_roles: dict[str, CitationClaimRoleInput],
+    evidence_roles: dict[str, CitationEvidenceRoleInput],
+    relation_checks: dict[str, CitationRelationReviewOutput],
+) -> CitationSupportOutput:
+    """把窄关系核验结果并入主判官结论，并阻止方向反转的 supported。"""
+
+    citations: list[CitationResultOutput] = []
+    for item in parsed.citations:
+        claim = claim_roles.get(item.occurrence_id)
+        if claim is None:
+            citations.append(item)
+            continue
+        if not claim.relation_present:
+            citations.append(
+                item.model_copy(
+                    update={
+                        "relation_check": CitationRelationCheckOutput(
+                            relation_present=False,
+                        )
+                    }
+                )
+            )
+            continue
+        relation_check = relation_checks.get(item.occurrence_id)
+        evidence_check = evidence_roles.get(item.occurrence_id)
+        if relation_check is None or evidence_check is None:
+            citations.append(
+                item.model_copy(
+                    update={
+                        "verdict": "unknown",
+                        "reason": f"{item.reason}；关系判官未返回比较结果",
+                    }
+                )
+            )
+            continue
+        combined = CitationRelationCheckOutput(
+            relation_present=True,
+            relation_type=claim.relation_type,
+            source_objective=evidence_check.source_objective,
+            claim_objective=claim.claim_objective,
+            evidence_roles=evidence_check.evidence_roles,
+            claim_roles=claim.claim_roles,
+            direction_preserved=relation_check.direction_preserved,
+            explicit_conflict=relation_check.explicit_conflict,
+        )
+        numeric_conflict = _numeric_role_conflict(
+            claim.claim_roles,
+            evidence_check.evidence_roles,
+        )
+        if numeric_conflict is not None:
+            combined = combined.model_copy(
+                update={
+                    "direction_preserved": False,
+                    "explicit_conflict": True,
+                }
+            )
+            citations.append(
+                item.model_copy(
+                    update={
+                        "verdict": "unsupported",
+                        "reason": f"{item.reason}；关系角色确定性冲突：{numeric_conflict}",
+                        "relation_check": combined,
+                    }
+                )
+            )
+            continue
+        substantive_unmatched = _has_substantive_unmatched_roles(
+            claim.claim_roles,
+            relation_check.unmatched_claim_roles,
+        )
+        if (
+            relation_check.direction_preserved is True
+            and relation_check.explicit_conflict is False
+            and not substantive_unmatched
+        ):
+            citations.append(item.model_copy(update={"relation_check": combined}))
+            continue
+        if relation_check.direction_preserved is None or substantive_unmatched:
+            citations.append(
+                item.model_copy(
+                    update={
+                        "verdict": "unknown",
+                        "reason": f"{item.reason}；关系判官无法可靠确定目标或语义角色",
+                        "relation_check": combined,
+                    }
+                )
+            )
+            continue
+        citations.append(
+            item.model_copy(
+                update={
+                    "verdict": "unsupported",
+                    "reason": f"{item.reason}；关系方向核验：{relation_check.reason}",
+                    "relation_check": combined,
+                }
+            )
+        )
+    return parsed.model_copy(update={"citations": citations})
+
+
+def _has_substantive_unmatched_roles(
+    claim_roles: list[CitationRoleAssertionInput],
+    unmatched_claim_roles: list[str | CitationRoleAssertionInput],
+) -> bool:
+    """忽略 other 背景事实未匹配；只有实质角色缺失才进入 pending。"""
+
+    other_facts = {assertion.fact.strip() for assertion in claim_roles if assertion.role == "other"}
+    return any(
+        (value if isinstance(value, str) else value.fact).strip() not in other_facts
+        for value in unmatched_claim_roles
+    )
+
+
+def _numeric_role_conflict(
+    claim_roles: list[CitationRoleAssertionInput],
+    evidence_roles: list[CitationRoleAssertionInput],
+) -> str | None:
+    """对同一带数字事实出现互斥角色时做确定性冲突检查。"""
+
+    role_families = {
+        "benefit": "value",
+        "cost": "value",
+        "cause": "cause_effect",
+        "effect": "cause_effect",
+        "condition": "condition_result",
+        "result": "condition_result",
+        "direction": "direction",
+    }
+    evidence_roles_by_number: dict[str, set[str]] = {}
+    for assertion in evidence_roles:
+        for number in _numeric_fact_tokens(assertion.fact):
+            evidence_roles_by_number.setdefault(number, set()).add(assertion.role)
+    for assertion in claim_roles:
+        claim_family = role_families.get(assertion.role)
+        if claim_family is None:
+            continue
+        for number in _numeric_fact_tokens(assertion.fact):
+            evidence_roles_for_number = evidence_roles_by_number.get(number, set())
+            comparable_evidence_roles = {
+                role
+                for role in evidence_roles_for_number
+                if role_families.get(role) == claim_family
+            }
+            if len(comparable_evidence_roles) == 1:
+                evidence_role = next(iter(comparable_evidence_roles))
+                if evidence_role != assertion.role:
+                    return (
+                        f"数字 {number} 在 claim 中为 {assertion.role}，"
+                        f"在 evidence 中为 {evidence_role}"
+                    )
+    return None
+
+
+def _numeric_fact_tokens(text: str) -> set[str]:
+    """提取事实中的百分比或普通数字，作为角色对齐锚点。"""
+
+    return set(re.findall(r"\d+(?:\.\d+)?%?", text))
 
 
 def _normalize_verdict(rule_type: str, verdict: str) -> str:

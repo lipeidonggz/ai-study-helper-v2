@@ -221,6 +221,19 @@ def _load_citation_annotations(
                 "citation_annotation_span_invalid",
                 f"citation annotation span does not match answer: {annotation.span_id}",
             )
+        for fragment in annotation.context_fragments:
+            if (
+                fragment.start_index < 0
+                or fragment.end_index > len(answer)
+                or answer[fragment.start_index : fragment.end_index] != fragment.text
+            ):
+                raise JudgeInputError(
+                    "citation_annotation_context_invalid",
+                    (
+                        "citation annotation context does not match answer: "
+                        f"{annotation.span_id}/{fragment.fragment_id}"
+                    ),
+                )
     return annotations.annotations
 
 
