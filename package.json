@@ -16,6 +16,9 @@
     "backend:check": "powershell -NoProfile -Command \"& (Resolve-Path 'backend\\.venv\\Scripts\\python.exe').Path -m ruff format --check backend; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & (Resolve-Path 'backend\\.venv\\Scripts\\python.exe').Path -m ruff check backend; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & (Resolve-Path 'backend\\.venv\\Scripts\\python.exe').Path -m ruff format --check --config backend\\pyproject.toml scripts; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & (Resolve-Path 'backend\\.venv\\Scripts\\python.exe').Path -m ruff check --config backend\\pyproject.toml scripts; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & (Resolve-Path 'backend\\.venv\\Scripts\\python.exe').Path -m pyright --project backend\"",
     "backend:format": "powershell -NoProfile -Command \"& (Resolve-Path 'backend\\.venv\\Scripts\\python.exe').Path -m ruff format backend; & (Resolve-Path 'backend\\.venv\\Scripts\\python.exe').Path -m ruff check --fix backend; & (Resolve-Path 'backend\\.venv\\Scripts\\python.exe').Path -m ruff format --config backend\\pyproject.toml scripts; & (Resolve-Path 'backend\\.venv\\Scripts\\python.exe').Path -m ruff check --config backend\\pyproject.toml --fix scripts\"",
     "backend:package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-backend.ps1",
-    "backend:test": "powershell -NoProfile -Command \"& (Resolve-Path 'backend\\.venv\\Scripts\\python.exe').Path -m pytest backend\\tests\""
+    "backend:test": "powershell -NoProfile -Command \"& (Resolve-Path 'backend\\.venv\\Scripts\\python.exe').Path -m pytest backend\\tests\"",
+    "delivery:start": "python -m scripts.github_async_delivery start",
+    "delivery:status": "python -m scripts.github_async_delivery status",
+    "delivery:require": "python -m scripts.github_async_delivery require-merged"
   }
 }
