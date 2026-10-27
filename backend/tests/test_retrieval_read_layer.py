@@ -10,6 +10,7 @@ import pytest
 from app.main import create_app
 from app.providers.embeddings import FakeEmbeddingProvider
 from app.retrieval.service import RetrievalFailure, RetrievalReadService, _snippet
+from tests.helpers import fixture_bytes
 
 TOKEN = "retrieval-read-test-token"
 
@@ -154,23 +155,84 @@ def test_outline_and_section_enumeration_include_descendant_blocks(
     outline = reader.get_outline([document.doc_id]).documents[0].document
     assert outline is not None
     alpha = next(section for section in outline.sections if section.title == "Alpha")
-    alpha_blocks = reader.list_blocks(document.doc_id, [alpha.path])
+    alpha_own_blocks = reader.list_blocks(
+        document.doc_id,
+        [alpha.path],
+        include_descendants=False,
+    )
+    alpha_subtree_blocks = reader.list_blocks(
+        document.doc_id,
+        [alpha.path],
+        include_descendants=True,
+    )
     beta = next(section for section in outline.sections if section.title == "Beta")
     combined_blocks = reader.list_blocks(
         document.doc_id,
         [alpha.path, beta.path, alpha.path],
+        include_descendants=True,
     )
     all_blocks = reader.list_blocks(document.doc_id)
 
     assert alpha.subtree_blocks >= 2
     assert alpha.subtree_context_tokens >= alpha.own_context_tokens
-    assert any("MCP" in block.text for block in alpha_blocks.blocks)
-    assert any("子章节" in block.text for block in alpha_blocks.blocks)
+    assert any("MCP" in block.text for block in alpha_own_blocks.blocks)
+    assert all("子章节" not in block.text for block in alpha_own_blocks.blocks)
+    assert any("子章节" in block.text for block in alpha_subtree_blocks.blocks)
+    alpha_own_context = alpha_own_blocks.blocks[0].section_context
+    assert alpha_own_context.section_depth == alpha.depth
+    assert alpha_own_context.has_child_sections is True
+    assert alpha_own_context.document_section_count == len(outline.sections)
+    assert alpha_own_blocks.scope == "section"
+    assert alpha_subtree_blocks.scope == "subtree"
+    assert all_blocks.scope == "document"
+    assert alpha_own_blocks.total < alpha_subtree_blocks.total
     assert len({block.block_id for block in combined_blocks.blocks}) == len(combined_blocks.blocks)
-    assert combined_blocks.total > alpha_blocks.total
+    assert combined_blocks.total > alpha_subtree_blocks.total
     assert [block.block_id for block in all_blocks.blocks] == sorted(
         (block.block_id for block in all_blocks.blocks),
     )
+
+
+def test_get_blocks_returns_complete_requested_blocks_in_request_order(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "exact-blocks.html"
+    path.write_bytes(_html("Exact document", "MCP 精确补全正文。"))
+    _ingest(tmp_path, [path])
+    reader = RetrievalReadService(tmp_path).bind_current()
+    document = reader.list_documents().documents[0]
+    matches = reader.scan_term("MCP", [document.doc_id]).matches
+    block_id = matches[0].block_id
+
+    exact = reader.get_blocks([block_id, block_id])
+
+    assert exact.total == 1
+    assert exact.blocks[0].block_id == block_id
+    assert "MCP" in exact.blocks[0].text
+    assert exact.blocks[0].section_context.has_child_sections is True
+    assert exact.blocks[0].section_context.document_section_count > 1
+    with pytest.raises(RetrievalFailure) as missing:
+        reader.get_blocks([block_id, "doc_missing#v0001#c1#b00001"])
+    assert missing.value.code == "scope_not_found"
+    assert "doc_missing#v0001#c1#b00001" in missing.value.message
+
+
+def test_no_heading_document_reports_single_root_section_context(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "no-heading-context.html"
+    path.write_bytes(fixture_bytes("no-headings.html"))
+    _ingest(tmp_path, [path])
+    reader = RetrievalReadService(tmp_path).bind_current()
+    document = reader.list_documents().documents[0]
+
+    blocks = reader.list_blocks(document.doc_id)
+
+    assert blocks.total == 1
+    assert blocks.blocks[0].section_path == []
+    assert blocks.blocks[0].section_context.section_depth == 0
+    assert blocks.blocks[0].section_context.has_child_sections is False
+    assert blocks.blocks[0].section_context.document_section_count == 1
 
 
 def test_get_outline_returns_per_document_scope_errors(tmp_path: Path) -> None:
@@ -201,6 +263,9 @@ def test_scan_term_distinguishes_zero_matches_from_missing_scope(
 
     assert matches.count == 1
     assert "MCP" in matches.matches[0].snippet
+    assert matches.matches[0].section_context.section_depth == 1
+    assert matches.matches[0].section_context.has_child_sections is True
+    assert matches.matches[0].section_context.document_section_count > 1
     assert no_matches.count == 0
     assert no_matches.matches == []
     with pytest.raises(RetrievalFailure) as missing_scope:
@@ -250,8 +315,16 @@ def test_empty_arguments_and_missing_sections_return_stable_errors(
     assert empty_term.value.code == "invalid_argument"
 
     with pytest.raises(RetrievalFailure) as invalid_scope:
-        reader.list_blocks(document.doc_id, [["Missing section"]])
+        reader.list_blocks(
+            document.doc_id,
+            [["Missing section"]],
+            include_descendants=False,
+        )
     assert invalid_scope.value.code == "scope_not_found"
+
+    with pytest.raises(RetrievalFailure) as missing_scope_mode:
+        reader.list_blocks(document.doc_id, [["Alpha"]])
+    assert missing_scope_mode.value.code == "invalid_argument"
 
 
 def test_missing_active_collection_is_not_an_empty_library(tmp_path: Path) -> None:

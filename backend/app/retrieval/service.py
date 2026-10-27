@@ -34,6 +34,7 @@ from app.retrieval.hybrid import (
     search_snapshot_index,
 )
 from app.retrieval.models import (
+    GetBlocksResult,
     GetOutlineResult,
     ListBlocksResult,
     ListDocumentsResult,
@@ -43,6 +44,7 @@ from app.retrieval.models import (
     RetrievalErrorPayload,
     RetrievalOutlineItem,
     RetrievalOutlineSection,
+    RetrievalSectionContext,
     ScanMatch,
     ScanTermResult,
     SearchBlocksResult,
@@ -243,8 +245,10 @@ class RetrievalSnapshotReader:
         self,
         doc_id: str,
         section_paths: list[list[str]] | None = None,
+        *,
+        include_descendants: bool | None = None,
     ) -> ListBlocksResult:
-        """返回单篇文档指定章节及其全部后代的完整块集合。"""
+        """按整篇、章节直属或章节子树范围返回单篇文档的完整块集合。"""
 
         normalized_doc_id = _required_non_empty(doc_id, "doc_id")
         persisted = self._load_document(normalized_doc_id)
@@ -252,6 +256,16 @@ class RetrievalSnapshotReader:
         selected_paths = [
             tuple(path) for path in (section_paths if section_paths is not None else [])
         ]
+        if selected_paths and include_descendants is None:
+            raise RetrievalFailure(
+                "invalid_argument",
+                "include_descendants is required when section_paths is not empty",
+            )
+        if not selected_paths and include_descendants is not None:
+            raise RetrievalFailure(
+                "invalid_argument",
+                "include_descendants is only valid with non-empty section_paths",
+            )
         missing_paths = [path for path in selected_paths if path not in existing_paths]
         if missing_paths:
             raise RetrievalFailure(
@@ -263,9 +277,17 @@ class RetrievalSnapshotReader:
             block
             for block in persisted.block_set.blocks
             if not selected_paths
-            or any(tuple(block.section_path[: len(path)]) == path for path in selected_paths)
+            or any(
+                (
+                    tuple(block.section_path[: len(path)]) == path
+                    if include_descendants
+                    else tuple(block.section_path) == path
+                )
+                for path in selected_paths
+            )
         ]
         selected_blocks.sort(key=lambda block: block.block_index)
+        section_context_by_path = _section_context_map(persisted)
         blocks = [
             RetrievalBlock(
                 block_id=block.block_id,
@@ -273,11 +295,63 @@ class RetrievalSnapshotReader:
                 doc_title=persisted.document.title,
                 source_label=persisted.document.source_label,
                 section_path=block.section_path,
+                section_context=_required_section_context(
+                    section_context_by_path,
+                    normalized_doc_id,
+                    block.section_path,
+                ),
                 text=block.text,
             )
             for block in selected_blocks
         ]
-        return ListBlocksResult(blocks=blocks, total=len(blocks))
+        scope = (
+            "document" if not selected_paths else ("subtree" if include_descendants else "section")
+        )
+        return ListBlocksResult(blocks=blocks, total=len(blocks), scope=scope)
+
+    def get_blocks(self, block_ids: list[str]) -> GetBlocksResult:
+        """按请求顺序返回 block_id 对应的完整块；任一 ID 缺失时整次失败。"""
+
+        unique_ids = _deduplicate_non_empty(block_ids, "block_ids")
+        blocks_by_document: dict[str, dict[str, RetrievalBlock]] = {}
+        missing_ids: list[str] = []
+        for block_id in unique_ids:
+            doc_id, separator, _ = block_id.partition("#")
+            if not separator or doc_id not in self._documents_by_id:
+                missing_ids.append(block_id)
+                continue
+            document_blocks = blocks_by_document.get(doc_id)
+            if document_blocks is None:
+                persisted = self._load_document(doc_id)
+                section_context_by_path = _section_context_map(persisted)
+                document_blocks = {
+                    block.block_id: RetrievalBlock(
+                        block_id=block.block_id,
+                        doc_id=doc_id,
+                        doc_title=persisted.document.title,
+                        source_label=persisted.document.source_label,
+                        section_path=block.section_path,
+                        section_context=_required_section_context(
+                            section_context_by_path,
+                            doc_id,
+                            block.section_path,
+                        ),
+                        text=block.text,
+                    )
+                    for block in persisted.block_set.blocks
+                }
+                blocks_by_document[doc_id] = document_blocks
+            if block_id not in document_blocks:
+                missing_ids.append(block_id)
+        if missing_ids:
+            raise RetrievalFailure(
+                "scope_not_found",
+                f"blocks do not exist in the fixed snapshot: {', '.join(missing_ids)}",
+            )
+        blocks = [
+            blocks_by_document[block_id.partition("#")[0]][block_id] for block_id in unique_ids
+        ]
+        return GetBlocksResult(blocks=blocks, total=len(blocks))
 
     def scan_term(
         self,
@@ -303,6 +377,7 @@ class RetrievalSnapshotReader:
         matches_with_index: list[tuple[int, ScanMatch]] = []
         for doc_id in requested_ids:
             persisted = self._load_document(doc_id)
+            section_context_by_path = _section_context_map(persisted)
             for block in persisted.block_set.blocks:
                 normalized_text = unicodedata.normalize("NFC", block.text)
                 folded_text = normalized_text.translate(_ASCII_FOLD_TABLE)
@@ -318,6 +393,11 @@ class RetrievalSnapshotReader:
                             doc_title=persisted.document.title,
                             source_label=persisted.document.source_label,
                             section_path=block.section_path,
+                            section_context=_required_section_context(
+                                section_context_by_path,
+                                doc_id,
+                                block.section_path,
+                            ),
                             snippet=_snippet(
                                 normalized_text,
                                 start,
@@ -440,6 +520,7 @@ class RetrievalSnapshotReader:
                     "snapshot_integrity_error",
                     f"index candidate is missing from document: {candidate.block_id}",
                 )
+            section_context_by_path = _section_context_map(persisted)
             blocks.append(
                 RetrievalBlock(
                     block_id=block.block_id,
@@ -447,6 +528,11 @@ class RetrievalSnapshotReader:
                     doc_title=persisted.document.title,
                     source_label=persisted.document.source_label,
                     section_path=block.section_path,
+                    section_context=_required_section_context(
+                        section_context_by_path,
+                        candidate.doc_id,
+                        block.section_path,
+                    ),
                     text=block.text,
                 )
             )
@@ -540,6 +626,43 @@ class RetrievalSnapshotReader:
             source_label=persisted.document.source_label,
             sections=sections,
         )
+
+
+def _section_context_map(
+    persisted: IngestDocumentResponse,
+) -> dict[tuple[str, ...], RetrievalSectionContext]:
+    """按稳定 section_path 生成模型需要的局部结构上下文。"""
+
+    parent_paths = {
+        tuple(section.parent_path)
+        for section in persisted.section_tree.sections
+        if tuple(section.parent_path) != tuple(section.path)
+    }
+    section_count = len(persisted.section_tree.sections)
+    return {
+        tuple(section.path): RetrievalSectionContext(
+            section_depth=section.depth,
+            has_child_sections=tuple(section.path) in parent_paths,
+            document_section_count=section_count,
+        )
+        for section in persisted.section_tree.sections
+    }
+
+
+def _required_section_context(
+    contexts: dict[tuple[str, ...], RetrievalSectionContext],
+    doc_id: str,
+    section_path: list[str],
+) -> RetrievalSectionContext:
+    """解析 block 所属结构上下文；缺失时拒绝返回不完整证据。"""
+
+    context = contexts.get(tuple(section_path))
+    if context is None:
+        raise RetrievalFailure(
+            "snapshot_integrity_error",
+            f"block references an unknown section path in document {doc_id}: {section_path}",
+        )
+    return context
 
 
 def _outline_section(

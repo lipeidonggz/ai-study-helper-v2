@@ -4,6 +4,20 @@ export interface PromptMessageView {
   content: string;
 }
 
+/** 系统提示词中一个工具的名称、说明和输入／输出契约。 */
+export interface PromptToolView {
+  name: string;
+  description: string;
+  inputSchemaText: string | null;
+  outputSchemaText: string | null;
+}
+
+/** 系统提示词中结构化拆分出的工具定义与其余内容。 */
+export interface PromptSystemView {
+  tools: PromptToolView[];
+  remainder: string;
+}
+
 /** 用户消息中可识别的题目和运行历史。 */
 export interface UserPromptView {
   question: string;
@@ -66,6 +80,22 @@ export function parsePromptMessages(content: string): PromptMessageView[] | null
   } catch {
     return null;
   }
+}
+
+/** 从系统提示词中拆出工具定义，并把输入／输出 schema 格式化为可读 JSON。 */
+export function parsePromptSystem(content: string): PromptSystemView | null {
+  const match = content.match(/<tools>\s*([\s\S]*?)\s*<\/tools>/i);
+  if (!match) {
+    return null;
+  }
+  const tools = parseToolDefinitions(match[1]);
+  if (!tools.length) {
+    return null;
+  }
+  return {
+    tools,
+    remainder: content.replace(match[0], "").trim(),
+  };
 }
 
 /** 解析判官调用的 prompt 包装和内部业务载荷。 */
@@ -437,6 +467,47 @@ function parseMessageArray(value: unknown): PromptMessageView[] | null {
     messages.push({ role: item.role, content: item.content });
   }
   return messages;
+}
+
+/** 解析工具段落；新 trace 同时包含输入和输出 schema，旧 trace 允许仅有输入。 */
+function parseToolDefinitions(content: string): PromptToolView[] {
+  const tools: PromptToolView[] = [];
+  let current: PromptToolView | null = null;
+  for (const line of content.split(/\r?\n/)) {
+    const heading = line.match(/^\s*-\s*([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/);
+    if (heading) {
+      if (current) {
+        tools.push(current);
+      }
+      current = {
+        name: heading[1],
+        description: heading[2].trim(),
+        inputSchemaText: null,
+        outputSchemaText: null,
+      };
+      continue;
+    }
+    if (!current) {
+      continue;
+    }
+    const inputSchema = line.match(/^\s*输入 schema:\s*(.*)$/);
+    if (inputSchema) {
+      current.inputSchemaText = formatJson(inputSchema[1]);
+      continue;
+    }
+    const outputSchema = line.match(/^\s*输出 schema:\s*(.*)$/);
+    if (outputSchema) {
+      current.outputSchemaText = formatJson(outputSchema[1]);
+      continue;
+    }
+    if (line.trim()) {
+      current.description = `${current.description}\n${line.trim()}`.trim();
+    }
+  }
+  if (current) {
+    tools.push(current);
+  }
+  return tools;
 }
 
 /** 判断值是否为可索引对象。 */

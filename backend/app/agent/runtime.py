@@ -50,7 +50,7 @@ from app.retrieval.service import RetrievalFailure, RetrievalReadService, Retrie
 from app.tracing.models import TraceMode, TraceStatus
 from app.tracing.store import TraceSession, TraceSpanHandle, TraceStore, new_trace_id
 
-AGENT_LOOP_VERSION = "react-structured-v3"
+AGENT_LOOP_VERSION = "react-structured-v4"
 _PARTIAL_ANSWER_NOTICE = "**内容未完**：本次回答因运行预算限制提前结束，以上内容可能不完整。"
 _TRUNCATION_NOTICE_MARKERS = (
     "内容未完",
@@ -63,6 +63,7 @@ TOOL_ACTIVITY_LABELS = {
     "get_outline": "正在查看文档结构",
     "search_blocks": "正在检索相关段落",
     "list_blocks": "正在读取文档内容",
+    "get_blocks": "正在补全原文",
     "scan_term": "正在核对原文",
 }
 
@@ -2109,7 +2110,10 @@ class _AgentGraphExecution:
         }
 
     @staticmethod
-    def _render_user_prompt(question: str, history: list[str]) -> str:
+    def _render_user_prompt(
+        question: str,
+        history: list[str],
+    ) -> str:
         history_text = "\n\n".join(history) if history else "（空）"
         return f"<question>\n{question}\n</question>\n\n<history>\n{history_text}\n</history>"
 
