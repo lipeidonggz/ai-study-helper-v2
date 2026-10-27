@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.providers.chat import ChatMessage
 
-CITATION_SUPPORT_PROMPT_VERSION = "citation-rubric-v9"
+CITATION_SUPPORT_PROMPT_VERSION = "citation-rubric-v11"
 
 CITATION_SUPPORT_SYSTEM_PROMPT = """<role>
 你是本地文档问答的引用支持检查器。
@@ -76,6 +76,15 @@ CITATION_SUPPORT_SYSTEM_PROMPT = """<role>
     evidence_quotes 和 block_ids 始终只对应 focus_text 在当前上下文下的完整语义。
 15. 每个 occurrence 的 verdict 只能由该 occurrence 的 context 和 block_ids 决定；
     不得使用同批其他 occurrence 的内容或结论影响当前判断。
+16. 当 claim 表达收益与代价、原因与结果、条件与结果、阻止与允许、增减方向等关系时，
+    supported 还要求联合证据保留相同的关系与角色。若证据支持的关系方向相反、参与对象对调，
+    或把同一量化事实归入相反角色，应判 unsupported。
+17. 数字、比例、括号解释和修饰从句应跟随其明确修饰的事实；不得只因为数值本身看似有利
+    或不利，就把它改写成证据没有表达的角色。
+18. 连接词、破折号、冒号和标点可帮助理解句子结构，但不能单独证明因果、条件或收益代价关系。
+19. 答案显式使用“收益／代价／原因／结果／条件／增加／减少”等角色标签时，该标签属于 claim
+    命题的一部分。只有证据把相同事实放在相同角色下，才能判 supported；若证据表达相反角色，
+    即使实体和数字都一致，也必须判 unsupported。不得沿用 claim 的角色标签代替证据判断。
 </judgment_rules>
 
 <output>

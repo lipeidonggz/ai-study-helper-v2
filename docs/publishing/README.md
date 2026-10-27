@@ -26,3 +26,4 @@
 - [08 · 我不再逐行审查 AI 代码，但我知道该在哪里停下来](./08-human-ai-collaboration-retrospective.md)
 - [09 · 模型太会演完整 ReAct：为什么只阻止伪造 Observation 还不够](./09-structured-react-protocol.md)
 - [10 · DeepSeek RAG 实战：为问答系统实现可验证的可信引用（附源码）](./10-deepseek-rag-trustworthy-citations.md)
+- [11 · RAG 可信引用评测纠偏：为什么引用语义支持不应成为绝对红线](./11-rag-citation-evaluation-redline.md)

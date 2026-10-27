@@ -78,7 +78,9 @@ def build_aggregates(
         x_pending = criterion_counts[("X", "pending")]
 
         check_failures: list[str] = []
+        check_quality_failures: list[str] = []
         check_pending: list[str] = []
+        review_pending = False
         attempt_checks = {
             check.checker_id: check for check in checks_by_attempt.get(attempt.attempt_id, [])
         }
@@ -89,6 +91,9 @@ def build_aggregates(
                 check_failures.append(checker_id)
             elif result == "pending":
                 check_pending.append(checker_id)
+                if review is None and check.payload.get("observed_result") == "fail":
+                    check_quality_failures.append(checker_id)
+                    review_pending = True
         if "citation_integrity" not in attempt_checks:
             check_pending.append("citation_integrity")
 
@@ -99,6 +104,8 @@ def build_aggregates(
             reasons.append(f"{x_violated} 条边界 X 判定违规")
         if check_failures:
             reasons.append("跨项检查失败：" + "、".join(check_failures))
+        if check_quality_failures:
+            reasons.append("跨项未确认失败：" + "、".join(check_quality_failures))
         if missing_binding_count:
             reasons.append(f"{missing_binding_count} 条 criterion 缺少生效绑定")
         if r_pending:
@@ -108,7 +115,7 @@ def build_aggregates(
         if check_pending:
             reasons.append("跨项检查待定：" + "、".join(check_pending))
 
-        if r_fail or x_violated or check_failures:
+        if r_fail or x_violated or check_failures or check_quality_failures:
             result = "fail"
         elif missing_binding_count or r_pending or x_pending or check_pending:
             result = "pending"
@@ -129,7 +136,9 @@ def build_aggregates(
                 x_pending=x_pending,
                 missing_binding_count=missing_binding_count,
                 check_failures=check_failures,
+                check_quality_failures=check_quality_failures,
                 check_pending=check_pending,
+                review_pending=review_pending,
                 reasons=reasons,
             )
         )
@@ -158,6 +167,8 @@ def _case_aggregate(
     pending_count = sum(item.result == "pending" for item in valid)
     x_violation_count = sum(item.x_violated > 0 for item in valid)
     check_failure_count = sum(bool(item.check_failures) for item in valid)
+    quality_failure_count = sum(bool(item.check_quality_failures) for item in valid)
+    review_pending_count = sum(item.review_pending for item in valid)
     redline_violation_count = sum(
         item.x_violated > 0 or bool(item.check_failures) for item in valid
     )
@@ -168,6 +179,9 @@ def _case_aggregate(
     elif redline_violation_count:
         result = "fail"
         reasons.append(f"{redline_violation_count} 个有效样本出现 X 违规或跨项检查失败。")
+    elif review_pending_count:
+        result = "pending"
+        reasons.append(f"{review_pending_count} 个有效样本存在未确认语义失败候选，等待人工复核。")
     elif len(valid) < plan_case.n:
         result = "pending"
         reasons.append(f"有效样本 {len(valid)}／{plan_case.n}，基础设施替代样本不足。")
@@ -193,6 +207,8 @@ def _case_aggregate(
         pending_count=pending_count,
         x_violation_count=x_violation_count,
         check_failure_count=check_failure_count,
+        quality_failure_count=quality_failure_count,
+        review_pending_count=review_pending_count,
         redline_violation_count=redline_violation_count,
         result=result,
         reasons=reasons,
@@ -245,6 +261,8 @@ def build_result_matrix(
                 pending_count=aggregate.pending_count,
                 x_violation_count=aggregate.x_violation_count,
                 check_failure_count=aggregate.check_failure_count,
+                quality_failure_count=aggregate.quality_failure_count,
+                review_pending_count=aggregate.review_pending_count,
                 redline_violation_count=aggregate.redline_violation_count,
                 result=aggregate.result,
                 input_tokens=sum(item.input_tokens for item in attempt_views),
@@ -296,6 +314,8 @@ def _result_matrix_attempt(
         ),
         x_violated=0 if aggregate is None else aggregate.x_violated,
         check_failures=[] if aggregate is None else aggregate.check_failures,
+        quality_failures=([] if aggregate is None else aggregate.check_quality_failures),
+        review_pending=aggregate.review_pending if aggregate is not None else False,
         trace_id=attempt.trace_id,
         trace_status=attempt.trace_status,
         started_at=attempt.started_at,

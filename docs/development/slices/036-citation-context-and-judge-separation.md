@@ -1,5 +1,8 @@
 # 036 · 引用上下文包与判官职责拆分
 
+> 后续修订：[037](./037-citation-support-review-gate.md) 将关系三阶段判官移出默认门禁；
+> 本切片保留当时的上下文、职责拆分和校准实验记录。
+
 - 状态：已完成
 - 开始日期：2026-10-26
 - 关联设计：[03 用例与金标准](../design/03-cases-and-gold-standard.md)、[06 检索侧与 Agent](../design/06-retrieval-pure-agent.md)

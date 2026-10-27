@@ -281,9 +281,12 @@ interface JudgeOverrideTarget {
   ruleType: "R" | "X";
 }
 
-/** 逐 block 引用支持人工复核草稿。 */
+/** claim 级引用支持人工复核草稿；多个 block 作为同一证据组。 */
 interface CitationReviewDraft {
-  blockId: string;
+  occurrenceId: string;
+  contextId: string;
+  contextText: string;
+  blockIds: string[];
   verdict: "supported" | "unsupported" | "unknown";
   reason: string;
 }
@@ -292,6 +295,19 @@ interface CitationReviewDraft {
 interface CheckReviewTarget {
   check: CheckResultView;
   items: CitationReviewDraft[];
+}
+
+/** 合并历史人工复核差异后的单个 claim 引用组。 */
+interface EffectiveCitationGroup {
+  occurrenceId: string;
+  contextId: string;
+  contextText: string;
+  blockIds: string[];
+  verdict: string;
+  reason: string;
+  evidenceQuotes: string[];
+  reviewed: boolean;
+  reviewer: string;
 }
 
 /** 一条通用跨判定项确定性检查结果。 */
@@ -335,7 +351,9 @@ interface AttemptAggregateView {
   x_pending: number;
   missing_binding_count: number;
   check_failures: string[];
+  check_quality_failures: string[];
   check_pending: string[];
+  review_pending: boolean;
   reasons: string[];
 }
 
@@ -351,6 +369,8 @@ interface CaseAggregateView {
   pending_count: number;
   x_violation_count: number;
   check_failure_count: number;
+  quality_failure_count: number;
+  review_pending_count: number;
   redline_violation_count: number;
   result: "pass" | "fail" | "pending" | "exploratory";
   reasons: string[];
@@ -367,6 +387,8 @@ interface ResultMatrixAttemptView {
   redline_violated: boolean;
   x_violated: number;
   check_failures: string[];
+  quality_failures: string[];
+  review_pending: boolean;
   trace_id: string | null;
   trace_status: AttemptView["trace_status"];
   started_at: string;
@@ -395,6 +417,8 @@ interface ResultMatrixCaseView {
   pending_count: number;
   x_violation_count: number;
   check_failure_count: number;
+  quality_failure_count: number;
+  review_pending_count: number;
   redline_violation_count: number;
   result: CaseAggregateView["result"];
   input_tokens: number;
@@ -1037,6 +1061,9 @@ function statusText(status: string): string {
 
 /** 为结果矩阵中的 case 提供仅用于扫读的背景提示，不改变 case 聚合状态。 */
 function matrixCaseAttentionClass(matrixCase: ResultMatrixCaseView): string {
+  if (matrixCase.attempts.some((attempt) => attempt.review_pending)) {
+    return "matrix-case-attention-pending";
+  }
   if (matrixCase.attempts.some((attempt) => attempt.result === "fail")) {
     return "matrix-case-attention-fail";
   }
@@ -1076,6 +1103,8 @@ function diagnosticErrorText(code: string): string {
     judge_prompt_version_mismatch: "当前判官提示词版本与 criterion 不匹配",
     citation_block_missing: "答案引用的知识块不在本次检索证据中",
     citation_not_supported: "答案引用存在，但证据原文不支持对应主张",
+    citation_support_review_required: "语义判官发现红线候选，等待人工复核",
+    citation_semantic_redline_confirmed: "人工复核确认引用语义不支持答案",
     citation_support_unknown: "现有证据不足以判断引用是否支持答案",
     citation_support_input_too_large: "本次引用证据超过支持检查输入上限",
     citation_support_unit_too_large: "单个引用上下文或证据超过安全输入上限",
@@ -1140,20 +1169,9 @@ function checkStringList(check: CheckResultView, field: string): string[] {
     : [];
 }
 
-/** 读取引用判官的逐 block 结论。 */
-function checkCitationResults(
-  check: CheckResultView,
-): Array<{
-  blockId: string;
-  verdict: string;
-  reason: string;
-  evidenceQuotes: string[];
-}> {
-  return citationResultsFromPayload(check.payload);
-}
-
-/** 读取引用判官的 claim 引用组联合结论。 */
-function checkCitationGroups(check: CheckResultView): Array<{
+/** 从检查或人工复核 payload 中读取 claim 级联合支持结论。 */
+function citationGroupsFromPayload(payload: Record<string, unknown>): Array<{
+  occurrenceId: string;
   contextId: string;
   contextText: string;
   blockIds: string[];
@@ -1161,7 +1179,7 @@ function checkCitationGroups(check: CheckResultView): Array<{
   reason: string;
   evidenceQuotes: string[];
 }> {
-  const value = check.payload.claim_results;
+  const value = payload.claim_results;
   if (!Array.isArray(value)) {
     return [];
   }
@@ -1169,10 +1187,12 @@ function checkCitationGroups(check: CheckResultView): Array<{
     if (
       !item ||
       typeof item !== "object" ||
+      !("occurrence_id" in item) ||
       !("context_id" in item) ||
       !("block_ids" in item) ||
       !("verdict" in item) ||
       !("reason" in item) ||
+      typeof item.occurrence_id !== "string" ||
       typeof item.context_id !== "string" ||
       !Array.isArray(item.block_ids) ||
       !item.block_ids.every((blockId: unknown) => typeof blockId === "string") ||
@@ -1189,6 +1209,7 @@ function checkCitationGroups(check: CheckResultView): Array<{
         : [];
     return [
       {
+        occurrenceId: item.occurrence_id,
         contextId: item.context_id,
         contextText:
           "context_text" in item && typeof item.context_text === "string"
@@ -1203,47 +1224,47 @@ function checkCitationGroups(check: CheckResultView): Array<{
   });
 }
 
-/** 从检查或人工复核 payload 中读取逐 block 引用结论。 */
-function citationResultsFromPayload(
-  payload: Record<string, unknown>,
-): Array<{
-  blockId: string;
-  verdict: string;
-  reason: string;
-  evidenceQuotes: string[];
-}> {
-  const value = payload.citations;
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.flatMap((item) => {
-    if (
-      !item ||
-      typeof item !== "object" ||
-      !("block_id" in item) ||
-      !("verdict" in item) ||
-      !("reason" in item) ||
-      typeof item.block_id !== "string" ||
-      typeof item.verdict !== "string" ||
-      typeof item.reason !== "string"
-    ) {
-      return [];
-    }
-    const evidenceQuotes =
-      "evidence_quotes" in item &&
-      Array.isArray(item.evidence_quotes) &&
-      item.evidence_quotes.every((quote: unknown) => typeof quote === "string")
-        ? item.evidence_quotes
-        : [];
-    return [
+/** 把历史人工复核作为逐 claim delta 依次叠加到原判官结果。 */
+function effectiveCitationGroups(check: CheckResultView): EffectiveCitationGroup[] {
+  const groups = new Map<string, EffectiveCitationGroup>(
+    citationGroupsFromPayload(check.payload).map((group) => [
+      group.occurrenceId,
       {
-        blockId: item.block_id,
-        verdict: item.verdict,
-        reason: item.reason,
-        evidenceQuotes,
+        ...group,
+        reviewed: false,
+        reviewer: "",
       },
-    ];
-  });
+    ]),
+  );
+  const reviews =
+    evaluationRevision.value?.check_reviews.filter(
+      (review) =>
+        review.attempt_id === check.attempt_id &&
+        review.checker_id === check.checker_id,
+    ) ?? [];
+  for (const review of reviews) {
+    for (const submitted of citationGroupsFromPayload(review.payload)) {
+      const current = groups.get(submitted.occurrenceId);
+      if (!current) {
+        continue;
+      }
+      const hasChanged =
+        current.verdict !== submitted.verdict ||
+        current.reason !== submitted.reason;
+      if (!hasChanged) {
+        continue;
+      }
+      groups.set(submitted.occurrenceId, {
+        ...current,
+        ...submitted,
+        blockIds: current.blockIds,
+        evidenceQuotes: current.evidenceQuotes,
+        reviewed: true,
+        reviewer: review.reviewer,
+      });
+    }
+  }
+  return [...groups.values()];
 }
 
 /** 读取引用支持检查的调用审计。 */
@@ -1768,22 +1789,40 @@ function checkReviewReasonText(check: CheckResultView): string {
   return checkReviewFor(check)?.reason ?? "";
 }
 
-/** 返回当前生效的 CheckResult 状态。 */
-function effectiveCheckResult(check: CheckResultView): "pass" | "fail" | "pending" {
-  return checkReviewFor(check)?.result ?? check.result;
+/** 区分直接通过和人工复核后的生效状态，避免两类结果混在一起。 */
+function effectiveCheckStatusText(check: CheckResultView): string {
+  const review = checkReviewFor(check);
+  if (!review) {
+    return statusText(check.result);
+  }
+  return review.result === "pass"
+    ? "人工复核通过"
+    : review.result === "fail"
+      ? "人工确认失败"
+      : "人工复核待定";
 }
 
-/** 返回当前生效的逐 block 引用支持结论。 */
-function effectiveCitationResults(
-  check: CheckResultView,
-): ReturnType<typeof citationResultsFromPayload> {
+/** 为人工复核状态提供独立视觉标识。 */
+function effectiveCheckStatusClass(check: CheckResultView): string {
   const review = checkReviewFor(check);
   return review
-    ? citationResultsFromPayload(review.payload)
-    : citationResultsFromPayload(check.payload);
+    ? `result-human-${review.result}`
+    : `result-${check.result}`;
 }
 
-/** 打开 LLM 引用支持检查的逐 block 人工复核表单。 */
+/** 人工复核存在时使用人工记录的错误码，避免标题显示已经失效的原始错误。 */
+function effectiveCheckErrorText(check: CheckResultView): string {
+  const review = checkReviewFor(check);
+  const errorCode = review ? review.error_code : check.error_code;
+  return errorCode ? diagnosticErrorText(errorCode) : "无错误";
+}
+
+/** 统计实际由人工改判的 claim 数，未变化项继续归属原始判官。 */
+function humanReviewedCitationCount(check: CheckResultView): number {
+  return effectiveCitationGroups(check).filter((group) => group.reviewed).length;
+}
+
+/** 打开 LLM 引用支持检查的 claim 级人工复核表单。 */
 function openCheckReview(check: CheckResultView): void {
   const integrity = evaluationRevision.value?.checks.find(
     (item) =>
@@ -1794,25 +1833,25 @@ function openCheckReview(check: CheckResultView): void {
     checkReviewError.value = "缺少引用完整性事实，无法人工复核。";
     return;
   }
-  const blockIds = checkStringList(integrity, "cited_block_ids");
-  if (blockIds.length === 0) {
-    checkReviewError.value = "本次答案没有可复核的显式引用。";
+  const groups = effectiveCitationGroups(check);
+  if (groups.length === 0) {
+    checkReviewError.value = "本次答案没有可复核的 claim 级引用结论。";
     return;
   }
-  const current = new Map(
-    effectiveCitationResults(check).map((item) => [item.blockId, item]),
-  );
   checkReviewTarget.value = {
     check,
-    items: blockIds.map((blockId) => ({
-      blockId,
+    items: groups.map((group) => ({
+      occurrenceId: group.occurrenceId,
+      contextId: group.contextId,
+      contextText: group.contextText,
+      blockIds: group.blockIds,
       verdict:
-        current.get(blockId)?.verdict === "unsupported"
+        group.verdict === "unsupported"
           ? "unsupported"
-          : current.get(blockId)?.verdict === "unknown"
+          : group.verdict === "unknown"
             ? "unknown"
             : "supported",
-      reason: current.get(blockId)?.reason ?? "",
+      reason: group.reason,
     })),
   };
   checkReviewReason.value = "";
@@ -1820,7 +1859,7 @@ function openCheckReview(check: CheckResultView): void {
   checkReviewError.value = "";
 }
 
-/** 判断 LLM CheckResult 是否具备逐 block 人工复核条件。 */
+/** 判断 LLM CheckResult 是否具备 claim 级人工复核条件。 */
 function canReviewLlmCheck(check: CheckResultView): boolean {
   if (
     evaluationRevision.value?.status === "running" ||
@@ -1835,7 +1874,7 @@ function canReviewLlmCheck(check: CheckResultView): boolean {
   );
   return (
     integrity?.result === "pass" &&
-    checkStringList(integrity, "cited_block_ids").length > 0
+    effectiveCitationGroups(check).length > 0
   );
 }
 
@@ -1845,7 +1884,7 @@ function closeCheckReview(): void {
   checkReviewError.value = "";
 }
 
-/** 提交逐 block 人工引用支持复核。 */
+/** 提交 claim 级人工引用支持复核。 */
 async function submitCheckReview(): Promise<void> {
   const target = checkReviewTarget.value;
   const revision = evaluationRevision.value;
@@ -1853,7 +1892,7 @@ async function submitCheckReview(): Promise<void> {
     return;
   }
   if (target.items.some((item) => !item.reason.trim())) {
-    checkReviewError.value = "每个引用 block 都必须填写复核原因。";
+    checkReviewError.value = "每个 claim 引用组都必须填写复核原因。";
     return;
   }
   checkReviewBusy.value = true;
@@ -1866,8 +1905,9 @@ async function submitCheckReview(): Promise<void> {
         body: JSON.stringify({
           attempt_id: target.check.attempt_id,
           checker_id: target.check.checker_id,
-          citations: target.items.map((item) => ({
-            block_id: item.blockId,
+          claims: target.items.map((item) => ({
+            occurrence_id: item.occurrenceId,
+            block_ids: item.blockIds,
             verdict: item.verdict,
             reason: item.reason.trim(),
             evidence_quotes: [],
@@ -4293,7 +4333,11 @@ onBeforeUnmount(() => {
                     <span>
                       X 违规 {{ matrixCase.x_violation_count }} ·
                       跨项失败 {{ matrixCase.check_failure_count }} ·
+                      未确认失败 {{ matrixCase.quality_failure_count }} ·
                       红线失败 {{ matrixCase.redline_violation_count }}
+                    </span>
+                    <span v-if="matrixCase.review_pending_count">
+                      待复核 {{ matrixCase.review_pending_count }}
                     </span>
                     <span>
                       {{ formatTokens(matrixCase.input_tokens + matrixCase.output_tokens) }} token
@@ -4351,7 +4395,24 @@ onBeforeUnmount(() => {
                           跨项失败 {{ attempt.check_failures.join("、") }}
                         </span>
                       </template>
-                      <span v-else>无红线</span>
+                      <span
+                        v-if="attempt.quality_failures.length"
+                        class="eval-matrix-warning"
+                      >
+                        未确认失败 {{ attempt.quality_failures.join("、") }}
+                      </span>
+                      <span v-if="attempt.review_pending" class="eval-matrix-warning">
+                        等待人工复核
+                      </span>
+                      <span
+                        v-if="
+                          attempt.x_violated === 0 &&
+                          !attempt.check_failures.length &&
+                          !attempt.quality_failures.length
+                        "
+                      >
+                        无红线
+                      </span>
                       <span>
                         {{ formatTokens(attempt.input_tokens + attempt.output_tokens) }} token
                       </span>
@@ -4961,7 +5022,9 @@ onBeforeUnmount(() => {
               <article>
                 <strong>引用支持</strong>
                 <p>
-                  检查引用内容能不能证明答案。模型判官会逐个查看被引用的证据原文，判断它是否支持答案中的对应说法。只有引用完整且答案包含显式引用时才会执行。
+                  模型判官按 claim 联合查看被引用的证据原文。判为 unsupported
+                  时显示为未确认的普通失败，但不会自动成为红线；人工确认后才阻断。
+                  判为 unknown 时保持待定。只有引用完整且答案包含显式引用时才会执行。
                 </p>
               </article>
             </div>
@@ -4976,28 +5039,61 @@ onBeforeUnmount(() => {
                   <strong :title="check.checker_id">
                     {{ checkerText(check.checker_id) }}
                   </strong>
-                  <span :class="`result-${effectiveCheckResult(check)}`">
-                    {{ statusText(effectiveCheckResult(check)) }}
+                  <span :class="effectiveCheckStatusClass(check)">
+                    {{ effectiveCheckStatusText(check) }}
                   </span>
                   <small>
                     {{ caseIdForAttempt(check.attempt_id) }} ·
-                    {{
-                      check.error_code
-                        ? diagnosticErrorText(check.error_code)
-                        : "无错误"
-                    }}
+                    {{ effectiveCheckErrorText(check) }}
                     · {{ checkExecutorVersionText(check) }}
                     <template v-if="checkReviewFor(check)">
                       · 人工复核：{{ checkReviewReviewerText(check) }}
+                      <template v-if="check.checker_id === 'citation_support'">
+                        · 改判 {{ humanReviewedCitationCount(check) }} /
+                        {{ effectiveCitationGroups(check).length }} claim
+                      </template>
                     </template>
                   </small>
                 </summary>
                 <div class="eval-check-detail">
-                  <p v-if="checkReviewFor(check)">
-                    人工复核原因：{{ checkReviewReasonText(check) }}
-                  </p>
+                  <section
+                    v-if="checkReviewFor(check)"
+                    class="eval-check-human-review"
+                  >
+                    <header>
+                      <strong>人工复核结论</strong>
+                      <span :class="effectiveCheckStatusClass(check)">
+                        {{ effectiveCheckStatusText(check) }}
+                      </span>
+                    </header>
+                    <p>
+                      <strong>复核人：</strong>
+                      {{ checkReviewReviewerText(check) }}
+                    </p>
+                    <p>
+                      <strong>整体复核说明：</strong>
+                      {{ checkReviewReasonText(check) || "未填写" }}
+                    </p>
+                  </section>
+                  <details v-if="checkReviewFor(check)" class="eval-check-original-result">
+                    <summary>
+                      原始判官结果：{{ statusText(check.result) }} ·
+                      {{ check.error_code ? diagnosticErrorText(check.error_code) : "无错误" }}
+                    </summary>
+                    <p class="eval-check-audit-note">
+                      原始判官事实仅用于审计；上方人工复核结论才是当前生效结果。
+                    </p>
+                    <p
+                      v-if="
+                        typeof check.payload.reason === 'string' &&
+                        check.payload.reason
+                      "
+                    >
+                      {{ check.payload.reason }}
+                    </p>
+                  </details>
                   <p
-                    v-if="
+                    v-else-if="
                       typeof check.payload.reason === 'string' &&
                       check.payload.reason
                     "
@@ -5028,38 +5124,34 @@ onBeforeUnmount(() => {
                   </template>
                   <template v-if="check.checker_id === 'citation_support'">
                     <article
-                      v-for="group in checkReviewFor(check)
-                        ? []
-                        : checkCitationGroups(check)"
-                      :key="group.contextId"
+                      v-for="group in effectiveCitationGroups(check)"
+                      :key="group.occurrenceId"
                       class="eval-citation-result"
                     >
                       <header>
-                        <code>{{ group.contextId }}</code>
-                        <span>{{ statusText(group.verdict) }}</span>
+                        <code>{{ group.occurrenceId }}</code>
+                        <span>
+                          {{
+                            group.reviewed
+                              ? `人工复核：${statusText(group.verdict)}`
+                              : statusText(group.verdict)
+                          }}
+                        </span>
                       </header>
                       <p v-if="group.contextText">{{ group.contextText }}</p>
-                      <p>引用组：{{ group.blockIds.join("、") }}</p>
-                      <p>{{ group.reason }}</p>
+                      <p>
+                        联合证据：{{ group.blockIds.join("、") }}
+                        <span v-if="group.contextId">· {{ group.contextId }}</span>
+                      </p>
+                      <p>
+                        <strong>
+                          {{ group.reviewed ? "人工逐 claim 理由：" : "判官理由：" }}
+                        </strong>
+                        {{ group.reason }}
+                      </p>
+                      <small v-if="group.reviewed">复核人：{{ group.reviewer }}</small>
                       <blockquote
                         v-for="(quote, index) in group.evidenceQuotes"
-                        :key="index"
-                      >
-                        {{ quote }}
-                      </blockquote>
-                    </article>
-                    <article
-                      v-for="citation in effectiveCitationResults(check)"
-                      :key="citation.blockId"
-                      class="eval-citation-result"
-                    >
-                      <header>
-                        <code>{{ citation.blockId }}</code>
-                        <span>逐 block 投影：{{ statusText(citation.verdict) }}</span>
-                      </header>
-                      <p>{{ citation.reason }}</p>
-                      <blockquote
-                        v-for="(quote, index) in citation.evidenceQuotes"
                         :key="index"
                       >
                         {{ quote }}
@@ -5087,7 +5179,7 @@ onBeforeUnmount(() => {
                       class="eval-secondary-button"
                       @click="openCheckReview(check)"
                     >
-                      人工复核逐 block 结论
+                      人工复核 claim 支持结论
                     </button>
                     <form
                       v-if="
@@ -5112,10 +5204,12 @@ onBeforeUnmount(() => {
                       </label>
                       <article
                         v-for="item in checkReviewTarget.items"
-                        :key="item.blockId"
+                        :key="item.occurrenceId"
                         class="eval-review-item"
                       >
-                        <code>{{ item.blockId }}</code>
+                        <strong>{{ item.occurrenceId }}</strong>
+                        <p v-if="item.contextText">{{ item.contextText }}</p>
+                        <p>联合证据：{{ item.blockIds.join("、") }}</p>
                         <select v-model="item.verdict">
                           <option value="supported">有证据支持</option>
                           <option value="unsupported">无证据支持</option>
@@ -5124,7 +5218,7 @@ onBeforeUnmount(() => {
                         <input
                           v-model="item.reason"
                           type="text"
-                          placeholder="该 block 的复核原因"
+                          placeholder="该 claim 组的复核原因"
                           required
                         />
                       </article>
@@ -5728,20 +5822,20 @@ onBeforeUnmount(() => {
               >
                 <div>
                   <strong>{{ checkerText(check.checker_id) }}</strong>
-                  <span :class="`result-${effectiveCheckResult(check)}`">
-                    {{ statusText(effectiveCheckResult(check)) }}
+                  <span :class="effectiveCheckStatusClass(check)">
+                    {{ effectiveCheckStatusText(check) }}
                   </span>
                 </div>
                 <small>
-                  {{ check.error_code ? diagnosticErrorText(check.error_code) : "无错误" }}
+                  {{ effectiveCheckErrorText(check) }}
                   · {{ checkExecutorVersionText(check) }}
                 </small>
                 <small v-if="citationBatchSummary(check)">
                   {{ citationBatchSummary(check) }}
                 </small>
-                <p v-if="checkReviewFor(check)">
-                  人工复核：{{ checkReviewReviewerText(check) }} ·
-                  {{ checkReviewReasonText(check) }}
+                <p v-if="checkReviewFor(check)" class="eval-check-review-summary">
+                  <strong>人工复核：</strong>
+                  {{ checkReviewReviewerText(check) }} · {{ checkReviewReasonText(check) }}
                 </p>
                 <p
                   v-else-if="typeof check.payload.reason === 'string' && check.payload.reason"
@@ -6969,6 +7063,44 @@ onBeforeUnmount(() => {
   margin: 0;
 }
 
+.eval-check-human-review {
+  display: grid;
+  gap: 5px;
+  border: 1px solid #b7d1c0;
+  border-radius: 9px;
+  padding: 9px 10px;
+  color: #355343;
+  background: #edf7f0;
+}
+
+.eval-check-human-review header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.eval-check-original-result {
+  border-radius: 8px;
+  padding: 7px 9px;
+  color: #66736b;
+  background: #f3f5f3;
+}
+
+.eval-check-original-result > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.eval-check-audit-note {
+  color: #7a6550;
+}
+
+.eval-check-review-summary {
+  border-left: 3px solid #72a17f;
+  padding-left: 8px;
+}
+
 .eval-check-notice {
   margin: 8px 0 0;
   border-radius: 8px;
@@ -7035,6 +7167,34 @@ onBeforeUnmount(() => {
 .result-pending {
   color: #895e20;
   font-weight: 700;
+}
+
+.result-human-pass,
+.result-human-fail,
+.result-human-pending {
+  width: fit-content;
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.result-human-pass {
+  color: #1f603e;
+  background: #dcefe4;
+  box-shadow: inset 0 0 0 1px #a7cdb5;
+}
+
+.result-human-fail {
+  color: #8d2f2f;
+  background: #f8dfdc;
+  box-shadow: inset 0 0 0 1px #e0b2ad;
+}
+
+.result-human-pending {
+  color: #7b551c;
+  background: #faedcc;
+  box-shadow: inset 0 0 0 1px #dfc27d;
 }
 
 .result-exploratory {
@@ -8008,6 +8168,11 @@ onBeforeUnmount(() => {
 
 .eval-matrix-redline {
   color: #9a3636;
+  font-weight: 700;
+}
+
+.eval-matrix-warning {
+  color: #8a5a16;
   font-weight: 700;
 }
 

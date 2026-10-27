@@ -454,20 +454,21 @@ class JudgeOverrideRequest(BaseModel):
 
 
 class CitationReviewItem(BaseModel):
-    """人工对一个引用 block 的语义支持结论。"""
+    """人工对一个 claim 及其联合 evidence blocks 的语义支持结论。"""
 
-    block_id: str = Field(min_length=1)
+    occurrence_id: str = Field(min_length=1)
+    block_ids: list[str] = Field(min_length=1)
     verdict: Literal["supported", "unsupported", "unknown"]
     reason: str = Field(min_length=1)
     evidence_quotes: list[str] = Field(default_factory=list)
 
 
 class CheckReviewRequest(BaseModel):
-    """人工修正一个 LLM 型 CheckResult。"""
+    """人工修正一个 LLM CheckResult；claims 是完整快照，服务端只追加实际变化项。"""
 
     attempt_id: str
     checker_id: str = Field(min_length=1, max_length=96)
-    citations: list[CitationReviewItem] = Field(min_length=1)
+    claims: list[CitationReviewItem] = Field(min_length=1)
     reason: str = Field(min_length=1)
     reviewer: str = Field(min_length=1, max_length=128)
 
@@ -516,7 +517,9 @@ class AttemptAggregateView(BaseModel):
     x_pending: int
     missing_binding_count: int
     check_failures: list[str] = Field(default_factory=list)
+    check_quality_failures: list[str] = Field(default_factory=list)
     check_pending: list[str] = Field(default_factory=list)
+    review_pending: bool = False
     reasons: list[str] = Field(default_factory=list)
 
 
@@ -533,6 +536,8 @@ class CaseAggregateView(BaseModel):
     pending_count: int
     x_violation_count: int = 0
     check_failure_count: int = 0
+    quality_failure_count: int = 0
+    review_pending_count: int = 0
     redline_violation_count: int
     result: Literal["pass", "fail", "pending", "exploratory"]
     reasons: list[str] = Field(default_factory=list)
@@ -550,6 +555,8 @@ class ResultMatrixAttemptView(BaseModel):
     redline_violated: bool
     x_violated: int = 0
     check_failures: list[str] = Field(default_factory=list)
+    quality_failures: list[str] = Field(default_factory=list)
+    review_pending: bool = False
     trace_id: str | None
     trace_status: Literal["complete", "partial", "dropped", "missing"]
     started_at: str
@@ -579,6 +586,8 @@ class ResultMatrixCaseView(BaseModel):
     pending_count: int
     x_violation_count: int = 0
     check_failure_count: int = 0
+    quality_failure_count: int = 0
+    review_pending_count: int = 0
     redline_violation_count: int
     result: Literal["pass", "fail", "pending", "exploratory"]
     input_tokens: int

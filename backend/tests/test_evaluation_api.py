@@ -67,7 +67,7 @@ def test_evaluation_api_exposes_seeded_suite_without_product_routes(
                 headers={"x-launch-token": TOKEN},
             )
             assert citation_prompt.status_code == 200
-            assert citation_prompt.json()["version"] == "citation-rubric-v9"
+            assert citation_prompt.json()["version"] == "citation-rubric-v11"
             current_baseline = await client.get(
                 "/api/eval/baselines/current?suite_id=design03&run_type=quality",
                 headers={"x-launch-token": TOKEN},
