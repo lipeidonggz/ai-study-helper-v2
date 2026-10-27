@@ -584,7 +584,10 @@ class _AgentGraphExecution:
         if not answer:
             return state
         evidence_blocks = [
-            CitationEvidenceBlock.model_validate(item) for item in state.get("evidence_blocks", [])
+            CitationEvidenceBlock.model_validate(
+                {key: value for key, value in item.items() if not key.startswith("_")}
+            )
+            for item in state.get("evidence_blocks", [])
         ]
         events = list(state.get("events", []))
         if self._cancellation.is_cancelled:
@@ -1809,8 +1812,8 @@ class _AgentGraphExecution:
                     (state.get("next_context_estimate") or 0) + budget_tokens
                 ),
                 "limitations": limitations,
-                "sources": merged_sources,
-                "evidence_blocks": merged_evidence,
+                "sources": state.get("sources", []),
+                "evidence_blocks": state.get("evidence_blocks", []),
                 "current_turn_span": None,
             }
         history.append(observation_text)
@@ -2151,7 +2154,7 @@ def _source_refs(tool: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _evidence_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """提取本次工具返回的完整可引用证据，供后置 annotation 使用。"""
+    """提取本次工具返回的可引用证据，并标记全文或摘录来源。"""
 
     candidates = payload.get("blocks")
     if not isinstance(candidates, list):
@@ -2165,6 +2168,7 @@ def _evidence_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         block_id = candidate.get("block_id")
         text = candidate.get("text")
+        text_is_complete = isinstance(text, str)
         if not isinstance(text, str):
             text = candidate.get("snippet")
         if (
@@ -2183,6 +2187,9 @@ def _evidence_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "source_label": str(candidate.get("source_label") or ""),
                 "section_path": [str(value) for value in candidate.get("section_path", [])],
                 "text": text,
+                # list_blocks/get_blocks/search_blocks 的 text 是全文；
+                # scan_term 的 snippet 只是命中窗口。
+                "_evidence_text_priority": 2 if text_is_complete else 1,
             }
         )
     return evidence
@@ -2192,15 +2199,24 @@ def _merge_evidence(
     existing: list[dict[str, Any]],
     incoming: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """按 block_id 合并证据正文并保留首次出现顺序。"""
+    """按 block_id 合并证据；全文必须覆盖先出现但被截断的 snippet。"""
 
     merged = list(existing)
-    seen = {item.get("block_id") for item in merged if isinstance(item, dict)}
+    index_by_id = {
+        item.get("block_id"): index for index, item in enumerate(merged) if isinstance(item, dict)
+    }
     for item in incoming:
         block_id = item["block_id"]
-        if block_id not in seen:
+        existing_index = index_by_id.get(block_id)
+        if existing_index is None:
             merged.append(item)
-            seen.add(block_id)
+            index_by_id[block_id] = len(merged) - 1
+            continue
+        current = merged[existing_index]
+        current_priority = int(current.get("_evidence_text_priority", 0))
+        incoming_priority = int(item.get("_evidence_text_priority", 0))
+        if incoming_priority > current_priority:
+            merged[existing_index] = item
     return merged
 
 

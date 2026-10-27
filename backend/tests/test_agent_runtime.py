@@ -15,6 +15,8 @@ from app.agent.runtime import (
     AgentRuntime,
     RunCancellationToken,
     _AgentGraphExecution,
+    _evidence_blocks,
+    _merge_evidence,
 )
 from app.agent.tool_adapter import RetrievalToolAdapter, ToolUnavailableError
 from app.main import create_app
@@ -32,6 +34,39 @@ from app.tracing.store import TraceStore
 
 TOKEN = "agent-runtime-test-token"
 TRACE_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+
+
+def test_full_evidence_text_replaces_earlier_snippet_for_same_block() -> None:
+    snippet = _evidence_blocks(
+        {
+            "matches": [
+                {
+                    "block_id": "block_1",
+                    "doc_id": "doc_1",
+                    "doc_title": "文档",
+                    "snippet": "…真正证据前后的截断内容…",
+                }
+            ]
+        }
+    )
+    full = _evidence_blocks(
+        {
+            "blocks": [
+                {
+                    "block_id": "block_1",
+                    "doc_id": "doc_1",
+                    "doc_title": "文档",
+                    "text": "前文。真正证据完整存在。后文。",
+                }
+            ]
+        }
+    )
+
+    merged = _merge_evidence(snippet, full)
+
+    assert len(merged) == 1
+    assert merged[0]["text"] == "前文。真正证据完整存在。后文。"
+    assert merged[0]["_evidence_text_priority"] == 2
 
 
 def _html() -> bytes:
