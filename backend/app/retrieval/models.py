@@ -71,6 +71,27 @@ class GetOutlineResult(BaseModel):
     documents: list[RetrievalOutlineItem]
 
 
+class RetrievalOutlineErrorItem(BaseModel):
+    """`get_outline` 对单个文档失败时返回的公开结果项。"""
+
+    doc_id: str
+    error: RetrievalErrorPayload
+
+
+class GetOutlinePayload(BaseModel):
+    """`get_outline` 对模型返回的最终成功 payload。"""
+
+    documents: list[RetrievalDocumentOutline | RetrievalOutlineErrorItem]
+
+
+class RetrievalSectionContext(BaseModel):
+    """随 block 返回的最小章节结构上下文。"""
+
+    section_depth: int = Field(ge=0)
+    has_child_sections: bool
+    document_section_count: int = Field(ge=1)
+
+
 class RetrievalBlock(BaseModel):
     """提供给检索上层的完整证据块。"""
 
@@ -79,11 +100,20 @@ class RetrievalBlock(BaseModel):
     doc_title: str
     source_label: str
     section_path: list[str]
+    section_context: RetrievalSectionContext
     text: str
 
 
 class ListBlocksResult(BaseModel):
     """一篇文档在指定章节范围内的完整块枚举。"""
+
+    blocks: list[RetrievalBlock]
+    total: int = Field(ge=0)
+    scope: Literal["document", "section", "subtree"]
+
+
+class GetBlocksResult(BaseModel):
+    """按 block_id 精确补全的一组完整块。"""
 
     blocks: list[RetrievalBlock]
     total: int = Field(ge=0)
@@ -97,6 +127,7 @@ class ScanMatch(BaseModel):
     doc_title: str
     source_label: str
     section_path: list[str]
+    section_context: RetrievalSectionContext
     snippet: str
 
 
@@ -113,3 +144,9 @@ class SearchBlocksResult(BaseModel):
 
     blocks: list[RetrievalBlock]
     empty_reason: Literal["no_match", "scope_empty", "collection_empty"] | None = None
+
+
+class RetrievalToolErrorPayload(BaseModel):
+    """工具业务失败时返回给模型的公共 payload。"""
+
+    error: RetrievalErrorPayload

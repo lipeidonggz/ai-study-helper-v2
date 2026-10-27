@@ -8,7 +8,7 @@
 
 - 阶段：实现阶段，027 claim-aware 引用标注已完成，028 评测失败分类拆分已实现。
 - 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付、检索与 Agent 运行链、流式问答、本地 trace 诊断和逐 criterion 评测判定已实现。
-- 当前工作：036 已完成 claim 上下文与判官职责基线；037 的语义支持“候选 + 人工复核”决策已确认，待人工验收与反向解释。
+- 当前工作：037 已合并；038–041 已完成 citation evidence 合并、finish 序列恢复、证据作用域、工具输出契约、精确 block 补全和显式章节范围，等待合并。
 
 ## 设计基线
 
@@ -61,6 +61,10 @@
 - [0011 · 使用单 JSON 结构化 ReAct 响应协议](decisions/0011-structured-react-response-protocol.md)
 - [0012 · 由 Harness 组织 claim 级引用标注](decisions/0012-harness-owned-claim-citation-annotation.md)
 - [0013 · 引用语义支持采用候选与人工复核门禁](decisions/0013-semantic-citation-support-review-gate.md)
+- [0014 · 同一证据块优先使用全文而不是命中片段](decisions/0014-prefer-full-evidence-over-snippets.md)
+- [0015 · 有界恢复合法 finish 后的序列化尾随内容](decisions/0015-bounded-finish-serialization-recovery.md)
+- [0016 · 证据覆盖范围不得小于结论影响范围](decisions/0016-evidence-scope-cannot-exceed-tool-results.md)
+- [0017 · 精确 block 读取与显式章节范围](decisions/0017-exact-block-read-and-explicit-section-scope.md)
 - [0008 · Harness 统一计算 Tool Observation token](decisions/0008-harness-owned-result-token-accounting.md)
 - [切片控制契约与证据包模板](development/slices/TEMPLATE.md)
 - [001 · 桌面 sidecar 最小启动链（已完成）](development/slices/001-desktop-sidecar-bootstrap.md)
@@ -126,6 +130,10 @@
 - [035 · Agent 因果关系与权衡保真（暂停，等待 036 判官冻结）](development/slices/035-agent-causal-relation-fidelity.md)
 - [036 · 引用上下文包与判官职责拆分（已完成）](development/slices/036-citation-context-and-judge-separation.md)
 - [037 · 引用语义支持候选与人工复核门禁（待确认）](development/slices/037-citation-support-review-gate.md)
+- [038 · 引用证据全文覆盖截断片段（已完成）](development/slices/038-citation-evidence-full-text-merge.md)
+- [039 · 结构化 finish 尾随序列恢复（已完成）](development/slices/039-structured-finish-recovery.md)
+- [040 · Agent 通用证据作用域约束（已完成）](development/slices/040-agent-evidence-scope.md)
+- [041 · Agent 工具输出契约与精确读取范围（已完成）](development/slices/041-agent-tool-output-and-exact-scope.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库

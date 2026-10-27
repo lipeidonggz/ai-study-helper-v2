@@ -15,6 +15,8 @@ from app.agent.runtime import (
     AgentRuntime,
     RunCancellationToken,
     _AgentGraphExecution,
+    _evidence_blocks,
+    _merge_evidence,
 )
 from app.agent.tool_adapter import RetrievalToolAdapter, ToolUnavailableError
 from app.main import create_app
@@ -32,6 +34,39 @@ from app.tracing.store import TraceStore
 
 TOKEN = "agent-runtime-test-token"
 TRACE_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+
+
+def test_full_evidence_text_replaces_earlier_snippet_for_same_block() -> None:
+    snippet = _evidence_blocks(
+        {
+            "matches": [
+                {
+                    "block_id": "block_1",
+                    "doc_id": "doc_1",
+                    "doc_title": "文档",
+                    "snippet": "…真正证据前后的截断内容…",
+                }
+            ]
+        }
+    )
+    full = _evidence_blocks(
+        {
+            "blocks": [
+                {
+                    "block_id": "block_1",
+                    "doc_id": "doc_1",
+                    "doc_title": "文档",
+                    "text": "前文。真正证据完整存在。后文。",
+                }
+            ]
+        }
+    )
+
+    merged = _merge_evidence(snippet, full)
+
+    assert len(merged) == 1
+    assert merged[0]["text"] == "前文。真正证据完整存在。后文。"
+    assert merged[0]["_evidence_text_priority"] == 2
 
 
 def _html() -> bytes:
@@ -492,7 +527,7 @@ def test_agent_runtime_persists_parented_trace_with_tool_and_budget_data(
     assert any(event.name == "budget.check" for turn in turns for event in turn.events)
     assert detail.manifest.trace_status == "complete"
     assert detail.manifest.replay_scope == "retrieval"
-    assert detail.manifest.versions["agent_loop_version"] == "react-structured-v3"
+    assert detail.manifest.versions["agent_loop_version"] == "react-structured-v4"
     assert detail.manifest.model_calls == result.model_calls == 3
     citation_span = next(span for span in detail.spans if span.name == "citation.annotation")
     assert citation_span.status == "ok"
@@ -663,7 +698,7 @@ def test_repeated_protocol_errors_force_finalization_then_succeed(
     )
     finalization_prompt = chat_provider.requests[2][0].content
     assert "<finalization_mode>" in finalization_prompt
-    assert "工具已禁用" in finalization_prompt
+    assert '"type":"finish"' in finalization_prompt
 
 
 def test_protocol_loop_terminates_as_product_failure_and_preserves_trace(
@@ -673,7 +708,9 @@ def test_protocol_loop_terminates_as_product_failure_and_preserves_trace(
     store = TraceStore(tmp_path)
     runtime = AgentRuntime(
         tmp_path,
-        chat_provider=FakeChatProvider(["not json", "still not json", "invalid finish"]),
+        chat_provider=FakeChatProvider(
+            ["not json", "still not json", '{"type":"finish","answer":']
+        ),
         embedding_provider=embedding_provider,
         trace_store=store,
         trace_mode="full",
@@ -965,24 +1002,45 @@ def test_tool_adapter_covers_all_deterministic_tools_and_rejects_invalid_input(
     reader = RetrievalReadService(tmp_path).bind_current()
     adapter = RetrievalToolAdapter(reader, embedding_provider)
 
-    async def run() -> tuple[dict, dict, dict, dict]:
+    async def run() -> tuple[dict, dict, dict, dict, dict, dict]:
         documents = await adapter.execute("list_documents", {})
         doc_id = documents.payload["documents"][0]["doc_id"]
         outline = await adapter.execute("get_outline", {"doc_ids": [doc_id]})
         blocks = await adapter.execute("list_blocks", {"doc_id": doc_id})
         scanned = await adapter.execute("scan_term", {"term": "MCP", "doc_ids": [doc_id]})
+        block_id = scanned.payload["matches"][0]["block_id"]
+        exact = await adapter.execute("get_blocks", {"block_ids": [block_id]})
+        invalid_scope = await adapter.execute(
+            "list_blocks",
+            {
+                "doc_id": doc_id,
+                "section_paths": [outline.payload["documents"][0]["sections"][0]["path"]],
+            },
+        )
         invalid = await adapter.execute("scan_term", {"term": "MCP", "extra": True})
         assert invalid.payload["error"]["code"] == "invalid_argument"
+        assert invalid_scope.payload["error"]["code"] == "invalid_argument"
         with pytest.raises(ToolUnavailableError):
             await adapter.execute("write_file", {})
-        return documents.payload, outline.payload, blocks.payload, scanned.payload
+        return (
+            documents.payload,
+            outline.payload,
+            blocks.payload,
+            scanned.payload,
+            exact.payload,
+            invalid_scope.payload,
+        )
 
-    documents, outline, blocks, scanned = asyncio.run(run())
+    documents, outline, blocks, scanned, exact, invalid_scope = asyncio.run(run())
 
     assert documents["total"] == 1
     assert outline["documents"][0]["doc_title"] == "Agent 文档"
     assert blocks["total"] > 0
+    assert blocks["scope"] == "document"
     assert scanned["count"] == 1
+    assert exact["total"] == 1
+    assert exact["blocks"][0]["block_id"] == scanned["matches"][0]["block_id"]
+    assert invalid_scope["error"]["code"] == "invalid_argument"
     assert "result_tokens" not in documents
 
 
@@ -1089,7 +1147,7 @@ def test_protected_agent_api_runs_with_injected_providers(tmp_path: Path) -> Non
     assert result["answer"] == "API 运行成功"
     assert result["answer_completeness"] == "complete"
     assert result["limitations"] == []
-    assert result["prompt_bundle_version"] == "chat-v7"
+    assert result["prompt_bundle_version"] == "chat-v13"
     assert result["observation_token_counter_version"] == "chat-budget-conservative-v1"
     assert result["citation_annotations"]["status"] == "not_applicable"
     assert result["citation_annotation_model_calls"] == 0

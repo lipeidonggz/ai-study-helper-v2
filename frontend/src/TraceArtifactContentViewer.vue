@@ -7,6 +7,7 @@ import {
   parseJudgeOutput,
   parseModelOutput,
   parsePromptMessages,
+  parsePromptSystem,
   parseUserPrompt,
   textStats,
   type PromptMessageView,
@@ -87,6 +88,11 @@ function judgeVerdictLabel(verdict: string): string {
 /** 返回用户消息中拆分后的题目和历史；无法识别时由模板回退原文。 */
 function userPrompt(message: PromptMessageView): ReturnType<typeof parseUserPrompt> {
   return message.role === "user" ? parseUserPrompt(message.content) : null;
+}
+
+/** 返回系统提示词中的结构化工具定义；其它角色返回 null。 */
+function systemPrompt(message: PromptMessageView): ReturnType<typeof parsePromptSystem> {
+  return message.role === "system" ? parsePromptSystem(message.content) : null;
 }
 
 /** 复制文本并短暂显示复制状态。 */
@@ -173,6 +179,12 @@ function copyLabel(key: string): string {
         <summary>
           <strong>{{ roleLabel(message.role) }}</strong>
           <span>{{ textStats(message.content) }}</span>
+          <span
+            v-if="systemPrompt(message)"
+            class="prompt-message-badge"
+          >
+            {{ systemPrompt(message)?.tools.length }} 个工具定义
+          </span>
           <button
             type="button"
             @click.prevent.stop="
@@ -182,10 +194,50 @@ function copyLabel(key: string): string {
             {{ copyLabel(`message-${index}`) }}
           </button>
         </summary>
-        <div
-          v-if="userPrompt(message)"
-          class="prompt-user-sections"
-        >
+        <div v-if="systemPrompt(message)" class="prompt-system-sections">
+          <section class="prompt-tool-section">
+            <div class="prompt-tool-section-heading">
+              <h4>工具定义</h4>
+              <span>{{ systemPrompt(message)?.tools.length }} 个</span>
+            </div>
+            <details
+              v-for="(tool, toolIndex) in systemPrompt(message)?.tools ?? []"
+              :key="`${tool.name}-${toolIndex}`"
+              class="prompt-tool-card"
+            >
+              <summary>
+                <code>{{ tool.name }}</code>
+                <span>{{ tool.description }}</span>
+              </summary>
+              <p>{{ tool.description }}</p>
+              <details
+                v-if="tool.inputSchemaText"
+                class="prompt-tool-schema"
+              >
+                <summary>输入 schema</summary>
+                <pre>{{ tool.inputSchemaText }}</pre>
+              </details>
+              <details
+                v-if="tool.outputSchemaText"
+                class="prompt-tool-schema"
+              >
+                <summary>输出 schema</summary>
+                <pre>{{ tool.outputSchemaText }}</pre>
+              </details>
+              <p
+                v-if="!tool.outputSchemaText"
+                class="artifact-muted"
+              >
+                该历史 trace 的模型输入未包含输出 schema。
+              </p>
+            </details>
+          </section>
+          <details class="prompt-system-remainder">
+            <summary>系统提示词其余内容</summary>
+            <pre>{{ systemPrompt(message)?.remainder }}</pre>
+          </details>
+        </div>
+        <div v-else-if="userPrompt(message)" class="prompt-user-sections">
           <section>
             <h4>用户问题</h4>
             <pre>{{ userPrompt(message)?.question }}</pre>
@@ -462,6 +514,14 @@ function copyLabel(key: string): string {
   font-size: 0.66rem;
 }
 
+.prompt-message > summary .prompt-message-badge {
+  border-radius: 999px;
+  padding: 2px 7px;
+  color: #285f3b;
+  background: #e3efe4;
+  font-weight: 700;
+}
+
 .prompt-message > summary button {
   margin-left: auto;
   border: 0;
@@ -476,27 +536,109 @@ function copyLabel(key: string): string {
 
 .prompt-message > pre,
 .prompt-user-sections,
+.prompt-system-sections,
 .model-output-view {
   border-top: 1px solid #e1e9e2;
   padding: 10px;
 }
 
-.prompt-user-sections {
+.prompt-user-sections,
+.prompt-system-sections {
   display: grid;
   gap: 10px;
 }
 
 .prompt-user-sections section,
-.output-section {
+.output-section,
+.prompt-tool-section {
   display: grid;
   gap: 5px;
 }
 
 .prompt-user-sections h4,
-.output-section h4 {
+.output-section h4,
+.prompt-tool-section h4 {
   margin: 0;
   color: #52675a;
   font-size: 0.7rem;
+}
+
+.prompt-tool-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.prompt-tool-section-heading span {
+  color: #7a877d;
+  font-size: 0.66rem;
+}
+
+.prompt-tool-card,
+.prompt-tool-schema,
+.prompt-system-remainder {
+  overflow: hidden;
+  border: 1px solid #dfe8e0;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.prompt-tool-card > summary {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 9px;
+  color: #52675a;
+  cursor: pointer;
+  font-size: 0.7rem;
+}
+
+.prompt-tool-card > summary code {
+  flex: 0 0 auto;
+  color: #285f3b;
+  font-weight: 700;
+}
+
+.prompt-tool-card > summary span {
+  min-width: 0;
+  overflow: hidden;
+  color: #7a877d;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prompt-tool-card > p {
+  margin: 0 9px 9px;
+  color: #52675a;
+  font-size: 0.7rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.prompt-tool-schema {
+  margin: 0 9px 9px;
+  background: #f7faf6;
+}
+
+.prompt-tool-schema > summary,
+.prompt-system-remainder > summary {
+  padding: 7px 8px;
+  color: #52675a;
+  cursor: pointer;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.prompt-tool-schema pre {
+  margin: 0;
+  border-top: 1px solid #e1e9e2;
+  border-radius: 0;
+}
+
+.prompt-system-remainder > pre {
+  margin: 0 9px 9px;
 }
 
 .judge-input-meta {

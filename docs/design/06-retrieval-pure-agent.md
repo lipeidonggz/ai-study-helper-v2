@@ -85,15 +85,17 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 
 一个用例代表一类。先问"这一类要做什么动作"，再把动作收敛成少数几个工具。
 
->  **三个容易混的词**：<br> **块引用**＝`block_id` ＋ `doc_id`／`section_path`，**不是正文**；`block_index`／`char_start`／`char_end` 是块记录的内部字段，按 `block_id` 解析。<br> **全文块**＝块引用 ＋ 该块的完整原文；检索与枚举工具默认返回它。<br> 摘要／片段不在初版路径——只在上下文压力下的后备方案里考虑（见 §10）。
+>  **三个容易混的词**：<br> **块引用**＝`block_id` ＋ `doc_id`／`section_path`，**不是正文**；`block_index`／`char_start`／`char_end` 是块记录的内部字段，按 `block_id` 解析。<br> **全文块**＝块引用 ＋ 该块的完整原文；`search_blocks`、`list_blocks` 和 `get_blocks` 返回全文，`scan_term` 返回命中 snippet。<br> 需要从 snippet 精确补全全文时使用 `get_blocks`。
 
 **范围规则**：`search_blocks` 与 `scan_term` 只按文档范围（`doc_ids`）；**章节范围只用在 `list_blocks`**（单篇内）。`doc_ids` 省略表示全库，显式传空数组属于 `invalid_argument`，不能根据模型意图猜成“全库”或“空范围”。
 
 **所有工具绑定同一 collection 快照**：Harness 在请求开始时固定 `collection_snapshot_id`，本次请求的全部工具调用都读取该快照；模型不选择、也不传 collection 参数。后台完成新快照后只原子切换“活动快照指针”，不回写进行中的请求；新请求使用新快照。活动快照不存在、仍不可读或已损坏时，工具返回 `collection_unavailable`，绝不能伪装成 `no_match` 或 `scope_empty`。
 
-**工具公共错误仍放在 payload 中**：Harness 成功派发后 `harness_status=ok`；工具用统一结构 `{"error":{"code":"...","message":"...","retryable":false}}` 表示业务、依赖或工具内部失败。公共错误码至少包括 `invalid_argument`（必填项为空、参数类型／范围非法）、`scope_not_found`（指定 doc／section 不存在）、`collection_unavailable`（无可用快照）、`upstream_unavailable`（embedding 等上游失败且重试无效）和 `tool_internal_error`。合法但无内容的结果仍用各工具的空结果字段表达，不能升格为错误；Harness 自身的异常属于外层 `harness_internal_error`，不能和工具错误混用。
+**工具公共错误仍放在 payload 中**：Harness 成功派发后 `harness_status=ok`；工具用统一结构 `{"error":{"code":"...","message":"...","retryable":false}}` 表示业务、依赖或工具内部失败。公共错误码至少包括 `invalid_argument`（必填项为空、参数类型／范围非法）、`scope_not_found`（指定 doc／section／block 不存在）、`collection_unavailable`（无可用快照）、`upstream_unavailable`（embedding 等上游失败且重试无效）和 `tool_internal_error`。合法但无内容的结果仍用各工具的空结果字段表达，不能升格为错误；Harness 自身的异常属于外层 `harness_internal_error`，不能和工具错误混用。
 
-**公共块返回形态**：凡返回正文块，至少携带 `block_id / doc_id / doc_title / source_label / section_path / text`。内部字符偏移和检索分数不返回给模型；`doc_title` 与 `source_label` 用于消歧和最终引用展示，`block_id` 是全局唯一机器可核验键（其生成已包含 `doc_id`），并必须与返回中的 `doc_id` 一致。工具不返回 `result_tokens`；Harness 对最终 `tool_result` 统一按本次请求固定的对话模型 tokenizer／估算器计算，用于上下文准入，不是 embedding 模型 token 数。
+**公共块返回形态**：凡返回正文块，至少携带 `block_id / doc_id / doc_title / source_label / section_path / section_context / text`。`section_context` 就地携带 `section_depth / has_child_sections / document_section_count`，用于区分“当前 block 位于根章节”和“整篇只有一个章节”；它由 Harness 从固定 SectionTree 确定性计算，每个 block 自带，不采用需要模型远端关联的独立 contexts 数组。内部字符偏移和检索分数不返回给模型；`doc_title` 与 `source_label` 用于消歧和最终引用展示，`block_id` 是全局唯一机器可核验键（其生成已包含 `doc_id`），并必须与返回中的 `doc_id` 一致。工具不返回 `result_tokens`；Harness 对最终 `tool_result` 统一按本次请求固定的对话模型 tokenizer／估算器计算，用于上下文准入，不是 embedding 模型 token 数。
+
+**模型可见 I/O 契约**：每个工具描述必须同时包含输入 schema 和成功／公共错误 payload 的 output schema；字段、必填性、枚举和成功失败联合结构必须机器可读。运行时仍要在 adapter 边界构造并校验最终 payload，output schema 不能替代实现校验。工具契约变化必须同步升级版本、提示词 bundle 和测试。
 
 工具约束中标 **【质量属性·X】** 的条目来自 §9 的局部预检，不是工具自身功能。
 
@@ -101,15 +103,16 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 | --- | --- | --- |
 | 单点事实（2、3、10、12） | 按语义／关键词找目标块 | 排名检索 |
 | 有没有／证否（1、14） | 在某个范围里确认"到底有没有" | **字面扫描**（top-k 证明不了没有） |
+| 已命中 block 补全全文 | 按 block_id 精确读取 | **block 精确读取** |
 | 跨源对照（6、8、9、11） | 分别取多篇的证据 | 排名检索＋范围限定 |
 | 要全／整节（7、13、15） | 把某个范围的全部块取出来 | 范围枚举 |
 | 整体图景（8）／换形态（15） | 先看结构，再决定取哪几节 | 章节大纲 |
 | 消歧（16） | 知道库里有哪些候选，再问用户 | 文档清单＋澄清 |
 | 越界（17）／截断（18） | 不需要检索 | 不进工具，属策略与生成契约 |
 
-**五个工具**（每个都带"给模型的工具说明"与返回示例）
+**六个工具**（每个都向模型声明输入与输出 schema，并附返回示例）
 
-**工具只负责取全，Harness 负责计数与预算准入**：`list_blocks`／`scan_term` 始终返回当前范围的全部业务结果；Harness 生成最终 `tool_result` 后统一计算 `result_tokens`，并在把结果加入 History 前检查上下文与累计预算，超界时不再发起下一次模型调用。工具自身不计算 token，也不做预算判断。`search_blocks` 仍按相关度取 Top-5。
+**工具只负责取全，Harness 负责计数与预算准入**：`list_blocks`／`get_blocks`／`scan_term` 始终返回当前范围的全部业务结果；Harness 生成最终 `tool_result` 后统一计算 `result_tokens`，并在把结果加入 History 前检查上下文与累计预算，超界时不再发起下一次模型调用。工具自身不计算 token，也不做预算判断。`search_blocks` 仍按相关度取 Top-5。
 
 ### T1 list_documents
 
@@ -139,17 +142,23 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 
 ### T4 list_blocks
 
-**工具说明（给模型）**：需要完整读取或按章节取全**某一篇文档**时调用；范围可以是整篇，也可以是若干章节。工具返回该范围的全部块，不做上下文预算判断；跨多篇时按篇分别调用。
+**工具说明（给模型）**：需要完整读取某一篇文档或显式选择章节时调用。省略 `section_paths` 表示整篇；传入章节时必须明确 `include_descendants`：`true` 返回该节及全部后代，`false` 只返回该节直属块。工具返回范围内全部块，不做上下文预算判断；跨多篇时按篇分别调用。
 
-**输入**：`doc_id: string`（**必传，单篇**）；可选 `section_paths?: string[][]`（省略或 `[]`＝整篇）<br> **调用示例**：`{"doc_id":"doc_a5","section_paths":[["Patterns for containing agents"],["Patterns for containing agents","Pattern 3: The local VM"]]}`<br> **输出**：`blocks[]`（公共块返回形态）＋`total`；`blocks.length = total`<br> **返回示例**：`{"blocks":[{"block_id":"a5#c020","doc_id":"doc_a5","doc_title":"How we contain Claude","source_label":"Anthropic","section_path":["…"],"text":"…"}],"total":1}`<br> **约束**：每次只处理一篇；跨多篇时按篇分别调用；**一个 `section_path` 选择该节及其全部后代**，多个章节取并集、按原文顺序去重；路径不存在时返回 `scope_not_found`，不得返回部分结果冒充完整；**工具返回当前范围全部块，不计算 token、不做上下文预算判断**；**【质量属性·一致性】**返回的块按 `block_index` 升序排列；**【质量属性·可靠性】**doc 不存在在该工具 payload 中返回公共 `error`。
+**输入**：`doc_id: string`（**必传，单篇**）；可选 `section_paths?: string[][]`；可选 `include_descendants?: boolean`<br> **调用示例**：`{"doc_id":"doc_a5","section_paths":[["Patterns for containing agents"]],"include_descendants":false}`<br> **输出**：`blocks[]`（公共块返回形态）＋`total`＋`scope`（`document｜section｜subtree`）；`blocks.length = total`<br> **返回示例**：`{"blocks":[{"block_id":"a5#c020","doc_id":"doc_a5","doc_title":"How we contain Claude","source_label":"Anthropic","section_path":["…"],"text":"…"}],"total":1,"scope":"section"}`<br> **约束**：`section_paths` 省略或为 `[]` 时读取整篇，此时不得传 `include_descendants`；`section_paths` 非空时必须显式传 `include_descendants`，否则返回 `invalid_argument`；`false` 只匹配 path 完全相等的直属块，`true` 匹配该节及全部后代；多个章节取并集、按原文顺序去重；任一路径不存在返回 `scope_not_found`，不得返回部分结果冒充完整；**工具返回当前范围全部块，不计算 token、不做上下文预算判断**；**【质量属性·一致性】**返回的块按 `block_index` 升序排列；**【质量属性·可靠性】**doc 不存在在该工具 payload 中返回公共 `error`。
 
 **为什么不做成多篇**：枚举是"范围内的全部块"，多篇一起会输出不可控；而 `doc_ids` ＋ `section_paths` 会让"哪条路径属于哪篇"产生歧义。跨篇需求由 `search_blocks(doc_ids[])` 取候选、再按篇补全；若实测发现跨篇枚举导致轮次明显过多，再升级为 `scopes: [{doc_id, section_paths?}]`。
 
-### T5 scan_term
+### T5 get_blocks
+
+**工具说明（给模型）**：需要按已知 `block_id` 精确补全完整正文时调用。`scan_term` 返回 snippet；若该 snippet 足以定位且需要完整证据，应使用本工具读取原 block。`search_blocks` 已返回完整正文，不需要再次调用本工具。任一 `block_id` 不存在时整次失败，不返回部分结果。
+
+**输入**：`block_ids: string[]`（至少 1 个）<br> **调用示例**：`{"block_ids":["a5#b00002","a5#b00004"]}`<br> **输出**：`blocks[]`（公共块返回形态）＋`total`；结果按去重后的输入顺序，`blocks.length = total`<br> **约束**：同一 ID 重复出现时取首次；只读取当前请求绑定的 collection 快照；任一 ID 不存在时返回 `scope_not_found`，不得返回其余已知块；不做章节展开或相邻 block 推断；工具返回完整正文，不计算 token、不做上下文预算判断。
+
+### T6 scan_term
 
 **工具说明（给模型）**：需要确认某个具体字符串在指定范围内是否存在，或核对字面归属时调用；按**原文字符串**扫描（大小写不敏感，不做分词、词干或同义扩展）。工具返回当前范围的全部命中块与命中数，不做上下文预算判断。需要概念或语义匹配时使用 `search_blocks`；`count=0` 只表示该字符串在范围内没有出现。
 
-**输入**：`term: string`；可选 `doc_ids?: string[]`（省略＝全库）<br> **调用示例**：`{"term":"MCP","doc_ids":["doc_a5"]}`<br> **输出**：`matches[]`（`block_id / doc_id / doc_title / source_label / section_path / snippet`）＋`count`；`matches.length = count`<br> **返回示例**：`{"term":"MCP","matches":[{"block_id":"a5#c005","doc_id":"doc_a5","doc_title":"How we contain Claude","source_label":"Anthropic","section_path":["…"],"snippet":"…MCP…"}],"count":1}`<br> 证否：`{"term":"MCP","matches":[],"count":0}`<br> **约束**：`term` 去除首尾空白后不能为空，否则返回 `invalid_argument`；匹配前仅做 Unicode NFC 规范化与英文大小写折叠，不做分词／词干／同义扩展／空白或标点折叠，不同写法（如连字符与空格）不互相匹配——需要语义或变体匹配时用 search_blocks。`count=0` 只证明"这个字符串在当前有效范围内没出现"，不等于"这个概念不存在"；若显式范围包含不存在的文档，返回 `scope_not_found`，不能给出 count=0；**工具返回当前范围全部匹配，不计算 token、不做上下文预算判断**；**【质量属性·一致性】**返回的匹配块先按 `doc_id` 升序排列，同一文档内再按 `block_index` 升序排列；**【质量属性·可靠性】**`count=0` 是有效确定结果。
+**输入**：`term: string`；可选 `doc_ids?: string[]`（省略＝全库）<br> **调用示例**：`{"term":"MCP","doc_ids":["doc_a5"]}`<br> **输出**：`matches[]`（`block_id / doc_id / doc_title / source_label / section_path / snippet`）＋`count`；`matches.length = count`<br> **返回示例**：`{"term":"MCP","matches":[{"block_id":"a5#c005","doc_id":"doc_a5","doc_title":"How we contain Claude","source_label":"Anthropic","section_path":["…"],"snippet":"…MCP…"}],"count":1}`<br> 证否：`{"term":"MCP","matches":[],"count":0}`<br> **约束**：`term` 去除首尾空白后不能为空，否则返回 `invalid_argument`；匹配前仅做 Unicode NFC 规范化与英文大小写折叠，不做分词／词干／同义扩展／空白或标点折叠，不同写法（如连字符与空格）不互相匹配——需要语义或变体匹配时用 search_blocks。snippet 只用于定位；需要完整正文时使用 `get_blocks` 精确补全。`count=0` 只证明"这个字符串在当前有效范围内没出现"，不等于"这个概念不存在"；若显式范围包含不存在的文档，返回 `scope_not_found`，不能给出 count=0；**工具返回当前范围全部匹配，不计算 token、不做上下文预算判断**；**【质量属性·一致性】**返回的匹配块先按 `doc_id` 升序排列，同一文档内再按 `block_index` 升序排列；**【质量属性·可靠性】**`count=0` 是有效确定结果。
 
 ### 跨工具的质量属性约束
 
@@ -165,14 +174,14 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 
 | 用例 | 主要工具 |
 | --- | --- |
-| 1 有没有 | scan_term（＋ search_blocks 取语境） |
+| 1 有没有 | scan_term（＋ get_blocks 或 search_blocks 取语境） |
 | 2 是什么／3 在哪／10 对吗／12 该处没讲 | search_blocks |
 | 4 为什么／5 怎么做 | search_blocks（必要时 list_blocks 取同节多块） |
 | 6 什么关系／9 冲突／11 哪个对 | search_blocks 分篇 ＋ list_blocks 补全 |
 | 7 有哪些 | list_blocks（按篇） |
 | 8 整体／15 换形态 | get_outline → list_blocks（按节） |
 | 13 还有什么 | list_documents ＋ search_blocks（全库） |
-| 14 归属 | scan_term ＋ search_blocks |
+| 14 归属 | scan_term ＋ get_blocks／search_blocks |
 | 16 消歧 | list_documents ＋ search_blocks → 在最终回答里要求澄清（不是工具） |
 | 17 越界／18 截断 | 不用工具 |
 
@@ -453,7 +462,7 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 
 **这不只是“单篇大文档”问题。**无论是一篇很大、几篇普通文档、多个章节，还是多次检索累计出的内容，只要“完成当前问题所需要的全部材料”总和超过单次上下文预算，就会发生同样的冲突。
 
-**受影响工具**：`list_blocks` 会返回一整篇或指定章节的全部块；`scan_term` 会返回当前范围内的全部命中。它们是完整覆盖的主要来源，也是可能把上下文撑满的两个工具。`search_blocks` 只取 Top-5，本身不承担完整性，但多轮调用仍会增加 History。`list_documents` 和 `get_outline` 主要返回元数据，直接影响较小。
+**受影响工具**：`list_blocks` 会返回一整篇或指定章节的全部块；`get_blocks` 会按 ID 返回全部请求块；`scan_term` 会返回当前范围内的全部命中。它们是完整覆盖的主要来源，也是可能把上下文撑满的工具。`search_blocks` 只取 Top-5，本身不承担完整性，但多轮调用仍会增加 History。`list_documents` 和 `get_outline` 主要返回元数据，直接影响较小。
 
 **本节两个预算参数**：
 
@@ -518,7 +527,7 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 | **`llm.call`** | 实际尝试序号；provider／model／模型快照或版本；温度等采样参数；输入、输出、缓存 token；`finish_reason`；耗时；完整渲染提示词和模型原始输出的 artifact 引用（`metadata` 模式只记 hash） | 区分是提示词、模型、截断、协议解析还是预算导致的失败；支撑成本与复现 |
 | **`citation.annotation`** | provider／model、prompt 版本与 hash、答案 span 数、证据块数、实际尝试次数、输入／输出 token 和 annotation 状态；完整 annotator prompt／raw output 的 artifact 引用（`metadata` 模式只记 hash） | 解释引用为什么 pending、是否发生重试，以及后置标注的真实成本 |
 | **`tool.call`** | 工具名；规范化参数；实际尝试序号；Harness 状态；`payload` artifact 引用；返回数／`total`／`count`／Harness 计算的 `result_tokens`；耗时（`metadata` 模式对参数和 payload 只记 hash／计数） | 判断是选错工具、参数不对、结果为空、结果过大还是工具执行失败 |
-| **工具诊断属性** | `search_blocks` 记录 `search_mode`／`top_k`／`empty_reason`、query embedding 的 provider／model／request ID／token usage，以及每个返回结果的 `block_id`／`rank`／`score`；`list_blocks`／`scan_term` 记录范围与 `total`／`count`；`result_tokens` 由 Harness 统一记录；所有工具记录公共 `error.code` | 不仅知道返回了什么，还能解释“为什么是这些块、为什么是这个顺序、为什么为空” |
+| **工具诊断属性** | `search_blocks` 记录 `search_mode`／`top_k`／`empty_reason`、query embedding 的 provider／model／request ID／token usage，以及每个返回结果的 `block_id`／`rank`／`score`；`list_blocks` 记录章节参数、own／subtree 模式和 `total`；`get_blocks` 记录请求与返回的 block_id；`scan_term` 记录范围与 `count`；`result_tokens` 由 Harness 统一记录；所有工具记录公共 `error.code` | 不仅知道返回了什么，还能解释“为什么是这些块、为什么是这个顺序、为什么为空” |
 | **`budget.check` 事件** | 作为 `agent.turn`／`tool.call` 上的 span event 记录：`phase=pre_turn\|post_tool\|finalization`、`limit_kind=context\|request`、`limit_tokens`、`observed_tokens`、`remaining_tokens`、`decision=admit\|reject\|terminate`、关联的轮次和工具调用 | 预算失败时能直接定位是哪一步、按什么额度和实际数量被拒绝，不只留下最终错误码 |
 | **`artifact`** | `artifact_id`（内容 hash）／类型／MIME／字节数／可选压缩方式／内容或外部引用；只在 `full` 模式生成 | 保存完整用户问题、渲染提示词、结构化模型输出、工具 payload、最终回答和 citation annotation；span 只挂引用，不重复塞正文 |
 
@@ -824,6 +833,7 @@ trace manifest 同时记录 `replay_scope=metadata|evidence|retrieval`：`metada
 | R5 按范围取全 | `doc_id`／`section_path`／`block_index` |
 | `search_blocks` 返回全文 | `text` 必须持久化，不能只存向量 |
 | `list_blocks` 枚举 | `block_index`（文档顺序） |
+| `get_blocks` 精确补全 | `block_id`（输入顺序，去重） |
 | `scan_term` 字面扫描 | **原始文本**（不能只存分词后的文本） |
 
 ### 11.2 块记录（初稿）
