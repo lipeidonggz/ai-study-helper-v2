@@ -252,14 +252,6 @@ interface JudgmentBindingView {
   bound_at: string;
 }
 
-/** 按 R／X 分组的 Judgment 及界面说明。 */
-interface JudgmentGroup {
-  ruleType: "R" | "X";
-  title: string;
-  description: string;
-  items: JudgmentView[];
-}
-
 /** 一个 attempt 下用于诊断的 Judgment 集合。 */
 interface AttemptJudgmentGroup {
   attemptId: string;
@@ -272,6 +264,56 @@ interface AttemptJudgmentGroup {
   answer: string | null;
   traceId: string | null;
   traceStatus: AttemptView["trace_status"];
+}
+
+/** 执行批次中按 case 分组的 attempt 列表。 */
+interface RunAttemptCaseGroup {
+  caseId: string;
+  caseRevisionId: string;
+  question: string;
+  attempts: AttemptView[];
+}
+
+/** 判定总览中的一列，始终对应同一个 case 的一个 attempt。 */
+interface JudgmentOverviewColumn {
+  attemptId: string;
+  sampleLabel: string;
+  result: AttemptAggregateView["result"];
+}
+
+/** 判定总览中的一个单元格；没有匹配事实时明确标记为无记录。 */
+interface JudgmentOverviewCell {
+  attemptId: string;
+  sampleLabel: string;
+  result: AttemptAggregateView["result"] | "missing";
+  label: string;
+  focusTargetId: string;
+}
+
+/** 判定总览中的一条 criterion 或全局检查行。 */
+interface JudgmentOverviewRow {
+  key: string;
+  ruleType: "R" | "X" | "CHECK";
+  title: string;
+  description: string;
+  cells: JudgmentOverviewCell[];
+}
+
+/** 判定页顶部的 case 选择项及异常数量。 */
+interface JudgmentCaseOption {
+  caseRevisionId: string;
+  caseId: string;
+  question: string;
+  abnormalCount: number;
+  sampleCount: number;
+}
+
+/** 样本详情的运行轨迹页签所需最小目标。 */
+interface MatrixTraceTarget {
+  attempt_id: string;
+  sample_ordinal: number;
+  trace_id: string | null;
+  trace_status: AttemptView["trace_status"];
 }
 
 /** 当前打开的人工 LLM Judgment 改判目标。 */
@@ -625,6 +667,10 @@ const attemptTimeoutSeconds = ref(600);
 const plan = ref<ExecutionPlanView | null>(null);
 const runs = ref<RunView[]>([]);
 const historySuiteFilter = ref("all");
+const historyRefreshBusy = ref(false);
+const historyRefreshError = ref("");
+const historyRefreshNotice = ref("");
+const historyLastRefreshedAt = ref<string | null>(null);
 const selectedRun = ref<RunView | null>(null);
 const liveRunPanel = ref<HTMLElement | null>(null);
 const evaluationRevisions = ref<EvaluationRevisionView[]>([]);
@@ -639,9 +685,11 @@ const judgeRequestBudget = ref(500);
 const judgeTimeoutSeconds = ref(60);
 const judgingBusy = ref(false);
 const judgingError = ref("");
-const judgmentViewMode = ref<"attempt" | "criterion">("attempt");
-const judgmentAttemptFilter = ref<"all" | "failed">("all");
-const focusedAttemptId = ref("");
+const judgmentAttemptFilter = ref<"all" | "attention" | "fail" | "pending" | "pass">(
+  "all",
+);
+const judgmentCaseFilter = ref("");
+const judgmentSearch = ref("");
 const judgeOverrideTarget = ref<JudgeOverrideTarget | null>(null);
 const judgeOverrideVerdict = ref("");
 const judgeOverrideReason = ref("");
@@ -655,7 +703,13 @@ const checkReviewBusy = ref(false);
 const checkReviewError = ref("");
 const traceDetail = ref<TraceDetail | null>(null);
 const matrixJudgmentAttemptId = ref("");
-const matrixTraceAttempt = ref<ResultMatrixAttemptView | null>(null);
+const matrixFocusedOverviewKey = ref("");
+const matrixSampleDetailTab = ref<"judgment" | "trace">("judgment");
+const matrixJudgmentPane = ref<HTMLElement | null>(null);
+const matrixTracePane = ref<HTMLElement | null>(null);
+const matrixJudgmentScrollTop = ref(0);
+const matrixTraceScrollTop = ref(0);
+const matrixTraceAttempt = ref<MatrixTraceTarget | null>(null);
 const matrixTraceDetail = ref<TraceDetail | null>(null);
 const matrixTraceLoading = ref(false);
 const matrixTraceError = ref("");
@@ -938,16 +992,19 @@ const historySuiteOptions = computed(() => {
   return [...options.entries()].map(([suiteId, name]) => ({ suiteId, name }));
 });
 
-const filteredHistoryRuns = computed(() => {
+/** 判断 run 是否符合当前历史用例集筛选。 */
+function historyRunMatchesFilter(run: RunView): boolean {
   if (historySuiteFilter.value === "all") {
-    return historyRuns.value;
+    return true;
   }
   if (historySuiteFilter.value === "quick") {
-    return historyRuns.value.filter((run) => run.plan_mode === "exploratory");
+    return run.plan_mode === "exploratory";
   }
-  return historyRuns.value.filter(
-    (run) => run.suite_id === historySuiteFilter.value,
-  );
+  return run.suite_id === historySuiteFilter.value;
+}
+
+const filteredHistoryRuns = computed(() => {
+  return historyRuns.value.filter(historyRunMatchesFilter);
 });
 
 /** 切换评测页签；历史页不继续展示当前活动批次。 */
@@ -1071,6 +1128,39 @@ function matrixCaseAttentionClass(matrixCase: ResultMatrixCaseView): string {
     return "matrix-case-attention-pending";
   }
   return "";
+}
+
+/** 结果矩阵中样本级 pass／fail／pending 汇总。 */
+interface MatrixSampleCounts {
+  pass: number;
+  fail: number;
+  pending: number;
+  excluded: number;
+}
+
+/** 按 attempt 实际结果统计样本分布，不与 case 的 N/K 门禁结果混合。 */
+function matrixSampleCounts(cases: ResultMatrixCaseView[]): MatrixSampleCounts {
+  const attempts = cases.flatMap((item) => item.attempts);
+  return {
+    pass: attempts.filter((attempt) => attempt.result === "pass").length,
+    fail: attempts.filter((attempt) => attempt.result === "fail").length,
+    pending: attempts.filter((attempt) => attempt.result === "pending").length,
+    excluded: attempts.filter((attempt) => attempt.result === "excluded").length,
+  };
+}
+
+/** 把一组 case 的样本分布转换为紧凑的矩阵摘要。 */
+function matrixSampleDistributionText(cases: ResultMatrixCaseView[]): string {
+  const counts = matrixSampleCounts(cases);
+  return `样本：通过 ${counts.pass} · 失败 ${counts.fail} · 待定 ${counts.pending}`;
+}
+
+/** 区分 case 的 K 门禁结论与仍未复核的样本。 */
+function matrixCaseGateText(matrixCase: ResultMatrixCaseView): string {
+  if (matrixCase.result === "pass" && matrixCase.pending_count > 0) {
+    return `通过（含 ${matrixCase.pending_count} 个待定样本）`;
+  }
+  return statusText(matrixCase.result);
 }
 
 /** 解释 attempt 是否计入有效评测样本。 */
@@ -1364,6 +1454,10 @@ const runStatusLabel = computed(() => statusText(selectedRun.value?.status ?? ""
 const resultMatrix = computed(
   () => evaluationRevision.value?.result_matrix ?? null,
 );
+const resultMatrixSampleCounts = computed(() => {
+  const cases = resultMatrix.value?.categories.flatMap((category) => category.cases) ?? [];
+  return matrixSampleCounts(cases);
+});
 
 const caseById = computed(() => {
   const values = new Map<string, CaseRevisionView>();
@@ -1424,6 +1518,60 @@ const attemptOrdinalById = computed(() => {
   }
   return values;
 });
+
+const selectedRunCaseGroups = computed<RunAttemptCaseGroup[]>(() => {
+  const grouped = new Map<string, RunAttemptCaseGroup>();
+  for (const attempt of selectedRun.value?.attempts ?? []) {
+    const caseRevision = caseById.value.get(attempt.case_revision_id);
+    const key = attempt.case_revision_id;
+    const group =
+      grouped.get(key) ??
+      {
+        caseId: caseRevision?.case_id ?? attempt.case_revision_id,
+        caseRevisionId: attempt.case_revision_id,
+        question: caseRevision?.question ?? "问题原文不可用",
+        attempts: [],
+      };
+    group.attempts.push(attempt);
+    grouped.set(key, group);
+  }
+  return [...grouped.values()]
+    .map((group) => ({
+      ...group,
+      attempts: [...group.attempts].sort((left, right) =>
+        left.started_at.localeCompare(right.started_at),
+      ),
+    }))
+    .sort((left, right) => left.caseId.localeCompare(right.caseId));
+});
+
+/** 返回一个 case 分组内的执行状态计数。 */
+function executionCountsText(group: RunAttemptCaseGroup): string {
+  const succeeded = group.attempts.filter(
+    (attempt) => attempt.execution_status === "succeeded",
+  ).length;
+  const running = group.attempts.filter((attempt) =>
+    ["planned", "running", "paused"].includes(attempt.execution_status),
+  ).length;
+  const failed = group.attempts.filter((attempt) =>
+    ["failed", "interrupted"].includes(attempt.execution_status),
+  ).length;
+  const other = group.attempts.length - succeeded - running - failed;
+  const parts = [`成功 ${succeeded}`];
+  if (running) parts.push(`运行中 ${running}`);
+  if (failed) parts.push(`异常 ${failed}`);
+  if (other) parts.push(`其他 ${other}`);
+  return parts.join(" · ");
+}
+
+/** 运行中或存在异常的 case 默认展开，全部成功的 case 默认收起。 */
+function shouldOpenRunCase(group: RunAttemptCaseGroup): boolean {
+  return group.attempts.some((attempt) =>
+    ["planned", "running", "paused", "failed", "interrupted"].includes(
+      attempt.execution_status,
+    ),
+  );
+}
 
 const attemptJudgmentGroups = computed<AttemptJudgmentGroup[]>(() => {
   const aggregateByAttempt = new Map(
@@ -1497,47 +1645,208 @@ const matrixJudgmentQuestion = computed(() => {
 });
 
 const hasOpenMatrixModal = computed(
-  () => Boolean(matrixJudgmentGroup.value || matrixTraceAttempt.value),
+  () => Boolean(matrixJudgmentGroup.value),
 );
+
+const judgmentCaseOptions = computed<JudgmentCaseOption[]>(() => {
+  const grouped = new Map<string, JudgmentCaseOption>();
+  for (const group of attemptJudgmentGroups.value) {
+    const current =
+      grouped.get(group.caseRevisionId) ??
+      {
+        caseRevisionId: group.caseRevisionId,
+        caseId: group.caseId,
+        question: caseById.value.get(group.caseRevisionId)?.question ?? "问题原文不可用",
+        abnormalCount: 0,
+        sampleCount: 0,
+      };
+    current.sampleCount += 1;
+    if (group.result !== "pass") {
+      current.abnormalCount += 1;
+    }
+    grouped.set(group.caseRevisionId, current);
+  }
+  return [...grouped.values()].sort((left, right) =>
+    left.caseId.localeCompare(right.caseId),
+  );
+});
+
+watch(
+  judgmentCaseOptions,
+  (options) => {
+    if (
+      judgmentCaseFilter.value &&
+      options.some((item) => item.caseRevisionId === judgmentCaseFilter.value)
+    ) {
+      return;
+    }
+    judgmentCaseFilter.value =
+      options.find((item) => item.abnormalCount > 0)?.caseRevisionId ??
+      options[0]?.caseRevisionId ??
+      "";
+  },
+  { immediate: true },
+);
+
+const selectedJudgmentCase = computed(
+  () =>
+    judgmentCaseOptions.value.find(
+      (item) => item.caseRevisionId === judgmentCaseFilter.value,
+    ) ?? null,
+);
+
+const selectedCaseAggregate = computed(
+  () =>
+    evaluationRevision.value?.case_aggregates.find(
+      (item) => item.case_revision_id === judgmentCaseFilter.value,
+    ) ?? null,
+);
+
+const selectedCaseAttemptJudgmentGroups = computed(() =>
+  attemptJudgmentGroups.value.filter(
+    (group) => group.caseRevisionId === judgmentCaseFilter.value,
+  ),
+);
+
+/** 异常样本包含失败、待定和未进入有效样本的执行结果。 */
+function isAttentionResult(result: AttemptAggregateView["result"]): boolean {
+  return result !== "pass";
+}
+
+/** 判断一个样本组是否符合当前状态筛选与搜索。 */
+function matchesJudgmentFilter(group: AttemptJudgmentGroup): boolean {
+  const matchesStatus =
+    judgmentAttemptFilter.value === "all" ||
+    (judgmentAttemptFilter.value === "attention"
+      ? isAttentionResult(group.result)
+      : group.result === judgmentAttemptFilter.value);
+  if (!matchesStatus) {
+    return false;
+  }
+  const query = judgmentSearch.value.trim().toLowerCase();
+  if (!query) {
+    return true;
+  }
+  const question = caseById.value.get(group.caseRevisionId)?.question ?? "";
+  return [group.caseId, group.sampleLabel, group.attemptId, question].some((value) =>
+    value.toLowerCase().includes(query),
+  );
+}
 
 const filteredAttemptJudgmentGroups = computed(() =>
-  judgmentAttemptFilter.value === "failed"
-    ? attemptJudgmentGroups.value.filter((group) => group.result === "fail")
-    : attemptJudgmentGroups.value,
+  selectedCaseAttemptJudgmentGroups.value.filter(matchesJudgmentFilter),
 );
 
-const failedAttemptCount = computed(
-  () =>
-    attemptJudgmentGroups.value.filter((group) => group.result === "fail").length,
-);
-
-const judgmentGroups = computed<JudgmentGroup[]>(() => {
-  const judgments = effectiveJudgments.value;
-  return [
-    {
-      ruleType: "R",
-      title: "必选判定项",
-      description:
-        "对同一执行样本的答案进行检查。全部 R 都通过才算满足；任一 R 不通过则整体失败；存在待定项时不能得出通过结论。",
-      items: judgments.filter(
-        (judgment) =>
-          criterionById.value.get(judgment.criterion_revision_id)?.rule_type ===
-          "R",
-      ),
-    },
-    {
-      ruleType: "X",
-      title: "边界判定项",
-      description:
-        "对同一执行样本的答案进行检查，确认是否触碰明确禁止的边界。全部 X 都合规才算满足；任一 X 违规则整体失败；存在待定项时不能得出通过结论。",
-      items: judgments.filter(
-        (judgment) =>
-          criterionById.value.get(judgment.criterion_revision_id)?.rule_type ===
-          "X",
-      ),
-    },
-  ];
+const judgmentStatusCounts = computed(() => {
+  const groups = selectedCaseAttemptJudgmentGroups.value;
+  return {
+    all: groups.length,
+    attention: groups.filter((group) => isAttentionResult(group.result)).length,
+    fail: groups.filter((group) => group.result === "fail").length,
+    pending: groups.filter((group) => group.result === "pending").length,
+    pass: groups.filter((group) => group.result === "pass").length,
+  };
 });
+
+const judgmentOverviewColumns = computed<JudgmentOverviewColumn[]>(() =>
+  filteredAttemptJudgmentGroups.value
+    .slice()
+    .sort((left, right) => left.sampleLabel.localeCompare(right.sampleLabel))
+    .map((group) => ({
+      attemptId: group.attemptId,
+      sampleLabel: group.sampleLabel,
+      result: group.result,
+    })),
+);
+
+/** 生成判定总览单元格对应的详情锚点。 */
+function judgmentOverviewTargetId(key: string): string {
+  return `judgment-overview-${key.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+}
+
+const judgmentOverviewRows = computed<JudgmentOverviewRow[]>(() => {
+  const caseRevision = caseById.value.get(judgmentCaseFilter.value);
+  if (!caseRevision) {
+    return [];
+  }
+  const groups = filteredAttemptJudgmentGroups.value
+    .slice()
+    .sort((left, right) => left.sampleLabel.localeCompare(right.sampleLabel));
+  const criteria = [...caseRevision.criteria].sort(
+    (left, right) => left.ordinal - right.ordinal,
+  );
+  const rows: JudgmentOverviewRow[] = criteria.map((criterion) => ({
+    key: criterion.revision_id,
+    ruleType: criterion.rule_type,
+    title: criterion.title,
+    description: criterion.rule_text,
+    cells: groups.map((group) => {
+      const judgment = group.judgments.find(
+        (item) => item.criterion_revision_id === criterion.revision_id,
+      );
+      return {
+        attemptId: group.attemptId,
+        sampleLabel: group.sampleLabel,
+        result: judgment?.normalized_result ?? "missing",
+        label: judgment ? statusText(judgment.normalized_result) : "无记录",
+        focusTargetId: judgmentOverviewTargetId(criterion.revision_id),
+      };
+    }),
+  }));
+  for (const [checkerId, title, description] of [
+    [
+      "citation_integrity",
+      "引用完整性",
+      "核对答案引用的 block 是否来自本次工具真实返回。",
+    ],
+    [
+      "citation_support",
+      "引用支持",
+      "核对 claim 与联合证据是否语义一致；unknown 保持待定。",
+    ],
+  ] as const) {
+    rows.push({
+      key: `check:${checkerId}`,
+      ruleType: "CHECK",
+      title,
+      description,
+      cells: groups.map((group) => {
+        const check = evaluationRevision.value?.checks.find(
+          (item) =>
+            item.attempt_id === group.attemptId && item.checker_id === checkerId,
+        );
+        if (!check) {
+          return {
+            attemptId: group.attemptId,
+            sampleLabel: group.sampleLabel,
+            result: "missing",
+            label: "无记录",
+            focusTargetId: judgmentOverviewTargetId(`check:${checkerId}`),
+          };
+        }
+        const review = checkReviewFor(check);
+        return {
+          attemptId: group.attemptId,
+          sampleLabel: group.sampleLabel,
+          result: review?.result ?? check.result,
+          label: effectiveCheckStatusText(check),
+          focusTargetId: judgmentOverviewTargetId(`check:${checkerId}`),
+        };
+      }),
+    });
+  }
+  return rows;
+});
+
+/** 从判定矩阵单元格打开同一样本的既有详情。 */
+async function openJudgmentOverviewCell(cell: JudgmentOverviewCell): Promise<void> {
+  prepareMatrixSample(cell.attemptId);
+  matrixFocusedOverviewKey.value = cell.focusTargetId;
+  await nextTick();
+  document
+    .getElementById(cell.focusTargetId)
+    ?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
 
 const judgeOverrideVerdicts = computed(() => {
   if (judgeOverrideTarget.value?.ruleType === "X") {
@@ -1560,17 +1869,6 @@ function effectiveBindingFor(judgment: JudgmentView): JudgmentBindingView | unde
     (binding) =>
       binding.attempt_id === judgment.attempt_id &&
       binding.criterion_revision_id === judgment.criterion_revision_id,
-  );
-}
-
-/** 返回指定 criterion 的全部绑定历史。 */
-function judgmentBindingHistory(judgment: JudgmentView): JudgmentBindingView[] {
-  return (
-    evaluationRevision.value?.judgment_bindings.filter(
-      (binding) =>
-        binding.attempt_id === judgment.attempt_id &&
-        binding.criterion_revision_id === judgment.criterion_revision_id,
-    ) ?? []
   );
 }
 
@@ -1597,15 +1895,6 @@ function judgmentHistory(judgment: JudgmentView): JudgmentView[] {
   );
 }
 
-/** 返回一个 case revision 下的 attempt 聚合。 */
-function attemptAggregatesForCase(caseRevisionId: string): AttemptAggregateView[] {
-  return (
-    evaluationRevision.value?.attempt_aggregates.filter(
-      (item) => item.case_revision_id === caseRevisionId,
-    ) ?? []
-  );
-}
-
 /** 返回指定 attempt 的全部跨判定项检查。 */
 function checksForAttempt(attemptId: string): CheckResultView[] {
   return (
@@ -1615,31 +1904,145 @@ function checksForAttempt(attemptId: string): CheckResultView[] {
   );
 }
 
+/** 清空样本弹窗两个页签的独立滚动位置。 */
+function resetMatrixSampleScroll(): void {
+  matrixJudgmentScrollTop.value = 0;
+  matrixTraceScrollTop.value = 0;
+  if (matrixJudgmentPane.value) {
+    matrixJudgmentPane.value.scrollTop = 0;
+  }
+  if (matrixTracePane.value) {
+    matrixTracePane.value.scrollTop = 0;
+  }
+}
+
+/** 切换到另一个样本时释放旧轨迹，避免串用上一份样本的运行事实。 */
+function prepareMatrixSample(attemptId: string): void {
+  if (matrixJudgmentAttemptId.value !== attemptId) {
+    closeMatrixTrace();
+    resetMatrixSampleScroll();
+  }
+  closeCheckReview();
+  closeJudgeOverride();
+  matrixJudgmentAttemptId.value = attemptId;
+  matrixSampleDetailTab.value = "judgment";
+}
+
 /** 在结果矩阵中打开样本判定弹窗，不切换当前分析上下文。 */
 function openMatrixJudgment(attempt: ResultMatrixAttemptView): void {
-  matrixJudgmentAttemptId.value = attempt.attempt_id;
+  prepareMatrixSample(attempt.attempt_id);
+  matrixFocusedOverviewKey.value = "";
 }
 
 /** 关闭结果矩阵中的样本判定弹窗。 */
 function closeMatrixJudgment(): void {
+  closeCheckReview();
+  closeJudgeOverride();
+  closeMatrixTrace();
   matrixJudgmentAttemptId.value = "";
+  matrixFocusedOverviewKey.value = "";
+  matrixSampleDetailTab.value = "judgment";
+  resetMatrixSampleScroll();
 }
 
-/** 在结果矩阵中加载并打开指定 attempt 的 trace 弹窗。 */
+/** 从样本详情进入同一 attempt 的人工改判表单。 */
+async function openJudgeOverrideFromMatrix(judgment: JudgmentView): Promise<void> {
+  matrixSampleDetailTab.value = "judgment";
+  openJudgeOverride(judgment);
+  await nextTick();
+  document
+    .getElementById(
+      `judge-override-form-${judgment.attempt_id}-${judgment.criterion_revision_id}`,
+    )
+    ?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+/** 在样本详情内展开同一 attempt 的引用支持人工复核表单。 */
+async function openCheckReviewFromMatrix(check: CheckResultView): Promise<void> {
+  matrixSampleDetailTab.value = "judgment";
+  openCheckReview(check);
+  await nextTick();
+  const target =
+    document.getElementById(`check-review-form-${check.check_result_id}`) ??
+    document.getElementById(
+      judgmentOverviewTargetId(`check:${check.checker_id}`),
+    );
+  target?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+/** 在结果矩阵中打开指定样本，并直接显示运行轨迹页签。 */
 async function openMatrixTrace(attempt: ResultMatrixAttemptView): Promise<void> {
-  matrixTraceAttempt.value = attempt;
+  prepareMatrixSample(attempt.attempt_id);
+  matrixFocusedOverviewKey.value = "";
+  await openMatrixTraceTarget({
+    attempt_id: attempt.attempt_id,
+    sample_ordinal: attempt.sample_ordinal,
+    trace_id: attempt.trace_id,
+    trace_status: attempt.trace_status,
+  });
+}
+
+/** 切换样本弹窗页签，并恢复该页签上次停留的滚动位置。 */
+async function selectMatrixSampleTab(tab: "judgment" | "trace"): Promise<void> {
+  if (matrixSampleDetailTab.value === tab) {
+    return;
+  }
+  if (matrixSampleDetailTab.value === "judgment") {
+    matrixJudgmentScrollTop.value = matrixJudgmentPane.value?.scrollTop ?? 0;
+  } else {
+    matrixTraceScrollTop.value = matrixTracePane.value?.scrollTop ?? 0;
+  }
+  matrixSampleDetailTab.value = tab;
+  if (tab === "trace") {
+    void loadMatrixTraceForCurrentSample();
+  }
+  await nextTick();
+  const targetPane =
+    tab === "judgment" ? matrixJudgmentPane.value : matrixTracePane.value;
+  if (targetPane) {
+    targetPane.scrollTop =
+      tab === "judgment"
+        ? matrixJudgmentScrollTop.value
+        : matrixTraceScrollTop.value;
+  }
+}
+
+/** 只在当前样本尚无同一份轨迹时加载，重复切换页签不会重复请求。 */
+async function loadMatrixTraceForCurrentSample(): Promise<void> {
+  const group = matrixJudgmentGroup.value;
+  if (!group) {
+    return;
+  }
+  if (
+    matrixTraceAttempt.value?.attempt_id === group.attemptId &&
+    matrixTraceAttempt.value.trace_id === group.traceId
+  ) {
+    return;
+  }
+  await openMatrixTraceTarget({
+    attempt_id: group.attemptId,
+    sample_ordinal: attemptOrdinalById.value.get(group.attemptId) ?? 0,
+    trace_id: group.traceId,
+    trace_status: group.traceStatus,
+  });
+}
+
+/** 把指定轨迹加载到当前样本的运行轨迹页签。 */
+async function openMatrixTraceTarget(target: MatrixTraceTarget): Promise<void> {
+  matrixTraceAttempt.value = target;
   matrixTraceDetail.value = null;
   matrixTraceError.value = "";
-  if (!attempt.trace_id) {
+  matrixSampleDetailTab.value = "trace";
+  const requestSequence = ++matrixTraceRequestSequence;
+  if (!target.trace_id) {
     matrixTraceError.value = "该样本没有可用的运行轨迹。";
     matrixTraceLoading.value = false;
     return;
   }
-  const requestSequence = ++matrixTraceRequestSequence;
   matrixTraceLoading.value = true;
   try {
     const detail = await api<TraceDetail>(
-      `/api/eval/traces/${encodeURIComponent(attempt.trace_id)}`,
+      `/api/eval/traces/${encodeURIComponent(target.trace_id)}`,
     );
     if (requestSequence !== matrixTraceRequestSequence) {
       return;
@@ -1656,7 +2059,7 @@ async function openMatrixTrace(attempt: ResultMatrixAttemptView): Promise<void> 
   }
 }
 
-/** 关闭结果矩阵中的 trace 弹窗，并让未完成请求失效。 */
+/** 释放当前样本的轨迹状态，并让未完成请求失效。 */
 function closeMatrixTrace(): void {
   matrixTraceRequestSequence += 1;
   matrixTraceAttempt.value = null;
@@ -1689,18 +2092,6 @@ function attemptSampleLabel(attemptId: string): string {
 /** 返回 attempt 的短 ID，完整值保留在页面标题上。 */
 function attemptShortId(attemptId: string): string {
   return `${attemptId.slice(0, 18)}…`;
-}
-
-/** 切到按样本视图并定位指定 attempt。 */
-async function focusAttemptJudgments(attemptId: string): Promise<void> {
-  historyDetailTab.value = "judgment";
-  judgmentViewMode.value = "attempt";
-  judgmentAttemptFilter.value = "all";
-  focusedAttemptId.value = attemptId;
-  await nextTick();
-  document
-    .getElementById(`attempt-judgment-${attemptId}`)
-    ?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 /** 只有 LLM 语义 criterion 允许人工纠错。 */
@@ -1939,35 +2330,29 @@ const canStartJudgment = computed(() => {
   );
 });
 
-const citationIntegrityCheck = computed(() =>
-  evaluationRevision.value?.checks.find(
-    (check) => check.checker_id === "citation_integrity",
-  ),
-);
-
-const citationSupportCheck = computed(() =>
-  evaluationRevision.value?.checks.find(
-    (check) => check.checker_id === "citation_support",
-  ),
-);
-
-const citationJudgeNotice = computed(() => {
-  if (!evaluationRevision.value || citationSupportCheck.value) {
+/** 解释指定样本为何没有 citation_support 检查结果。 */
+function citationJudgeNoticeForAttempt(attemptId: string): string {
+  const checks =
+    evaluationRevision.value?.checks.filter(
+      (check) => check.attempt_id === attemptId,
+    ) ?? [];
+  if (checks.some((check) => check.checker_id === "citation_support")) {
     return "";
   }
-  if (!citationIntegrityCheck.value) {
+  const integrity = checks.find(
+    (check) => check.checker_id === "citation_integrity",
+  );
+  if (!integrity) {
     return "尚未生成引用完整性检查。";
   }
-  if (citationIntegrityCheck.value.result === "pending") {
+  if (integrity.result === "pending") {
     return "运行轨迹或证据不可用，未执行引用支持判官。";
   }
-  if (
-    checkStringList(citationIntegrityCheck.value, "cited_block_ids").length === 0
-  ) {
+  if (checkStringList(integrity, "cited_block_ids").length === 0) {
     return "本次答案没有显式引用，引用支持判官未触发。";
   }
   return "本次存在无效引用，引用支持判官未执行。";
-});
+}
 
 /** 当前选中的判定修订版；切换时同步轮询状态。 */
 const selectedEvaluationRevisionId = computed({
@@ -2077,6 +2462,7 @@ async function connectAndLoad(): Promise<void> {
     snapshotId.value =
       collection?.manifest.snapshot_id ?? snapshotId.value;
     runs.value = recentRuns;
+    historyLastRefreshedAt.value = new Date().toISOString();
     judgePrompt.value = loadedJudgePrompt;
     citationPrompt.value = loadedCitationPrompt;
     const active = recentRuns.find((run) =>
@@ -2964,8 +3350,49 @@ function stopJudgmentPolling(): void {
 async function refreshRuns(): Promise<void> {
   try {
     runs.value = await api<RunView[]>("/api/eval/runs");
+    historyLastRefreshedAt.value = new Date().toISOString();
   } catch {
     // 最近运行只是辅助面板，不覆盖主状态栏中的关键错误。
+  }
+}
+
+/** 手动刷新最近执行批次，同时保留当前筛选和可用的 run 详情。 */
+async function refreshHistoryResults(): Promise<void> {
+  if (historyRefreshBusy.value) {
+    return;
+  }
+  const selectedRunId = selectedRun.value?.run_id ?? null;
+  historyRefreshBusy.value = true;
+  historyRefreshError.value = "";
+  historyRefreshNotice.value = "";
+  try {
+    const recentRuns = await api<RunView[]>("/api/eval/runs");
+    runs.value = recentRuns;
+    historyLastRefreshedAt.value = new Date().toISOString();
+    if (selectedRunId) {
+      const refreshed = recentRuns.find((run) => run.run_id === selectedRunId);
+      if (refreshed) {
+        selectedRun.value = refreshed;
+        schedulePolling();
+        await loadEvaluations(refreshed.run_id);
+      } else {
+        historyRefreshNotice.value = "原选中的执行批次已不存在，已切换到最近批次。";
+        const latest = recentRuns.find(historyRunMatchesFilter) ?? null;
+        if (latest) {
+          selectRun(latest);
+        } else {
+          selectedRun.value = null;
+          evaluationRevision.value = null;
+        }
+      }
+    } else if (!recentRuns.length) {
+      selectedRun.value = null;
+      evaluationRevision.value = null;
+    }
+  } catch (reason) {
+    historyRefreshError.value = `刷新最近执行批次失败：${String(reason)}`;
+  } finally {
+    historyRefreshBusy.value = false;
   }
 }
 
@@ -3056,7 +3483,6 @@ function selectRun(run: RunView): void {
   baselineError.value = "";
   isBaselineFormOpen.value = false;
   closeMatrixJudgment();
-  closeMatrixTrace();
   historyDetailTab.value = "matrix";
   stopJudgmentPolling();
   schedulePolling();
@@ -3335,7 +3761,25 @@ onBeforeUnmount(() => {
               <span class="eval-kicker">最近记录</span>
               <h3>最近执行批次</h3>
             </div>
+            <div class="eval-heading-actions">
+              <small v-if="historyLastRefreshedAt" class="eval-refresh-time">
+                最近刷新 {{ formatRunDate(historyLastRefreshedAt) }}
+              </small>
+              <button
+                type="button"
+                :disabled="historyRefreshBusy"
+                @click="refreshHistoryResults"
+              >
+                {{ historyRefreshBusy ? "刷新中…" : "刷新" }}
+              </button>
+            </div>
           </div>
+          <p v-if="historyRefreshError" class="eval-error">
+            {{ historyRefreshError }}
+          </p>
+          <p v-else-if="historyRefreshNotice" class="eval-notice">
+            {{ historyRefreshNotice }}
+          </p>
           <label class="eval-field">
             <span>按用例集筛选</span>
             <select v-model="historySuiteFilter">
@@ -4117,36 +4561,59 @@ onBeforeUnmount(() => {
             </button>
           </div>
 
-          <div class="eval-attempts">
-            <div
-              v-for="attempt in selectedRun.attempts"
-              :key="attempt.attempt_id"
-              class="eval-attempt-row"
+          <div class="eval-run-case-list">
+            <p v-if="!selectedRunCaseGroups.length" class="eval-empty">
+              当前执行批次没有可展示的用例。
+            </p>
+            <details
+              v-for="group in selectedRunCaseGroups"
+              :key="group.caseRevisionId"
+              class="eval-run-case-group"
+              :open="shouldOpenRunCase(group)"
             >
-              <div>
-                <strong>
-                  {{ caseById.get(attempt.case_revision_id)?.case_id ?? attempt.case_revision_id }}
-                </strong>
-                <small>{{ attempt.attempt_id.slice(0, 22) }}…</small>
+              <summary>
+                <div class="eval-run-case-title">
+                  <strong>{{ group.caseId }}</strong>
+                  <small :title="group.question">{{ group.question }}</small>
+                </div>
+                <span>{{ executionCountsText(group) }}</span>
+                <span>共 {{ group.attempts.length }} 个样本</span>
+              </summary>
+              <div class="eval-attempts">
+                <div
+                  v-for="attempt in group.attempts"
+                  :key="attempt.attempt_id"
+                  class="eval-attempt-row"
+                >
+                  <div>
+                    <strong>{{ attemptSampleLabel(attempt.attempt_id) }}</strong>
+                    <small :title="attempt.attempt_id">
+                      {{ attempt.attempt_id.slice(0, 22) }}…
+                    </small>
+                  </div>
+                  <span
+                    class="eval-attempt-status"
+                    :class="attempt.execution_status"
+                  >
+                    {{ statusText(attempt.execution_status) }}
+                    <small>{{ outcomeClassText(attempt.outcome_class) }}</small>
+                  </span>
+                  <span>首字 {{ firstTokenLabel(attempt) }}</span>
+                  <span>耗时 {{ durationLabel(attempt) }}</span>
+                  <span>
+                    {{ formatTokens(attempt.input_tokens + attempt.output_tokens) }} token
+                  </span>
+                  <button
+                    type="button"
+                    class="eval-trace-link"
+                    :disabled="!attempt.trace_id"
+                    @click="inspectTrace(attempt.trace_id)"
+                  >
+                    运行轨迹 · {{ statusText(attempt.trace_status) }}
+                  </button>
+                </div>
               </div>
-              <span class="eval-attempt-status" :class="attempt.execution_status">
-                {{ statusText(attempt.execution_status) }}
-                <small>{{ outcomeClassText(attempt.outcome_class) }}</small>
-              </span>
-              <span>首字 {{ firstTokenLabel(attempt) }}</span>
-              <span>耗时 {{ durationLabel(attempt) }}</span>
-              <span>
-                {{ formatTokens(attempt.input_tokens + attempt.output_tokens) }} token
-              </span>
-              <button
-                type="button"
-                class="eval-trace-link"
-                :disabled="!attempt.trace_id"
-                @click="inspectTrace(attempt.trace_id)"
-              >
-                运行轨迹 · {{ statusText(attempt.trace_status) }}
-              </button>
-            </div>
+            </details>
           </div>
           <nav
             v-if="evaluationTab === 'history'"
@@ -4211,28 +4678,31 @@ onBeforeUnmount(() => {
           </p>
           <template v-else>
             <div class="eval-matrix-summary">
-              <article>
-                <span>Run 结论</span>
+              <article :class="{ caution: resultMatrixSampleCounts.pending > 0 }">
+                <span>Case K 门禁结论</span>
                 <strong>
                   {{ resultMatrix.totals.case_pass_count }} 通过 /
                   {{ resultMatrix.totals.case_fail_count }} 失败 /
                   {{ resultMatrix.totals.case_pending_count }} 待定
                 </strong>
                 <small>
+                  判定完整性：{{ statusText(evaluationRevision?.status ?? "") }} ·
                   {{ resultMatrix.totals.case_exploratory_count }} 条探索性 ·
                   共 {{ resultMatrix.totals.case_count }} 个 case
                 </small>
               </article>
               <article>
-                <span>有效样本</span>
+                <span>样本判定</span>
                 <strong>
-                  {{ resultMatrix.totals.valid_samples }} /
-                  {{ resultMatrix.totals.attempt_count }}
+                  {{ resultMatrixSampleCounts.pass }} 通过 /
+                  {{ resultMatrixSampleCounts.fail }} 失败 /
+                  {{ resultMatrixSampleCounts.pending }} 待定
                 </strong>
                 <small>
-                  基础设施失败 {{ resultMatrix.totals.infrastructure_failures }} ·
-                  未知 {{ resultMatrix.totals.unknown_attempts }} ·
-                  取消 {{ resultMatrix.totals.canceled_attempts }}
+                  有效样本 {{ resultMatrix.totals.valid_samples }} /
+                  {{ resultMatrix.totals.attempt_count }} ·
+                  不计样本 {{ resultMatrixSampleCounts.excluded }} ·
+                  基础设施失败 {{ resultMatrix.totals.infrastructure_failures }}
                 </small>
               </article>
               <article :class="{ warning: resultMatrix.totals.redline_violation_count > 0 }">
@@ -4283,9 +4753,12 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="eval-matrix-category-counts">
                   <span>{{ category.totals.case_count }} 个 case</span>
-                  <span>通过 {{ category.totals.case_pass_count }}</span>
-                  <span>失败 {{ category.totals.case_fail_count }}</span>
-                  <span>待定 {{ category.totals.case_pending_count }}</span>
+                  <span>
+                    Case K 门禁：通过 {{ category.totals.case_pass_count }} ·
+                    失败 {{ category.totals.case_fail_count }} ·
+                    待定 {{ category.totals.case_pending_count }}
+                  </span>
+                  <span>{{ matrixSampleDistributionText(category.cases) }}</span>
                   <span>探索性 {{ category.totals.case_exploratory_count }}</span>
                   <span>
                     X 违规 {{ category.totals.x_violation_count }} ·
@@ -4322,8 +4795,16 @@ onBeforeUnmount(() => {
                       <strong>{{ matrixCase.case_id }}</strong>
                       <small :title="matrixCase.question">{{ matrixCase.question }}</small>
                     </div>
-                    <span :class="`result-${matrixCase.result}`">
-                      {{ statusText(matrixCase.result) }}
+                    <span
+                      :class="[
+                        `result-${matrixCase.result}`,
+                        {
+                          'result-pass-with-pending':
+                            matrixCase.result === 'pass' && matrixCase.pending_count > 0,
+                        },
+                      ]"
+                    >
+                      {{ matrixCaseGateText(matrixCase) }}
                     </span>
                     <span>有效样本 {{ matrixCase.valid_samples }} / {{ matrixCase.n }}</span>
                     <span>
@@ -4922,139 +5403,536 @@ onBeforeUnmount(() => {
             <p v-if="judgingError || evaluationRevision.error_message" class="eval-error">
               {{ judgingError || evaluationRevision.error_message }}
             </p>
-            <section
-              v-if="evaluationRevision.case_aggregates.length"
-              class="eval-aggregate-board"
-            >
-              <header>
-                <strong>生效绑定与 N／K 聚合</strong>
-                <span>
-                  {{ evaluationRevision.effective_bindings.length }} 条生效绑定 ·
-                  {{ evaluationRevision.check_reviews.length }} 条人工检查复核
-                </span>
-              </header>
-              <article
-                v-for="caseAggregate in evaluationRevision.case_aggregates"
-                :key="caseAggregate.case_revision_id"
-                class="eval-case-aggregate"
+            <div class="eval-judgment-navigator">
+              <label class="eval-field eval-judgment-case-field">
+                <span>Case</span>
+                <select v-model="judgmentCaseFilter">
+                  <option
+                    v-for="option in judgmentCaseOptions"
+                    :key="option.caseRevisionId"
+                    :value="option.caseRevisionId"
+                  >
+                    {{ option.caseId }} · 异常 {{ option.abnormalCount }} / 共
+                    {{ option.sampleCount }} 个样本
+                  </option>
+                </select>
+              </label>
+              <label class="eval-field eval-judgment-search">
+                <span>搜索样本</span>
+                <input
+                  v-model="judgmentSearch"
+                  placeholder="样本 # 或 attempt ID"
+                />
+              </label>
+              <p v-if="selectedJudgmentCase" class="eval-judgment-question">
+                {{ selectedJudgmentCase.question }}
+              </p>
+              <div
+                v-if="selectedCaseAggregate"
+                class="eval-judgment-case-summary"
               >
-                <div class="eval-case-aggregate-head">
+                <span>
+                  N={{ selectedCaseAggregate.n }} / K={{ selectedCaseAggregate.k }}
+                  · 有效样本 {{ selectedCaseAggregate.valid_samples }}
+                </span>
+                <span>
+                  生效绑定
+                  {{
+                    selectedCaseAttemptJudgmentGroups.reduce(
+                      (total, group) => total + group.judgments.length,
+                      0,
+                    )
+                  }}
+                  条
+                </span>
+                <span>
+                  样本：通过 {{ selectedCaseAggregate.pass_count }} · 失败
+                  {{ selectedCaseAggregate.fail_count }} · 待定
+                  {{ selectedCaseAggregate.pending_count }}
+                </span>
+                <span>
+                  X 违规 {{ selectedCaseAggregate.x_violation_count }} · 跨项失败
+                  {{ selectedCaseAggregate.check_failure_count }} · 红线失败
+                  {{ selectedCaseAggregate.redline_violation_count }}
+                </span>
+                <span :class="`result-${selectedCaseAggregate.result}`">
+                  Case 门禁：{{ statusText(selectedCaseAggregate.result) }}
+                  <template v-if="selectedCaseAggregate.pending_count">
+                    （含 {{ selectedCaseAggregate.pending_count }} 个待定样本）
+                  </template>
+                </span>
+                <span>判定完整性：{{ statusText(evaluationRevision?.status ?? "") }}</span>
+              </div>
+            </div>
+            <div class="eval-judgment-viewbar">
+              <div class="eval-attempt-filter">
+                <button
+                  type="button"
+                  :class="{ active: judgmentAttemptFilter === 'all' }"
+                  @click="judgmentAttemptFilter = 'all'"
+                >
+                  全部 {{ judgmentStatusCounts.all }}
+                </button>
+                <button
+                  type="button"
+                  :class="{ active: judgmentAttemptFilter === 'attention' }"
+                  @click="judgmentAttemptFilter = 'attention'"
+                >
+                  异常 {{ judgmentStatusCounts.attention }}
+                </button>
+                <button
+                  type="button"
+                  :class="{ active: judgmentAttemptFilter === 'fail' }"
+                  @click="judgmentAttemptFilter = 'fail'"
+                >
+                  失败 {{ judgmentStatusCounts.fail }}
+                </button>
+                <button
+                  type="button"
+                  :class="{ active: judgmentAttemptFilter === 'pending' }"
+                  @click="judgmentAttemptFilter = 'pending'"
+                >
+                  待定 {{ judgmentStatusCounts.pending }}
+                </button>
+                <button
+                  type="button"
+                  :class="{ active: judgmentAttemptFilter === 'pass' }"
+                  @click="judgmentAttemptFilter = 'pass'"
+                >
+                  通过 {{ judgmentStatusCounts.pass }}
+                </button>
+              </div>
+            </div>
+            <div class="eval-judgment-overview">
+              <p v-if="!judgmentOverviewRows.length" class="eval-empty">
+                当前筛选下没有可展示的判定项。
+              </p>
+              <template v-else>
+                <p class="eval-matrix-guide">
+                  行是判定项与全局检查，列是当前 case 的样本。点击单元格打开该样本的完整判定。
+                </p>
+                <div class="eval-judgment-table-wrap">
+                  <table class="eval-judgment-table">
+                    <thead>
+                      <tr>
+                        <th>判定项</th>
+                        <th
+                          v-for="column in judgmentOverviewColumns"
+                          :key="column.attemptId"
+                          :title="column.attemptId"
+                        >
+                          {{ column.sampleLabel }}
+                          <small :class="`result-${column.result}`">
+                            {{ statusText(column.result) }}
+                          </small>
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="row in judgmentOverviewRows" :key="row.key">
+                        <th :title="row.description">
+                          <span class="eval-rule-badge">{{ row.ruleType }}</span>
+                          <strong>{{ row.title }}</strong>
+                        </th>
+                        <td v-for="cell in row.cells" :key="cell.attemptId">
+                          <button
+                            type="button"
+                            class="eval-judgment-cell"
+                            :class="`result-${cell.result}`"
+                            :title="`${cell.sampleLabel} · ${cell.label}`"
+                            @click="openJudgmentOverviewCell(cell)"
+                          >
+                            {{ cell.label }}
+                          </button>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </template>
+            </div>
+          </template>
+        </section>
+
+        <section
+          v-if="
+            (evaluationTab === 'history' &&
+              selectedRun &&
+              historyDetailTab === 'trace') ||
+            (evaluationTab === 'execute' && traceDetail)
+          "
+          class="eval-trace-shell"
+        >
+          <TraceDetailViewer
+            v-if="traceDetail"
+            :trace="traceDetail"
+            :load-artifact="loadTraceArtifactContent"
+          />
+          <div v-else class="eval-panel eval-placeholder">
+            <span class="eval-kicker">运行轨迹</span>
+            <h3>选择一个执行样本的运行轨迹</h3>
+            <p>在上方样本列表点击“运行轨迹”后，这里会展示调用树和运行内容。</p>
+          </div>
+        </section>
+
+        <section
+          v-if="evaluationTab === 'history' && !selectedRun"
+          class="eval-panel eval-placeholder"
+        >
+          <span class="eval-kicker">历史结果</span>
+          <h3>从左侧选择一个历史执行批次</h3>
+          <p>历史页展示已完成、已取消或已封存批次及其运行轨迹。</p>
+        </section>
+      </div>
+
+      <div
+        v-if="matrixJudgmentGroup"
+        class="eval-modal-backdrop"
+        @click.self="closeMatrixJudgment"
+      >
+        <section
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="matrix-judgment-modal-title"
+          class="eval-modal eval-modal-wide eval-modal-sample"
+        >
+          <header class="eval-modal-header">
+            <div>
+              <span class="eval-kicker">样本详情</span>
+              <h3 id="matrix-judgment-modal-title">
+                {{ matrixJudgmentGroup.caseId }} ·
+                {{ matrixJudgmentGroup.sampleLabel }}
+                <span :class="`result-${matrixJudgmentGroup.result}`">
+                  {{ statusText(matrixJudgmentGroup.result) }}
+                </span>
+              </h3>
+              <small :title="matrixJudgmentGroup.attemptId">
+                {{ matrixJudgmentGroup.attemptId }}
+              </small>
+            </div>
+            <div class="eval-modal-header-actions">
+              <button
+                type="button"
+                class="eval-modal-close"
+                aria-label="关闭样本详情"
+                @click="closeMatrixJudgment"
+              >
+                关闭
+              </button>
+            </div>
+          </header>
+          <nav class="eval-sample-tabs" role="tablist" aria-label="样本详情">
+            <button
+              id="sample-judgment-tab"
+              type="button"
+              role="tab"
+              :aria-selected="matrixSampleDetailTab === 'judgment'"
+              aria-controls="sample-judgment-panel"
+              :class="{ active: matrixSampleDetailTab === 'judgment' }"
+              @click="selectMatrixSampleTab('judgment')"
+            >
+              <span>判定</span>
+              <small>
+                {{ matrixJudgmentGroup.judgments.length }} 项判定 ·
+                {{ checksForAttempt(matrixJudgmentGroup.attemptId).length }} 项检查
+              </small>
+            </button>
+            <button
+              id="sample-trace-tab"
+              type="button"
+              role="tab"
+              :aria-selected="matrixSampleDetailTab === 'trace'"
+              aria-controls="sample-trace-panel"
+              :class="{ active: matrixSampleDetailTab === 'trace' }"
+              @click="selectMatrixSampleTab('trace')"
+            >
+              <span>运行轨迹</span>
+              <small>{{ statusText(matrixJudgmentGroup.traceStatus) }}</small>
+            </button>
+          </nav>
+          <div class="eval-modal-tab-shell">
+            <div
+              v-show="matrixSampleDetailTab === 'judgment'"
+              id="sample-judgment-panel"
+              ref="matrixJudgmentPane"
+              role="tabpanel"
+              aria-labelledby="sample-judgment-tab"
+              class="eval-modal-body eval-modal-tab-pane"
+              @wheel.stop
+              @touchmove.stop
+            >
+            <section class="eval-modal-question">
+              <span>本次问题</span>
+              <p>{{ matrixJudgmentQuestion }}</p>
+            </section>
+            <div class="eval-attempt-judgment-summary">
+              <span>
+                R {{ matrixJudgmentGroup.aggregate?.r_pass ?? 0 }} 通过 /
+                {{ matrixJudgmentGroup.aggregate?.r_fail ?? 0 }} 失败 /
+                {{ matrixJudgmentGroup.aggregate?.r_pending ?? 0 }} 待定
+              </span>
+              <span>
+                X {{ matrixJudgmentGroup.aggregate?.x_not_violated ?? 0 }} 合规 /
+                {{ matrixJudgmentGroup.aggregate?.x_violated ?? 0 }} 违规 /
+                {{ matrixJudgmentGroup.aggregate?.x_pending ?? 0 }} 待定
+              </span>
+            </div>
+            <p
+              v-for="reason in matrixJudgmentGroup.aggregate?.reasons ?? []"
+              :key="reason"
+              class="eval-attempt-reason"
+            >
+              {{ reason }}
+            </p>
+            <details class="eval-answer-view">
+              <summary>查看答案</summary>
+              <pre>{{ matrixJudgmentGroup.answer || "无答案" }}</pre>
+            </details>
+            <section class="eval-modal-section">
+              <h4>R／X 判定</h4>
+              <p v-if="!matrixJudgmentGroup.judgments.length" class="eval-empty">
+                当前样本尚无 criterion 判定。
+              </p>
+              <article
+                v-for="judgment in matrixJudgmentGroup.judgments"
+                :key="judgment.judgment_id"
+                :id="judgmentOverviewTargetId(judgment.criterion_revision_id)"
+                class="eval-modal-judgment"
+                :class="{
+                  focused:
+                    matrixFocusedOverviewKey ===
+                    judgmentOverviewTargetId(judgment.criterion_revision_id),
+                }"
+              >
+                <header>
+                  <span class="eval-rule-badge">
+                    {{
+                      criterionById.get(judgment.criterion_revision_id)?.rule_type ??
+                      "?"
+                    }}
+                  </span>
                   <div>
-                    <strong>{{ caseAggregate.case_id }}</strong>
+                    <strong>
+                      {{
+                        criterionById.get(judgment.criterion_revision_id)?.title ??
+                        judgment.criterion_revision_id
+                      }}
+                    </strong>
                     <small>
-                      N={{ caseAggregate.n }} · K={{ caseAggregate.k }} ·
-                      有效样本 {{ caseAggregate.valid_samples }}
+                      {{ executorText(judgment.executor) }} ·
+                      {{ statusText(judgment.verdict) }}
                     </small>
                   </div>
-                  <span :class="`result-${caseAggregate.result}`">
-                    {{ statusText(caseAggregate.result) }}
+                  <span :class="`result-${judgment.normalized_result}`">
+                    {{ statusText(judgment.normalized_result) }}
                   </span>
-                </div>
-                <div class="eval-case-aggregate-counts">
-                  <span>通过 {{ caseAggregate.pass_count }}</span>
-                  <span>失败 {{ caseAggregate.fail_count }}</span>
-                  <span>待定 {{ caseAggregate.pending_count }}</span>
-                  <span>
-                    X 违规 {{ caseAggregate.x_violation_count }} ·
-                    跨项失败 {{ caseAggregate.check_failure_count }} ·
-                    红线失败 {{ caseAggregate.redline_violation_count }}
-                  </span>
-                </div>
-                <p v-for="reason in caseAggregate.reasons" :key="reason">
-                  {{ reason }}
+                </header>
+                <section class="eval-modal-criterion-rule">
+                  <span>金标准</span>
+                  <p>
+                    {{
+                      criterionById.get(judgment.criterion_revision_id)?.rule_text ??
+                      "当前 revision 的 criterion 原文不可用"
+                    }}
+                  </p>
+                </section>
+                <p>
+                  {{
+                    judgment.error_code
+                      ? diagnosticErrorText(judgment.error_code)
+                      : judgment.reason ?? "无判定说明"
+                  }}
                 </p>
-                <details
-                  v-if="attemptAggregatesForCase(caseAggregate.case_revision_id).length"
-                >
-                  <summary>查看 attempt 聚合</summary>
-                  <div class="eval-attempt-aggregates">
-                    <article
-                      v-for="attemptAggregate in attemptAggregatesForCase(
-                        caseAggregate.case_revision_id,
-                      )"
-                      :key="attemptAggregate.attempt_id"
+                <p v-if="judgment.evidence.quotes?.length" class="eval-judge-quote">
+                  “{{ judgment.evidence.quotes[0] }}”
+                </p>
+                <p v-if="effectiveBindingFor(judgment)" class="eval-binding-note">
+                  当前生效：
+                  {{ executorText(effectiveBindingFor(judgment)?.executor ?? "") }} ·
+                  {{ formatRunDate(effectiveBindingFor(judgment)?.bound_at ?? "") }}
+                </p>
+                <details v-if="judgment.invocations.length">
+                  <summary>判官调用 · {{ judgment.invocations.length }} 次</summary>
+                  <article
+                    v-for="invocation in judgment.invocations"
+                    :key="invocation.invocation_id"
+                    class="eval-invocation"
+                  >
+                    <span>
+                      第 {{ invocation.attempt_number }} 次 ·
+                      {{ statusText(invocation.status) }} ·
+                      {{ invocation.model_id }}
+                    </span>
+                    <small>
+                      输入 {{ invocation.input_tokens }} / 输出
+                      {{ invocation.output_tokens }} token
+                    </small>
+                    <details
+                      v-if="invocation.input_json"
+                      class="eval-invocation-payload"
                     >
-                      <div>
-                        <strong>
-                          {{ attemptAggregate.case_id }} ·
-                          {{ attemptSampleLabel(attemptAggregate.attempt_id) }}
-                        </strong>
-                        <span :class="`result-${attemptAggregate.result}`">
-                          {{ statusText(attemptAggregate.result) }}
-                        </span>
-                      </div>
-                      <small
-                        :title="attemptAggregate.attempt_id"
-                        class="eval-attempt-id"
+                      <summary>查看判官输入</summary>
+                      <TraceArtifactContentViewer
+                        artifact-kind="judge.input"
+                        :content="invocation.input_json"
+                        error=""
+                        :is-loading="false"
+                      />
+                    </details>
+                    <details
+                      v-if="invocation.raw_output"
+                      class="eval-invocation-payload"
+                    >
+                      <summary>查看判官输出</summary>
+                      <TraceArtifactContentViewer
+                        artifact-kind="judge.output"
+                        :content="invocation.raw_output"
+                        error=""
+                        :is-loading="false"
+                      />
+                    </details>
+                  </article>
+                </details>
+                <button
+                  v-if="canOverrideJudgment(judgment)"
+                  type="button"
+                  class="eval-secondary-button"
+                  @click="openJudgeOverrideFromMatrix(judgment)"
+                >
+                  人工改判此项
+                </button>
+                <form
+                  v-if="
+                    judgeOverrideTarget?.attemptId === judgment.attempt_id &&
+                    judgeOverrideTarget.criterionRevisionId ===
+                      judgment.criterion_revision_id
+                  "
+                  :id="`judge-override-form-${judgment.attempt_id}-${judgment.criterion_revision_id}`"
+                  class="eval-review-form"
+                  @submit.prevent="submitJudgeOverride"
+                >
+                  <label class="eval-field">
+                    <span>人工结论</span>
+                    <select v-model="judgeOverrideVerdict" required>
+                      <option value="" disabled>请选择</option>
+                      <option
+                        v-for="option in judgeOverrideVerdicts"
+                        :key="option.value"
+                        :value="option.value"
                       >
-                        {{ attemptShortId(attemptAggregate.attempt_id) }}
-                      </small>
-                      <small>
-                        R {{ attemptAggregate.r_pass }} 通过 /
-                        {{ attemptAggregate.r_fail }} 失败 /
-                        {{ attemptAggregate.r_pending }} 待定 · X
-                        {{ attemptAggregate.x_not_violated }} 合规 /
-                        {{ attemptAggregate.x_violated }} 违规 /
-                        {{ attemptAggregate.x_pending }} 待定
-                      </small>
-                      <p v-for="reason in attemptAggregate.reasons" :key="reason">
-                        {{ reason }}
-                      </p>
-                      <button
-                        type="button"
-                        class="eval-secondary-button"
-                        @click="focusAttemptJudgments(attemptAggregate.attempt_id)"
-                      >
-                        查看该样本判定
-                      </button>
-                    </article>
+                        {{ option.label }}
+                      </option>
+                    </select>
+                  </label>
+                  <label class="eval-field">
+                    <span>判定原因</span>
+                    <textarea
+                      v-model="judgeOverrideReason"
+                      rows="3"
+                      required
+                      placeholder="说明为什么不采用当前 LLM Judge 结论"
+                    />
+                  </label>
+                  <label class="eval-field">
+                    <span>复核人</span>
+                    <input v-model="judgeOverrideReviewer" type="text" required />
+                  </label>
+                  <p v-if="judgeOverrideError" class="eval-error">
+                    {{ judgeOverrideError }}
+                  </p>
+                  <div class="eval-actions">
+                    <button type="submit" :disabled="judgeOverrideBusy">
+                      {{ judgeOverrideBusy ? "提交中…" : "提交人工判定" }}
+                    </button>
+                    <button
+                      type="button"
+                      :disabled="judgeOverrideBusy"
+                      @click="closeJudgeOverride"
+                    >
+                      取消
+                    </button>
                   </div>
+                </form>
+                <details
+                  v-if="judgmentHistory(judgment).length > 1"
+                  class="eval-binding-history"
+                >
+                  <summary>
+                    判定历史 · {{ judgmentHistory(judgment).length }} 条
+                  </summary>
+                  <article
+                    v-for="historyItem in judgmentHistory(judgment)"
+                    :key="historyItem.judgment_id"
+                  >
+                    <div>
+                      <strong>{{ executorText(historyItem.executor) }}</strong>
+                      <span :class="`result-${historyItem.normalized_result}`">
+                        {{ statusText(historyItem.normalized_result) }}
+                      </span>
+                    </div>
+                    <p>{{ historyItem.reason ?? "无判定说明" }}</p>
+                    <small>
+                      {{ formatRunDate(historyItem.created_at) }} ·
+                      {{ isJudgmentEffective(historyItem) ? "当前生效" : "历史" }}
+                    </small>
+                  </article>
                 </details>
               </article>
             </section>
-            <div class="eval-check-guide">
-              <article>
-                <strong>引用完整性</strong>
-                <p>
-                  检查引用有没有指错地方。程序会逐个核对答案中的知识块编号（block_id），确认它们都来自本次检索工具实际返回的证据。
-                </p>
-              </article>
-              <article>
-                <strong>引用支持</strong>
-                <p>
-                  模型判官按 claim 联合查看被引用的证据原文。判为 unsupported
-                  时显示为未确认的普通失败，但不会自动成为红线；人工确认后才阻断。
-                  判为 unknown 时保持待定。只有引用完整且答案包含显式引用时才会执行。
-                </p>
-              </article>
-            </div>
-            <details class="eval-check-results">
-              <summary>通用跨判定项检查 · {{ evaluationRevision.checks.length }}</summary>
-              <details
-                v-for="check in evaluationRevision.checks"
+            <section class="eval-modal-section">
+              <h4>通用跨判定项检查</h4>
+              <div class="eval-check-guide">
+                <article>
+                  <strong>引用完整性</strong>
+                  <p>
+                    检查引用有没有指错地方。程序会逐个核对答案中的知识块编号（block_id），确认它们都来自本次检索工具实际返回的证据。
+                  </p>
+                </article>
+                <article>
+                  <strong>引用支持</strong>
+                  <p>
+                    模型判官按 claim 联合查看被引用的证据原文。判为 unsupported
+                    时显示为未确认的普通失败，但不会自动成为红线；人工确认后才阻断。
+                    判为 unknown 时保持待定。只有引用完整且答案包含显式引用时才会执行。
+                  </p>
+                </article>
+              </div>
+              <p v-if="!checksForAttempt(matrixJudgmentGroup.attemptId).length" class="eval-empty">
+                当前样本没有跨判定项检查。
+              </p>
+              <article
+                v-for="check in checksForAttempt(matrixJudgmentGroup.attemptId)"
                 :key="check.check_result_id"
-                class="eval-check-result"
+                :id="judgmentOverviewTargetId(`check:${check.checker_id}`)"
+                class="eval-modal-check"
+                :class="{
+                  focused:
+                    matrixFocusedOverviewKey ===
+                    judgmentOverviewTargetId(`check:${check.checker_id}`),
+                }"
               >
-                <summary>
-                  <strong :title="check.checker_id">
-                    {{ checkerText(check.checker_id) }}
-                  </strong>
+                <div class="eval-modal-check-heading">
+                  <strong>{{ checkerText(check.checker_id) }}</strong>
                   <span :class="effectiveCheckStatusClass(check)">
                     {{ effectiveCheckStatusText(check) }}
                   </span>
-                  <small>
-                    {{ caseIdForAttempt(check.attempt_id) }} ·
-                    {{ effectiveCheckErrorText(check) }}
-                    · {{ checkExecutorVersionText(check) }}
-                    <template v-if="checkReviewFor(check)">
-                      · 人工复核：{{ checkReviewReviewerText(check) }}
-                      <template v-if="check.checker_id === 'citation_support'">
-                        · 改判 {{ humanReviewedCitationCount(check) }} /
-                        {{ effectiveCitationGroups(check).length }} claim
-                      </template>
-                    </template>
-                  </small>
-                </summary>
+                </div>
+                <small>
+                  {{ effectiveCheckErrorText(check) }}
+                  · {{ checkExecutorVersionText(check) }}
+                </small>
+                <small v-if="citationBatchSummary(check)">
+                  {{ citationBatchSummary(check) }}
+                </small>
+                <small
+                  v-if="
+                    checkReviewFor(check) &&
+                    check.checker_id === 'citation_support'
+                  "
+                >
+                  人工改判 {{ humanReviewedCitationCount(check) }} /
+                  {{ effectiveCitationGroups(check).length }} claim
+                </small>
                 <div class="eval-check-detail">
                   <section
                     v-if="checkReviewFor(check)"
@@ -5177,7 +6055,7 @@ onBeforeUnmount(() => {
                       v-if="canReviewLlmCheck(check)"
                       type="button"
                       class="eval-secondary-button"
-                      @click="openCheckReview(check)"
+                      @click="openCheckReviewFromMatrix(check)"
                     >
                       人工复核 claim 支持结论
                     </button>
@@ -5186,6 +6064,7 @@ onBeforeUnmount(() => {
                         checkReviewTarget?.check.check_result_id ===
                         check.check_result_id
                       "
+                      :id="`check-review-form-${check.check_result_id}`"
                       class="eval-review-form"
                       @submit.prevent="submitCheckReview"
                     >
@@ -5240,653 +6119,37 @@ onBeforeUnmount(() => {
                     </form>
                   </template>
                 </div>
-              </details>
-              <p v-if="citationJudgeNotice" class="eval-check-notice">
-                {{ citationJudgeNotice }}
-              </p>
-            </details>
-            <div class="eval-judgment-viewbar">
-              <div role="tablist" aria-label="判定结果分组方式">
-                <button
-                  type="button"
-                  :class="{ active: judgmentViewMode === 'attempt' }"
-                  @click="judgmentViewMode = 'attempt'"
-                >
-                  按样本
-                </button>
-                <button
-                  type="button"
-                  :class="{ active: judgmentViewMode === 'criterion' }"
-                  @click="judgmentViewMode = 'criterion'"
-                >
-                  按判定项
-                </button>
-              </div>
-              <div v-if="judgmentViewMode === 'attempt'" class="eval-attempt-filter">
-                <button
-                  type="button"
-                  :class="{ active: judgmentAttemptFilter === 'all' }"
-                  @click="judgmentAttemptFilter = 'all'"
-                >
-                  全部 {{ attemptJudgmentGroups.length }}
-                </button>
-                <button
-                  type="button"
-                  :class="{ active: judgmentAttemptFilter === 'failed' }"
-                  @click="judgmentAttemptFilter = 'failed'"
-                >
-                  失败 {{ failedAttemptCount }}
-                </button>
-              </div>
-            </div>
-            <div
-              v-if="judgmentViewMode === 'attempt'"
-              class="eval-attempt-judgment-groups"
-            >
-              <p v-if="!filteredAttemptJudgmentGroups.length" class="eval-empty">
-                当前筛选下没有样本。
-              </p>
-              <details
-                v-for="group in filteredAttemptJudgmentGroups"
-                :id="`attempt-judgment-${group.attemptId}`"
-                :key="group.attemptId"
-                class="eval-attempt-judgment-group"
-                :class="{
-                  focused: focusedAttemptId === group.attemptId,
-                  failed: group.result === 'fail',
-                  pending: group.result === 'pending',
-                }"
-                :open="
-                  focusedAttemptId === group.attemptId || group.result !== 'pass'
-                "
+              </article>
+              <p
+                v-if="citationJudgeNoticeForAttempt(matrixJudgmentGroup.attemptId)"
+                class="eval-check-notice"
               >
-                <summary>
-                  <div>
-                    <strong>{{ group.caseId }} · {{ group.sampleLabel }}</strong>
-                    <small :title="group.attemptId">
-                      {{ attemptShortId(group.attemptId) }}
-                    </small>
-                  </div>
-                  <span :class="`result-${group.result}`">
-                    {{ statusText(group.result) }}
-                  </span>
-                </summary>
-                <div class="eval-attempt-judgment-summary">
-                  <span>
-                    R {{ group.aggregate?.r_pass ?? 0 }} 通过 /
-                    {{ group.aggregate?.r_fail ?? 0 }} 失败 /
-                    {{ group.aggregate?.r_pending ?? 0 }} 待定
-                  </span>
-                  <span>
-                    X {{ group.aggregate?.x_not_violated ?? 0 }} 合规 /
-                    {{ group.aggregate?.x_violated ?? 0 }} 违规 /
-                    {{ group.aggregate?.x_pending ?? 0 }} 待定
-                  </span>
-                </div>
-                <p
-                  v-for="reason in group.aggregate?.reasons ?? []"
-                  :key="reason"
-                  class="eval-attempt-reason"
-                >
-                  {{ reason }}
-                </p>
-                <div class="eval-attempt-detail-actions">
-                  <details class="eval-answer-view">
-                    <summary>查看答案</summary>
-                    <pre>{{ group.answer || "无答案" }}</pre>
-                  </details>
-                  <button
-                    v-if="group.traceId"
-                    type="button"
-                    class="eval-attempt-trace-action"
-                    :title="group.traceId"
-                    @click="inspectTrace(group.traceId)"
-                  >
-                    查看本样本运行轨迹 · {{ statusText(group.traceStatus) }}
-                  </button>
-                </div>
-                <div class="eval-attempt-criterion-list">
-                  <article
-                    v-for="judgment in group.judgments"
-                    :key="judgment.judgment_id"
-                  >
-                    <header>
-                      <span class="eval-rule-badge">
-                        {{
-                          criterionById.get(judgment.criterion_revision_id)?.rule_type ??
-                          "?"
-                        }}
-                      </span>
-                      <div>
-                        <strong>
-                          {{
-                            criterionById.get(judgment.criterion_revision_id)?.title ??
-                            judgment.criterion_revision_id
-                          }}
-                        </strong>
-                        <small>
-                          {{ executorText(judgment.executor) }} · {{ group.sampleLabel }}
-                        </small>
-                      </div>
-                      <span :class="`result-${judgment.normalized_result}`">
-                        {{ statusText(judgment.normalized_result) }}
-                      </span>
-                    </header>
-                    <p>
-                      {{
-                        judgment.error_code
-                          ? diagnosticErrorText(judgment.error_code)
-                          : judgment.reason ?? "无判定说明"
-                      }}
-                    </p>
-                    <p
-                      v-if="judgment.evidence.quotes?.length"
-                      class="eval-judge-quote"
-                    >
-                      “{{ judgment.evidence.quotes[0] }}”
-                    </p>
-                    <details v-if="judgment.invocations.length">
-                      <summary>
-                        判官调用 · {{ judgment.invocations.length }} 次
-                      </summary>
-                      <article
-                        v-for="invocation in judgment.invocations"
-                        :key="invocation.invocation_id"
-                        class="eval-invocation"
-                      >
-                        <span>
-                          第 {{ invocation.attempt_number }} 次 ·
-                          {{ statusText(invocation.status) }} ·
-                          {{ invocation.model_id }}
-                        </span>
-                        <small>
-                          输入 {{ invocation.input_tokens }} / 输出
-                          {{ invocation.output_tokens }} token
-                        </small>
-                        <details
-                          v-if="invocation.input_json"
-                          class="eval-invocation-payload"
-                        >
-                          <summary>查看判官输入</summary>
-                          <TraceArtifactContentViewer
-                            artifact-kind="judge.input"
-                            :content="invocation.input_json"
-                            error=""
-                            :is-loading="false"
-                          />
-                        </details>
-                        <details
-                          v-if="invocation.raw_output"
-                          class="eval-invocation-payload"
-                        >
-                          <summary>查看判官输出</summary>
-                          <TraceArtifactContentViewer
-                            artifact-kind="judge.output"
-                            :content="invocation.raw_output"
-                            error=""
-                            :is-loading="false"
-                          />
-                        </details>
-                      </article>
-                    </details>
-                  </article>
-                </div>
-              </details>
-            </div>
-            <div v-else class="eval-judgment-groups">
-              <section
-                v-for="group in judgmentGroups"
-                v-show="group.items.length"
-                :key="group.ruleType"
-                class="eval-judgment-group"
-                :class="`eval-judgment-group-${group.ruleType.toLowerCase()}`"
-              >
-                <header class="eval-judgment-group-guide">
-                  <span class="eval-rule-badge">{{ group.ruleType }}</span>
-                  <div>
-                    <h4>{{ group.title }}</h4>
-                    <p>{{ group.description }}</p>
-                  </div>
-                </header>
-                <div class="eval-judgment-list">
-                  <article
-                    v-for="judgment in group.items"
-                    :key="judgment.judgment_id"
-                  >
-                    <div class="eval-judgment-head">
-                      <div>
-                        <strong>{{ caseIdForAttempt(judgment.attempt_id) }}</strong>
-                        <span>
-                          {{
-                            criterionById.get(judgment.criterion_revision_id)?.title ??
-                            judgment.criterion_revision_id
-                          }}
-                        </span>
-                      </div>
-                      <span :class="`result-${judgment.normalized_result}`">
-                        {{ statusText(judgment.normalized_result) }}
-                      </span>
-                    </div>
-                    <p>
-                      {{ executorText(judgment.executor) }}：
-                      {{ statusText(judgment.verdict) }} ·
-                      {{
-                        judgment.error_code
-                          ? diagnosticErrorText(judgment.error_code)
-                          : judgment.reason ?? "无判定说明"
-                      }}
-                    </p>
-                    <p v-if="judgment.evidence.quotes?.length" class="eval-judge-quote">
-                      “{{ judgment.evidence.quotes[0] }}”
-                    </p>
-                    <p v-if="effectiveBindingFor(judgment)" class="eval-binding-note">
-                      当前生效：
-                      {{ executorText(effectiveBindingFor(judgment)?.executor ?? "") }} ·
-                      {{ formatRunDate(effectiveBindingFor(judgment)?.bound_at ?? "") }}
-                    </p>
-                    <button
-                      v-if="canOverrideJudgment(judgment)"
-                      type="button"
-                      class="eval-secondary-button"
-                      @click="openJudgeOverride(judgment)"
-                    >
-                      人工改判
-                    </button>
-                    <form
-                      v-if="
-                        judgeOverrideTarget?.attemptId === judgment.attempt_id &&
-                        judgeOverrideTarget.criterionRevisionId ===
-                          judgment.criterion_revision_id
-                      "
-                      class="eval-review-form"
-                      @submit.prevent="submitJudgeOverride"
-                    >
-                      <label class="eval-field">
-                        <span>人工结论</span>
-                        <select v-model="judgeOverrideVerdict" required>
-                          <option value="" disabled>请选择</option>
-                          <option
-                            v-for="option in judgeOverrideVerdicts"
-                            :key="option.value"
-                            :value="option.value"
-                          >
-                            {{ option.label }}
-                          </option>
-                        </select>
-                      </label>
-                      <label class="eval-field">
-                        <span>判定原因</span>
-                        <textarea
-                          v-model="judgeOverrideReason"
-                          rows="3"
-                          required
-                          placeholder="说明为什么不采用当前 LLM Judge 结论"
-                        />
-                      </label>
-                      <label class="eval-field">
-                        <span>复核人</span>
-                        <input v-model="judgeOverrideReviewer" type="text" required />
-                      </label>
-                      <p v-if="judgeOverrideError" class="eval-error">
-                        {{ judgeOverrideError }}
-                      </p>
-                      <div class="eval-actions">
-                        <button type="submit" :disabled="judgeOverrideBusy">
-                          {{ judgeOverrideBusy ? "提交中…" : "提交人工判定" }}
-                        </button>
-                        <button
-                          type="button"
-                          :disabled="judgeOverrideBusy"
-                          @click="closeJudgeOverride"
-                        >
-                          取消
-                        </button>
-                      </div>
-                    </form>
-                    <details
-                      v-if="judgmentHistory(judgment).length > 1"
-                      class="eval-binding-history"
-                    >
-                      <summary>
-                        判定历史 · {{ judgmentHistory(judgment).length }} 条
-                      </summary>
-                      <article
-                        v-for="historyItem in judgmentHistory(judgment)"
-                        :key="historyItem.judgment_id"
-                      >
-                        <div>
-                          <strong>{{ executorText(historyItem.executor) }}</strong>
-                          <span :class="`result-${historyItem.normalized_result}`">
-                            {{ statusText(historyItem.normalized_result) }}
-                          </span>
-                        </div>
-                        <p>{{ historyItem.reason ?? "无判定说明" }}</p>
-                        <small>
-                          {{ formatRunDate(historyItem.created_at) }} ·
-                          {{ isJudgmentEffective(historyItem) ? "当前生效" : "历史" }}
-                        </small>
-                      </article>
-                    </details>
-                    <details v-if="judgment.invocations.length">
-                      <summary>
-                        判官调用 · {{ judgment.invocations.length }} 次
-                      </summary>
-                      <article
-                        v-for="invocation in judgment.invocations"
-                        :key="invocation.invocation_id"
-                        class="eval-invocation"
-                      >
-                        <span>
-                          第 {{ invocation.attempt_number }} 次 ·
-                          {{ statusText(invocation.status) }} · {{ invocation.model_id }}
-                        </span>
-                        <small>
-                          输入 {{ invocation.input_tokens }} / 输出
-                          {{ invocation.output_tokens }} token
-                        </small>
-                        <details
-                          v-if="invocation.input_json"
-                          class="eval-invocation-payload"
-                        >
-                          <summary>查看判官输入</summary>
-                          <TraceArtifactContentViewer
-                            artifact-kind="judge.input"
-                            :content="invocation.input_json"
-                            error=""
-                            :is-loading="false"
-                          />
-                        </details>
-                        <details
-                          v-if="invocation.raw_output"
-                          class="eval-invocation-payload"
-                        >
-                          <summary>查看判官输出</summary>
-                          <TraceArtifactContentViewer
-                            artifact-kind="judge.output"
-                            :content="invocation.raw_output"
-                            error=""
-                            :is-loading="false"
-                          />
-                        </details>
-                      </article>
-                    </details>
-                  </article>
-                </div>
-              </section>
-            </div>
-          </template>
-        </section>
-
-        <section
-          v-if="
-            (evaluationTab === 'history' &&
-              selectedRun &&
-              historyDetailTab === 'trace') ||
-            (evaluationTab === 'execute' && traceDetail)
-          "
-          class="eval-trace-shell"
-        >
-          <TraceDetailViewer
-            v-if="traceDetail"
-            :trace="traceDetail"
-            :load-artifact="loadTraceArtifactContent"
-          />
-          <div v-else class="eval-panel eval-placeholder">
-            <span class="eval-kicker">运行轨迹</span>
-            <h3>选择一个执行样本的运行轨迹</h3>
-            <p>在上方样本列表点击“运行轨迹”后，这里会展示调用树和运行内容。</p>
+                {{ citationJudgeNoticeForAttempt(matrixJudgmentGroup.attemptId) }}
+              </p>
+            </section>
           </div>
-        </section>
-
-        <section
-          v-if="evaluationTab === 'history' && !selectedRun"
-          class="eval-panel eval-placeholder"
-        >
-          <span class="eval-kicker">历史结果</span>
-          <h3>从左侧选择一个历史执行批次</h3>
-          <p>历史页展示已完成、已取消或已封存批次及其运行轨迹。</p>
-        </section>
-      </div>
-
-      <div
-        v-if="matrixJudgmentGroup"
-        class="eval-modal-backdrop"
-        @click.self="closeMatrixJudgment"
-      >
-        <section
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="matrix-judgment-modal-title"
-          class="eval-modal eval-modal-wide"
-        >
-          <header class="eval-modal-header">
-            <div>
-              <span class="eval-kicker">样本判定</span>
-              <h3 id="matrix-judgment-modal-title">
-                {{ matrixJudgmentGroup.caseId }} ·
-                {{ matrixJudgmentGroup.sampleLabel }}
-                <span :class="`result-${matrixJudgmentGroup.result}`">
-                  {{ statusText(matrixJudgmentGroup.result) }}
-                </span>
-              </h3>
-              <small :title="matrixJudgmentGroup.attemptId">
-                {{ matrixJudgmentGroup.attemptId }}
-              </small>
-            </div>
-            <button
-              type="button"
-              class="eval-modal-close"
-              aria-label="关闭样本判定"
-              @click="closeMatrixJudgment"
-            >
-              关闭
-            </button>
-          </header>
           <div
-            class="eval-modal-body"
+            v-show="matrixSampleDetailTab === 'trace'"
+            id="sample-trace-panel"
+            ref="matrixTracePane"
+            role="tabpanel"
+            aria-labelledby="sample-trace-tab"
+            class="eval-modal-body eval-modal-tab-pane eval-modal-trace-pane"
             @wheel.stop
             @touchmove.stop
           >
-            <section class="eval-modal-question">
-              <span>本次问题</span>
-              <p>{{ matrixJudgmentQuestion }}</p>
-            </section>
-            <div class="eval-attempt-judgment-summary">
-              <span>
-                R {{ matrixJudgmentGroup.aggregate?.r_pass ?? 0 }} 通过 /
-                {{ matrixJudgmentGroup.aggregate?.r_fail ?? 0 }} 失败 /
-                {{ matrixJudgmentGroup.aggregate?.r_pending ?? 0 }} 待定
+            <header class="eval-trace-pane-heading">
+              <div>
+                <span class="eval-kicker">运行轨迹</span>
+                <p v-if="matrixJudgmentGroup.traceId">
+                  {{ matrixJudgmentGroup.traceId }}
+                </p>
+                <p v-else>当前样本没有可用的运行轨迹。</p>
+              </div>
+              <span :class="`result-${matrixJudgmentGroup.result}`">
+                {{ statusText(matrixJudgmentGroup.traceStatus) }}
               </span>
-              <span>
-                X {{ matrixJudgmentGroup.aggregate?.x_not_violated ?? 0 }} 合规 /
-                {{ matrixJudgmentGroup.aggregate?.x_violated ?? 0 }} 违规 /
-                {{ matrixJudgmentGroup.aggregate?.x_pending ?? 0 }} 待定
-              </span>
-            </div>
-            <p
-              v-for="reason in matrixJudgmentGroup.aggregate?.reasons ?? []"
-              :key="reason"
-              class="eval-attempt-reason"
-            >
-              {{ reason }}
-            </p>
-            <details class="eval-answer-view">
-              <summary>查看答案</summary>
-              <pre>{{ matrixJudgmentGroup.answer || "无答案" }}</pre>
-            </details>
-            <section class="eval-modal-section">
-              <h4>R／X 判定</h4>
-              <p v-if="!matrixJudgmentGroup.judgments.length" class="eval-empty">
-                当前样本尚无 criterion 判定。
-              </p>
-              <article
-                v-for="judgment in matrixJudgmentGroup.judgments"
-                :key="judgment.judgment_id"
-                class="eval-modal-judgment"
-              >
-                <header>
-                  <span class="eval-rule-badge">
-                    {{
-                      criterionById.get(judgment.criterion_revision_id)?.rule_type ??
-                      "?"
-                    }}
-                  </span>
-                  <div>
-                    <strong>
-                      {{
-                        criterionById.get(judgment.criterion_revision_id)?.title ??
-                        judgment.criterion_revision_id
-                      }}
-                    </strong>
-                    <small>
-                      {{ executorText(judgment.executor) }} ·
-                      {{ statusText(judgment.verdict) }}
-                    </small>
-                  </div>
-                  <span :class="`result-${judgment.normalized_result}`">
-                    {{ statusText(judgment.normalized_result) }}
-                  </span>
-                </header>
-                <section class="eval-modal-criterion-rule">
-                  <span>金标准</span>
-                  <p>
-                    {{
-                      criterionById.get(judgment.criterion_revision_id)?.rule_text ??
-                      "当前 revision 的 criterion 原文不可用"
-                    }}
-                  </p>
-                </section>
-                <p>
-                  {{
-                    judgment.error_code
-                      ? diagnosticErrorText(judgment.error_code)
-                      : judgment.reason ?? "无判定说明"
-                  }}
-                </p>
-                <p v-if="judgment.evidence.quotes?.length" class="eval-judge-quote">
-                  “{{ judgment.evidence.quotes[0] }}”
-                </p>
-                <details v-if="judgment.invocations.length">
-                  <summary>判官调用 · {{ judgment.invocations.length }} 次</summary>
-                  <article
-                    v-for="invocation in judgment.invocations"
-                    :key="invocation.invocation_id"
-                    class="eval-invocation"
-                  >
-                    <span>
-                      第 {{ invocation.attempt_number }} 次 ·
-                      {{ statusText(invocation.status) }} ·
-                      {{ invocation.model_id }}
-                    </span>
-                    <small>
-                      输入 {{ invocation.input_tokens }} / 输出
-                      {{ invocation.output_tokens }} token
-                    </small>
-                    <details
-                      v-if="invocation.input_json"
-                      class="eval-invocation-payload"
-                    >
-                      <summary>查看判官输入</summary>
-                      <TraceArtifactContentViewer
-                        artifact-kind="judge.input"
-                        :content="invocation.input_json"
-                        error=""
-                        :is-loading="false"
-                      />
-                    </details>
-                    <details
-                      v-if="invocation.raw_output"
-                      class="eval-invocation-payload"
-                    >
-                      <summary>查看判官输出</summary>
-                      <TraceArtifactContentViewer
-                        artifact-kind="judge.output"
-                        :content="invocation.raw_output"
-                        error=""
-                        :is-loading="false"
-                      />
-                    </details>
-                  </article>
-                </details>
-              </article>
-            </section>
-            <section class="eval-modal-section">
-              <h4>通用跨判定项检查</h4>
-              <p v-if="!checksForAttempt(matrixJudgmentGroup.attemptId).length" class="eval-empty">
-                当前样本没有跨判定项检查。
-              </p>
-              <article
-                v-for="check in checksForAttempt(matrixJudgmentGroup.attemptId)"
-                :key="check.check_result_id"
-                class="eval-modal-check"
-              >
-                <div>
-                  <strong>{{ checkerText(check.checker_id) }}</strong>
-                  <span :class="effectiveCheckStatusClass(check)">
-                    {{ effectiveCheckStatusText(check) }}
-                  </span>
-                </div>
-                <small>
-                  {{ effectiveCheckErrorText(check) }}
-                  · {{ checkExecutorVersionText(check) }}
-                </small>
-                <small v-if="citationBatchSummary(check)">
-                  {{ citationBatchSummary(check) }}
-                </small>
-                <p v-if="checkReviewFor(check)" class="eval-check-review-summary">
-                  <strong>人工复核：</strong>
-                  {{ checkReviewReviewerText(check) }} · {{ checkReviewReasonText(check) }}
-                </p>
-                <p
-                  v-else-if="typeof check.payload.reason === 'string' && check.payload.reason"
-                >
-                  {{ check.payload.reason }}
-                </p>
-              </article>
-            </section>
-          </div>
-        </section>
-      </div>
-
-      <div
-        v-if="matrixTraceAttempt"
-        class="eval-modal-backdrop"
-        @click.self="closeMatrixTrace"
-      >
-        <section
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="matrix-trace-modal-title"
-          class="eval-modal eval-modal-trace"
-        >
-          <header class="eval-modal-header">
-            <div>
-              <span class="eval-kicker">样本运行轨迹</span>
-              <h3 id="matrix-trace-modal-title">
-                样本 #{{ String(matrixTraceAttempt.sample_ordinal).padStart(2, "0") }}
-                · {{ matrixTraceAttempt.attempt_id.slice(0, 18) }}…
-              </h3>
-              <small>
-                {{ statusText(matrixTraceAttempt.trace_status) }}
-                <template v-if="matrixTraceAttempt.trace_id">
-                  · {{ matrixTraceAttempt.trace_id }}
-                </template>
-              </small>
-            </div>
-            <button
-              type="button"
-              class="eval-modal-close"
-              aria-label="关闭运行轨迹"
-              @click="closeMatrixTrace"
-            >
-              关闭
-            </button>
-          </header>
-          <div
-            class="eval-modal-body"
-            @wheel.stop
-            @touchmove.stop
-          >
+            </header>
             <p v-if="matrixTraceLoading" class="eval-empty">正在读取运行轨迹…</p>
             <p v-else-if="matrixTraceError" class="eval-error">
               {{ matrixTraceError }}
@@ -5896,6 +6159,7 @@ onBeforeUnmount(() => {
               :trace="matrixTraceDetail"
               :load-artifact="loadTraceArtifactContent"
             />
+          </div>
           </div>
         </section>
       </div>
@@ -6554,6 +6818,12 @@ onBeforeUnmount(() => {
   color: #7b897e;
 }
 
+.eval-refresh-time {
+  color: #748279;
+  font-size: 0.65rem;
+  white-space: nowrap;
+}
+
 .eval-run-title {
   overflow: hidden;
   font-size: 0.82rem;
@@ -7022,33 +7292,6 @@ onBeforeUnmount(() => {
   line-height: 1.55;
 }
 
-.eval-check-results {
-  margin-top: 12px;
-  border: 1px solid #dfe8e0;
-  border-radius: 10px;
-  padding: 9px 11px;
-}
-
-.eval-check-result {
-  margin-top: 7px;
-  border-top: 1px solid #e3eae4;
-}
-
-.eval-check-result > summary {
-  display: grid;
-  grid-template-columns: minmax(150px, 1fr) auto;
-  gap: 3px 10px;
-  padding: 7px 0;
-  color: #53665a;
-  cursor: pointer;
-  font-size: 0.74rem;
-}
-
-.eval-check-result > summary small {
-  grid-column: 1 / -1;
-  color: #7b897f;
-}
-
 .eval-check-detail {
   display: grid;
   gap: 8px;
@@ -7094,11 +7337,6 @@ onBeforeUnmount(() => {
 
 .eval-check-audit-note {
   color: #7a6550;
-}
-
-.eval-check-review-summary {
-  border-left: 3px solid #72a17f;
-  padding-left: 8px;
 }
 
 .eval-check-notice {
@@ -7157,6 +7395,10 @@ onBeforeUnmount(() => {
 .result-pass {
   color: #2c6b42;
   font-weight: 700;
+}
+
+.result-pass-with-pending {
+  color: #895e20;
 }
 
 .result-fail {
@@ -7239,54 +7481,6 @@ onBeforeUnmount(() => {
   background: #3f7450;
 }
 
-.eval-attempt-judgment-groups {
-  display: grid;
-  gap: 9px;
-  margin-top: 9px;
-}
-
-.eval-attempt-judgment-group {
-  border: 1px solid #dfe8e0;
-  border-left: 4px solid #6d9878;
-  border-radius: 11px;
-  padding: 9px 10px;
-  background: #fbfdfb;
-}
-
-.eval-attempt-judgment-group.failed {
-  border-left-color: #b04a4a;
-  background: #fffafa;
-}
-
-.eval-attempt-judgment-group.pending {
-  border-left-color: #b48a45;
-  background: #fffdf7;
-}
-
-.eval-attempt-judgment-group.focused {
-  outline: 2px solid #7da489;
-  outline-offset: 2px;
-}
-
-.eval-attempt-judgment-group > summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  cursor: pointer;
-  color: #3e5747;
-}
-
-.eval-attempt-judgment-group > summary > div {
-  display: grid;
-  gap: 2px;
-}
-
-.eval-attempt-judgment-group > summary small {
-  color: #79867d;
-  font-size: 0.65rem;
-}
-
 .eval-attempt-judgment-summary {
   display: flex;
   flex-wrap: wrap;
@@ -7300,26 +7494,6 @@ onBeforeUnmount(() => {
   margin: 7px 0 0;
   color: #7a4c4c;
   font-size: 0.7rem;
-}
-
-.eval-attempt-detail-actions {
-  display: flex;
-  align-items: flex-start;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 9px;
-}
-
-.eval-attempt-trace-action {
-  border: 1px solid #b8cbbb;
-  border-radius: 8px;
-  padding: 6px 9px;
-  color: #315d3d;
-  background: #f6faf6;
-  cursor: pointer;
-  font: inherit;
-  font-size: 0.7rem;
-  font-weight: 700;
 }
 
 .eval-answer-view {
@@ -7350,87 +7524,6 @@ onBeforeUnmount(() => {
   white-space: pre-wrap;
 }
 
-.eval-attempt-criterion-list {
-  display: grid;
-  gap: 7px;
-  margin-top: 9px;
-}
-
-.eval-attempt-criterion-list > article {
-  display: grid;
-  gap: 5px;
-  border: 1px solid #e1e9e2;
-  border-radius: 9px;
-  padding: 8px;
-  color: #52645a;
-  background: #fff;
-  font-size: 0.72rem;
-}
-
-.eval-attempt-criterion-list > article > header {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-}
-
-.eval-attempt-criterion-list > article > header > div {
-  display: grid;
-  gap: 2px;
-}
-
-.eval-attempt-criterion-list > article > header small {
-  color: #78877d;
-  font-size: 0.64rem;
-}
-
-.eval-judgment-groups {
-  display: grid;
-  gap: 12px;
-  margin-top: 12px;
-}
-
-.eval-judgment-group {
-  display: grid;
-  gap: 9px;
-  border: 1px solid #dfe8e0;
-  border-radius: 12px;
-  padding: 10px;
-  background: #fbfdfb;
-}
-
-.eval-judgment-group-r {
-  border-left: 4px solid #5d8f6b;
-}
-
-.eval-judgment-group-x {
-  border-left: 4px solid #b48a45;
-}
-
-.eval-judgment-group-guide {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-}
-
-.eval-judgment-group-guide > div {
-  display: grid;
-  gap: 3px;
-}
-
-.eval-judgment-group-guide h4 {
-  margin: 0;
-  color: #345a42;
-  font-size: 0.82rem;
-}
-
-.eval-judgment-group-guide p {
-  margin: 0;
-  color: #66776c;
-  font-size: 0.72rem;
-  line-height: 1.55;
-}
-
 .eval-rule-badge {
   display: inline-grid;
   flex: 0 0 26px;
@@ -7442,44 +7535,6 @@ onBeforeUnmount(() => {
   background: #5d8f6b;
   font-size: 0.72rem;
   font-weight: 800;
-}
-
-.eval-judgment-group-x .eval-rule-badge {
-  background: #a77b36;
-}
-
-.eval-judgment-list {
-  display: grid;
-  gap: 8px;
-  max-height: 360px;
-  overflow: auto;
-}
-
-.eval-judgment-list > article {
-  display: grid;
-  gap: 7px;
-  border: 1px solid #e0e8e1;
-  border-radius: 10px;
-  padding: 10px;
-  color: #52645a;
-  background: #fff;
-  font-size: 0.75rem;
-}
-
-.eval-judgment-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.eval-judgment-head > div {
-  display: grid;
-  gap: 2px;
-}
-
-.eval-judgment-list p {
-  margin: 0;
-  line-height: 1.55;
 }
 
 .eval-judge-quote {
@@ -7617,7 +7672,8 @@ onBeforeUnmount(() => {
   width: min(1120px, 100%);
 }
 
-.eval-modal-trace {
+.eval-modal-sample {
+  grid-template-rows: auto auto minmax(0, 1fr);
   width: min(1320px, 100%);
 }
 
@@ -7660,6 +7716,61 @@ onBeforeUnmount(() => {
   font-weight: 700;
 }
 
+.eval-modal-header-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+}
+
+.eval-sample-tabs {
+  display: flex;
+  gap: 5px;
+  border-bottom: 1px solid #dce7de;
+  padding: 8px 18px 0;
+  background: #f4f8f4;
+}
+
+.eval-sample-tabs button {
+  display: grid;
+  gap: 2px;
+  border: 1px solid transparent;
+  border-radius: 9px 9px 0 0;
+  padding: 8px 13px 7px;
+  color: #68796d;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.eval-sample-tabs button.active {
+  border-color: #dce7de;
+  border-bottom-color: #fbfdfb;
+  color: #244b31;
+  background: #fbfdfb;
+}
+
+.eval-sample-tabs span {
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.eval-sample-tabs small {
+  color: #78877c;
+  font-size: 0.64rem;
+}
+
+.eval-modal-tab-shell {
+  display: grid;
+  min-height: 0;
+}
+
+.eval-modal-tab-pane {
+  grid-area: 1 / 1;
+  min-width: 0;
+}
+
 .eval-modal-body {
   display: grid;
   align-content: start;
@@ -7668,6 +7779,29 @@ onBeforeUnmount(() => {
   overflow: auto;
   overscroll-behavior: contain;
   padding: 16px 18px 20px;
+}
+
+.eval-trace-pane-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  border-radius: 10px;
+  padding: 9px 11px;
+  background: #eef5ef;
+}
+
+.eval-trace-pane-heading p {
+  margin: 4px 0 0;
+  color: #64756a;
+  font-family: Consolas, monospace;
+  font-size: 0.67rem;
+}
+
+.eval-trace-pane-heading > span {
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  font-weight: 700;
 }
 
 .eval-modal-question,
@@ -7723,8 +7857,15 @@ onBeforeUnmount(() => {
   font-size: 0.72rem;
 }
 
+.eval-modal-judgment.focused,
+.eval-modal-check.focused {
+  border-color: #c79d51;
+  background: #fffaf0;
+  box-shadow: 0 0 0 2px rgba(199, 157, 81, 0.2);
+}
+
 .eval-modal-judgment > header,
-.eval-modal-check > div {
+.eval-modal-check > .eval-modal-check-heading {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -7734,6 +7875,10 @@ onBeforeUnmount(() => {
   display: grid;
   flex: 1;
   gap: 2px;
+}
+
+.eval-modal-check > .eval-modal-check-heading > strong {
+  flex: 1;
 }
 
 .eval-modal-judgment p,
@@ -8018,6 +8163,135 @@ onBeforeUnmount(() => {
   background: #fff7f7;
 }
 
+.eval-judgment-navigator {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(240px, 1fr);
+  gap: 9px 12px;
+  margin-top: 12px;
+  border: 1px solid #dce7de;
+  border-radius: 11px;
+  padding: 10px;
+  background: #f6faf6;
+}
+
+.eval-judgment-question {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #52675a;
+  font-size: 0.72rem;
+  line-height: 1.55;
+}
+
+.eval-judgment-case-summary {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 14px;
+  border-top: 1px solid #dce7de;
+  padding-top: 8px;
+  color: #5f7064;
+  font-size: 0.68rem;
+}
+
+.eval-judgment-overview {
+  display: grid;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.eval-matrix-guide {
+  margin: 0;
+  color: #718077;
+  font-size: 0.68rem;
+}
+
+.eval-judgment-table-wrap {
+  overflow: auto;
+  max-height: 560px;
+  border: 1px solid #dce7de;
+  border-radius: 11px;
+  background: #fff;
+}
+
+.eval-judgment-table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  color: #52675a;
+  font-size: 0.68rem;
+}
+
+.eval-judgment-table th,
+.eval-judgment-table td {
+  min-width: 92px;
+  border-right: 1px solid #edf1ed;
+  border-bottom: 1px solid #edf1ed;
+  padding: 7px 8px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.eval-judgment-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  color: #42574a;
+  background: #eef5ef;
+}
+
+.eval-judgment-table tbody th {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  min-width: 210px;
+  max-width: 300px;
+  text-align: left;
+  background: #f8fbf8;
+}
+
+.eval-judgment-table th > strong {
+  margin-left: 6px;
+}
+
+.eval-judgment-table thead small {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.58rem;
+}
+
+.eval-judgment-cell {
+  width: 100%;
+  border: 0;
+  border-radius: 6px;
+  padding: 5px 6px;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.65rem;
+}
+
+.eval-judgment-cell:hover {
+  background: #eef5ef;
+}
+
+.eval-judgment-cell.result-fail {
+  background: #fff0f0;
+}
+
+.eval-judgment-cell.result-pending {
+  background: #fff7e5;
+}
+
+.eval-judgment-cell.result-missing {
+  color: #929a94;
+}
+
+.eval-matrix-summary article.caution {
+  border-color: #ddc28d;
+  background: #fffaf0;
+}
+
 .eval-matrix-summary span,
 .eval-matrix-summary small {
   color: #718077;
@@ -8031,6 +8305,10 @@ onBeforeUnmount(() => {
 
 .eval-matrix-summary article.warning strong {
   color: #963f3f;
+}
+
+.eval-matrix-summary article.caution strong {
+  color: #80591d;
 }
 
 .eval-matrix-category {
@@ -8191,6 +8469,51 @@ onBeforeUnmount(() => {
   margin-top: 16px;
 }
 
+.eval-run-case-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.eval-run-case-group {
+  overflow: hidden;
+  border: 1px solid #dce7de;
+  border-left: 4px solid #5f8c6a;
+  border-radius: 11px;
+  background: #f8fbf8;
+}
+
+.eval-run-case-group > summary {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto auto;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 11px;
+  color: #52675a;
+  cursor: pointer;
+  font-size: 0.7rem;
+}
+
+.eval-run-case-title {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.eval-run-case-title small {
+  overflow: hidden;
+  color: #748279;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eval-run-case-group > .eval-attempts {
+  max-height: 440px;
+  margin: 0;
+  border-top: 1px solid #e2ebe3;
+  padding: 8px;
+}
+
 .eval-attempt-row {
   display: grid;
   grid-template-columns: minmax(145px, 1.3fr) auto repeat(3, auto) auto;
@@ -8299,6 +8622,14 @@ onBeforeUnmount(() => {
     grid-template-columns: 1fr;
   }
 
+  .eval-judgment-navigator {
+    grid-template-columns: 1fr;
+  }
+
+  .eval-run-case-group > summary {
+    grid-template-columns: minmax(160px, 1fr) auto;
+  }
+
   .eval-attempt-row {
     grid-template-columns: minmax(130px, 1fr) auto auto;
   }
@@ -8347,6 +8678,7 @@ onBeforeUnmount(() => {
   .eval-matrix-summary,
   .eval-matrix-case > summary,
   .eval-matrix-attempt,
+  .eval-run-case-group > summary,
   .eval-baseline-current dl,
   .eval-comparison-summary,
   .eval-comparison-case {
@@ -8365,6 +8697,10 @@ onBeforeUnmount(() => {
   .eval-modal-header,
   .eval-modal-body {
     padding: 12px;
+  }
+
+  .eval-sample-tabs {
+    padding: 8px 12px 0;
   }
 
   .eval-review-item {
