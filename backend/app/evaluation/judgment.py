@@ -100,11 +100,13 @@ from app.tracing.catalog import TraceCatalog
 
 CHECKER_VERSIONS = {
     "citation_integrity": "1",
-    "citation_support": "11",
+    "citation_support": "18",
     "truncation_declared": "1",
 }
 JUDGE_MAX_OUTPUT_TOKENS = 2_048
 CITATION_SUPPORT_MAX_OUTPUT_TOKENS = 4_096
+# 关系三阶段判官保留为高价值诊断能力，但不进入默认评测门禁。
+CITATION_RELATION_ADVISORY_ENABLED = False
 
 
 def _build_judge_token_usage(
@@ -693,7 +695,7 @@ class EvaluationJudgmentService:
         revision_id: str,
         request: CheckReviewRequest,
     ) -> EvaluationRevisionView:
-        """追加人工逐 block 引用支持复核，并重新计算有效检查结果。"""
+        """接收完整 claim 快照，仅追加实际变化项并重算有效检查结果。"""
 
         if request.checker_id != "citation_support":
             raise ValueError("only citation_support check results can be reviewed")
@@ -726,21 +728,105 @@ class EvaluationJudgmentService:
                 raise ValueError("citation support check facts are incomplete")
             if integrity.result != "pass":
                 raise ValueError("citation integrity must pass before support review")
-            expected_ids = set(json.loads(integrity.payload_json).get("cited_block_ids", []))
-            submitted_ids = [item.block_id for item in request.citations]
+            integrity_payload = json.loads(integrity.payload_json)
+            cited_block_ids = integrity_payload.get("cited_block_ids")
+            if not isinstance(cited_block_ids, list) or not all(
+                isinstance(block_id, str) for block_id in cited_block_ids
+            ):
+                raise ValueError("citation integrity cited block facts are invalid")
+            source_payload = json.loads(source.payload_json)
+            claim_results = source_payload.get("claim_results")
+            if not isinstance(claim_results, list):
+                raise ValueError("citation support check has no claim-level results")
+            expected_claims: dict[str, dict[str, Any]] = {}
+            for item in claim_results:
+                if not isinstance(item, dict):
+                    raise ValueError("citation support claim result is invalid")
+                occurrence_id = item.get("occurrence_id")
+                block_ids = item.get("block_ids")
+                if (
+                    not isinstance(occurrence_id, str)
+                    or not isinstance(block_ids, list)
+                    or not block_ids
+                    or not all(isinstance(block_id, str) for block_id in block_ids)
+                ):
+                    raise ValueError("citation support claim result is invalid")
+                expected_claims[occurrence_id] = item
+            support_block_ids = {
+                block_id for item in expected_claims.values() for block_id in item["block_ids"]
+            }
+            if support_block_ids != set(cited_block_ids):
+                raise ValueError("citation support block set does not match integrity")
+            current_claims = {
+                occurrence_id: dict(item) for occurrence_id, item in expected_claims.items()
+            }
+            prior_reviews = session.scalars(
+                select(EvalCheckReviewRow)
+                .where(
+                    EvalCheckReviewRow.evaluation_revision_id == revision_id,
+                    EvalCheckReviewRow.attempt_id == request.attempt_id,
+                    EvalCheckReviewRow.checker_id == request.checker_id,
+                )
+                .order_by(EvalCheckReviewRow.review_order)
+            ).all()
+            for prior_review in prior_reviews:
+                prior_payload = json.loads(prior_review.payload_json)
+                for prior_claim in prior_payload.get("claim_results", []):
+                    if not isinstance(prior_claim, dict):
+                        raise ValueError("prior citation review claim result is invalid")
+                    prior_occurrence_id = prior_claim.get("occurrence_id")
+                    if prior_occurrence_id in current_claims:
+                        current_claims[prior_occurrence_id] = prior_claim
+            submitted_ids = [item.occurrence_id for item in request.claims]
             if len(submitted_ids) != len(set(submitted_ids)):
-                raise ValueError("citation review contains duplicate block ids")
-            if set(submitted_ids) != expected_ids:
-                raise ValueError("citation review block set does not match the answer")
-            if "unsupported" in {item.verdict for item in request.citations}:
+                raise ValueError("citation review contains duplicate occurrences")
+            if set(submitted_ids) != set(expected_claims):
+                raise ValueError("citation review claim set does not match the answer")
+            for item in request.claims:
+                expected_blocks = expected_claims[item.occurrence_id]["block_ids"]
+                if len(item.block_ids) != len(set(item.block_ids)) or set(item.block_ids) != set(
+                    expected_blocks
+                ):
+                    raise ValueError("citation review block set does not match the claim")
+            if "unsupported" in {item.verdict for item in request.claims}:
                 result = "fail"
-                error_code = "citation_not_supported"
-            elif "unknown" in {item.verdict for item in request.citations}:
+                error_code = "citation_semantic_redline_confirmed"
+            elif "unknown" in {item.verdict for item in request.claims}:
                 result = "pending"
                 error_code = "citation_support_unknown"
             else:
                 result = "pass"
                 error_code = None
+            reviewed_claims = []
+            for item in request.claims:
+                current_claim = current_claims[item.occurrence_id]
+                has_changed = (
+                    current_claim.get("verdict") != item.verdict
+                    or current_claim.get("reason") != item.reason
+                )
+                if not has_changed:
+                    continue
+                source_claim = expected_claims[item.occurrence_id]
+                reviewed_claims.append(
+                    {
+                        "occurrence_id": item.occurrence_id,
+                        "context_id": source_claim.get("context_id"),
+                        "context_text": source_claim.get("context_text", ""),
+                        "block_ids": current_claim.get("block_ids", item.block_ids),
+                        "verdict": item.verdict,
+                        "reason": item.reason,
+                        "evidence_quotes": current_claim.get("evidence_quotes", []),
+                        "review_status": (
+                            "confirmed"
+                            if item.verdict == "unsupported"
+                            else "rejected"
+                            if item.verdict == "supported"
+                            else "disputed"
+                        ),
+                    }
+                )
+            if not reviewed_claims:
+                raise ValueError("citation review contains no changed claims")
             session.add(
                 EvalCheckReviewRow(
                     review_id=f"review_{uuid4().hex}",
@@ -751,8 +837,9 @@ class EvaluationJudgmentService:
                     result=result,
                     payload_json=_json(
                         {
-                            "citations": [
-                                item.model_dump(mode="json") for item in request.citations
+                            "claim_results": reviewed_claims,
+                            "reviewed_occurrence_ids": [
+                                item["occurrence_id"] for item in reviewed_claims
                             ],
                             "reviewer": request.reviewer,
                             "reason": request.reason,
@@ -773,7 +860,7 @@ class EvaluationJudgmentService:
         revision = self.get_revision(revision_id)
         counts = Counter(binding.normalized_result for binding in revision.effective_bindings)
         is_incomplete = counts["pending"] > 0 or any(
-            item.result == "pending" for item in revision.attempt_aggregates
+            item.result == "pending" or item.review_pending for item in revision.attempt_aggregates
         )
         with self._database.session() as session, session.begin():
             row = session.get(EvalEvaluationRevisionRow, revision_id)
@@ -1195,10 +1282,11 @@ class EvaluationJudgmentService:
                 ],
             }
         )
-        reserved_tokens = 5 * (
+        reserved_requests = 5 if CITATION_RELATION_ADVISORY_ENABLED else 2
+        reserved_tokens = reserved_requests * (
             _estimate_tokens(reserved_input_json) + CITATION_SUPPORT_MAX_OUTPUT_TOKENS
         )
-        if not budget.reserve(tokens=reserved_tokens, requests=5):
+        if not budget.reserve(tokens=reserved_tokens, requests=reserved_requests):
             return _CitationBatchOutcome(
                 attempt_id=task.attempt_id,
                 batch_index=batch_index,
@@ -1324,7 +1412,11 @@ class EvaluationJudgmentService:
                     )
                     continue
                 break
-            relation_packet = _supported_relation_packet(packet, parsed)
+            relation_packet = (
+                _supported_relation_packet(packet, parsed)
+                if CITATION_RELATION_ADVISORY_ENABLED
+                else None
+            )
             if relation_packet is not None:
                 claim_role_messages = render_citation_claim_role_messages(relation_packet)
                 claim_role_input_json = _json(
@@ -1600,7 +1692,7 @@ class EvaluationJudgmentService:
             actual_tokens=sum(
                 invocation.input_tokens + invocation.output_tokens for invocation in invocations
             ),
-            reserved_requests=5,
+            reserved_requests=reserved_requests,
             actual_requests=len(invocations),
         )
         invocation_payload = [
@@ -1628,6 +1720,7 @@ class EvaluationJudgmentService:
                     "model_id": provider.profile.model_id,
                     "input": packet.model_dump(mode="json"),
                     "error": last_error or "citation_support_failed",
+                    "observed_result": "pending",
                     "invocations": invocation_payload,
                 },
                 error_code=last_error or "citation_support_failed",
@@ -1635,13 +1728,20 @@ class EvaluationJudgmentService:
 
         verdicts = {item.verdict for item in parsed.citations}
         normalized: Literal["pass", "fail", "pending"] = (
-            "fail" if "unsupported" in verdicts else "pending" if "unknown" in verdicts else "pass"
+            "pending" if "unsupported" in verdicts or "unknown" in verdicts else "pass"
         )
         error_code = {
             "pass": None,
-            "fail": "citation_not_supported",
-            "pending": "citation_support_unknown",
+            "fail": None,
+            "pending": (
+                "citation_support_review_required"
+                if "unsupported" in verdicts
+                else "citation_support_unknown"
+            ),
         }[normalized]
+        observed_result = (
+            "fail" if "unsupported" in verdicts else "pending" if "unknown" in verdicts else "pass"
+        )
         return _CitationBatchOutcome(
             attempt_id=task.attempt_id,
             batch_index=batch_index,
@@ -1654,6 +1754,7 @@ class EvaluationJudgmentService:
                 "model_id": provider.profile.model_id,
                 "input": packet.model_dump(mode="json"),
                 "citations": [citation.model_dump(mode="json") for citation in parsed.citations],
+                "observed_result": observed_result,
                 "invocations": invocation_payload,
             },
             error_code=error_code,
@@ -2144,7 +2245,7 @@ def _merge_citation_outcomes(
     task: _PreparedCitationTask,
     batches: list[_CitationBatchOutcome],
 ) -> _CitationAttemptOutcome:
-    """把引用组批次结果按 fail > pending > pass 合并，并投影到 block 视图。"""
+    """把引用组批次结果合并为通过或待复核，并保留 claim 与 block 两种诊断视图。"""
 
     occurrence_results: dict[str, CitationResultOutput] = {}
     occurrence_errors: dict[str, str] = {}
@@ -2190,6 +2291,16 @@ def _merge_citation_outcomes(
                 "reason": reason,
                 "evidence_quotes": quotes,
                 "relation_check": relation_check,
+                "semantic_severity": (
+                    "critical_candidate"
+                    if verdict == "unsupported"
+                    else "quality"
+                    if verdict == "unknown"
+                    else None
+                ),
+                "review_status": (
+                    "pending" if verdict in {"unsupported", "unknown"} else "not_required"
+                ),
             }
         )
         for block_id in occurrence.block_ids:
@@ -2222,8 +2333,8 @@ def _merge_citation_outcomes(
     preflight_error_codes = [item.error_code for item in task.preflight_failures]
     batch_error_codes = [item.error_code for item in batches if item.error_code is not None]
     if "unsupported" in all_verdicts:
-        result: Literal["pass", "fail", "pending"] = "fail"
-        error_code = "citation_not_supported"
+        result: Literal["pass", "fail", "pending"] = "pending"
+        error_code = "citation_support_review_required"
     elif "unknown" in all_verdicts or batch_error_codes or preflight_error_codes:
         result = "pending"
         error_code = (
@@ -2236,6 +2347,13 @@ def _merge_citation_outcomes(
     else:
         result = "pass"
         error_code = None
+    observed_result = (
+        "fail"
+        if "unsupported" in all_verdicts
+        else "pending"
+        if "unknown" in all_verdicts or batch_error_codes or preflight_error_codes
+        else "pass"
+    )
 
     batch_payloads: list[dict[str, Any]] = []
     for batch in batches:
@@ -2277,6 +2395,17 @@ def _merge_citation_outcomes(
             },
             "claim_results": claim_results,
             "citations": merged_citations,
+            "observed_result": observed_result,
+            "review_status": "pending" if result == "pending" else "not_required",
+            "semantic_candidates": [
+                {
+                    "occurrence_id": item["occurrence_id"],
+                    "semantic_severity": item["semantic_severity"],
+                    "review_status": item["review_status"],
+                }
+                for item in claim_results
+                if item["semantic_severity"] is not None
+            ],
             "preflight_failures": [
                 {
                     "occurrence_id": item.occurrence.occurrence_id,

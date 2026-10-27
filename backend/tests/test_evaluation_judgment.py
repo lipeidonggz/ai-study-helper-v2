@@ -608,7 +608,7 @@ def test_llm_judge_builds_whitelist_input_and_judgments(tmp_path: Path) -> None:
 
 
 def test_citation_prompt_uses_semantic_equivalence_and_isolates_occurrences() -> None:
-    assert CITATION_SUPPORT_PROMPT_VERSION == "citation-rubric-v9"
+    assert CITATION_SUPPORT_PROMPT_VERSION == "citation-rubric-v11"
     assert "中文近义转述不要求逐词对应" in CITATION_SUPPORT_SYSTEM_PROMPT
     assert "该问题本身合理／有道理／是对的" in CITATION_SUPPORT_SYSTEM_PROMPT
     assert "不能只因 claim 使用了“正确／对”等概括词就判定增强" in CITATION_SUPPORT_SYSTEM_PROMPT
@@ -617,6 +617,9 @@ def test_citation_prompt_uses_semantic_equivalence_and_isolates_occurrences() ->
     assert "不能替 focus_text 获得支持" in CITATION_SUPPORT_SYSTEM_PROMPT
     assert "relation_check" not in CITATION_SUPPORT_SYSTEM_PROMPT
     assert "不得使用同批其他 occurrence" in CITATION_SUPPORT_SYSTEM_PROMPT
+    assert "保留相同的关系与角色" in CITATION_SUPPORT_SYSTEM_PROMPT
+    assert "不得只因为数值本身看似有利" in CITATION_SUPPORT_SYSTEM_PROMPT
+    assert "该标签属于 claim" in CITATION_SUPPORT_SYSTEM_PROMPT
     assert "c1-001" not in CITATION_SUPPORT_SYSTEM_PROMPT
     assert "c2-001" not in CITATION_SUPPORT_SYSTEM_PROMPT
     assert "good question" not in CITATION_SUPPORT_SYSTEM_PROMPT
@@ -1019,8 +1022,8 @@ def test_human_can_review_llm_citation_support_but_not_integrity(
                         "citations": [
                             {
                                 "occurrence_id": "citation_0001",
-                                "verdict": "supported",
-                                "reason": "引用原文支持答案主张。",
+                                "verdict": "unsupported",
+                                "reason": "模型怀疑引用原文不支持答案主张。",
                                 "evidence_quotes": ["MCP 沙箱是本文最重要的原文证据。"],
                             }
                         ]
@@ -1049,15 +1052,30 @@ def test_human_can_review_llm_citation_support_but_not_integrity(
         original_support = next(
             check for check in initial.checks if check.checker_id == "citation_support"
         )
+        initial_attempt = next(
+            item for item in initial.attempt_aggregates if item.attempt_id == attempt_id
+        )
+        initial_case = next(item for item in initial.case_aggregates if item.case_id == "c1-001")
+        assert initial.status == "incomplete"
+        assert original_support.result == "pending"
+        assert initial_attempt.result == "fail"
+        assert initial_attempt.check_quality_failures == ["citation_support"]
+        assert initial_attempt.review_pending is True
+        assert initial_attempt.check_failures == []
+        assert initial_case.result == "pending"
+        assert initial_case.quality_failure_count == 1
+        assert initial_case.review_pending_count == 1
+        assert initial_case.redline_violation_count == 0
 
         reviewed = service.review_llm_check(
             initial.revision_id,
             CheckReviewRequest(
                 attempt_id=attempt_id,
                 checker_id="citation_support",
-                citations=[
+                claims=[
                     CitationReviewItem(
-                        block_id="block_1",
+                        occurrence_id="citation_0001",
+                        block_ids=["block_1"],
                         verdict="unsupported",
                         reason="人工确认证据原文没有支持该主张。",
                     )
@@ -1068,20 +1086,66 @@ def test_human_can_review_llm_citation_support_but_not_integrity(
         )
 
         assert len(reviewed.check_reviews) == 1
-        assert original_support.result == "pass"
         attempt_aggregate = next(
             item for item in reviewed.attempt_aggregates if item.attempt_id == attempt_id
         )
         assert "citation_support" in attempt_aggregate.check_failures
+        assert attempt_aggregate.check_quality_failures == []
+        assert attempt_aggregate.review_pending is False
+        rejected = service.review_llm_check(
+            initial.revision_id,
+            CheckReviewRequest(
+                attempt_id=attempt_id,
+                checker_id="citation_support",
+                claims=[
+                    CitationReviewItem(
+                        occurrence_id="citation_0001",
+                        block_ids=["block_1"],
+                        verdict="supported",
+                        reason="复查确认证据原文足以支持该主张。",
+                    )
+                ],
+                reason="驳回语义红线候选。",
+                reviewer="reviewer-b",
+            ),
+        )
+        rejected_attempt = next(
+            item for item in rejected.attempt_aggregates if item.attempt_id == attempt_id
+        )
+        assert rejected_attempt.result == "pass"
+        assert rejected.check_reviews[-1].result == "pass"
+        disputed = service.review_llm_check(
+            initial.revision_id,
+            CheckReviewRequest(
+                attempt_id=attempt_id,
+                checker_id="citation_support",
+                claims=[
+                    CitationReviewItem(
+                        occurrence_id="citation_0001",
+                        block_ids=["block_1"],
+                        verdict="unknown",
+                        reason="证据语义仍有合理分歧，需要进一步裁决。",
+                    )
+                ],
+                reason="保留争议。",
+                reviewer="reviewer-c",
+            ),
+        )
+        disputed_attempt = next(
+            item for item in disputed.attempt_aggregates if item.attempt_id == attempt_id
+        )
+        assert disputed_attempt.result == "pending"
+        assert disputed.check_reviews[-1].result == "pending"
         with pytest.raises(ValueError):
             service.review_llm_check(
                 initial.revision_id,
                 CheckReviewRequest(
                     attempt_id=attempt_id,
                     checker_id="citation_integrity",
-                    citations=[
+                    claims=[
                         CitationReviewItem(
-                            block_id="block_1",
+                            occurrence_id="citation_0001",
+                            block_ids=["block_1"],
                             verdict="supported",
                             reason="不允许改程序检查。",
                         )
@@ -1090,6 +1154,161 @@ def test_human_can_review_llm_citation_support_but_not_integrity(
                     reviewer="reviewer-a",
                 ),
             )
+        with pytest.raises(ValueError):
+            service.review_llm_check(
+                initial.revision_id,
+                CheckReviewRequest(
+                    attempt_id=attempt_id,
+                    checker_id="citation_support",
+                    claims=[
+                        CitationReviewItem(
+                            occurrence_id="citation_0001",
+                            block_ids=["block_2"],
+                            verdict="supported",
+                            reason="错误的证据组不能被接受。",
+                        )
+                    ],
+                    reason="验证 block 集合校验。",
+                    reviewer="reviewer-a",
+                ),
+            )
+        with pytest.raises(ValueError):
+            service.review_llm_check(
+                initial.revision_id,
+                CheckReviewRequest(
+                    attempt_id=attempt_id,
+                    checker_id="citation_support",
+                    claims=[
+                        CitationReviewItem(
+                            occurrence_id="citation_missing",
+                            block_ids=["block_1"],
+                            verdict="supported",
+                            reason="错误的 occurrence 不能被接受。",
+                        )
+                    ],
+                    reason="验证 claim 集合校验。",
+                    reviewer="reviewer-a",
+                ),
+            )
+
+    asyncio.run(scenario())
+
+
+def test_human_review_persists_only_changed_claims(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        answer = "第一句支持。第二句只作背景。"
+        first_end = answer.index("第二句")
+        blocks = [
+            {
+                "block_id": "block_1",
+                "doc_id": "doc_1",
+                "doc_title": "测试文档",
+                "source_label": "doc",
+                "section_path": ["复核"],
+                "text": "第一句支持。",
+            },
+            {
+                "block_id": "block_2",
+                "doc_id": "doc_1",
+                "doc_title": "测试文档",
+                "source_label": "doc",
+                "section_path": ["复核"],
+                "text": "第二句只作背景。",
+            },
+        ]
+        database = EvaluationDatabase(tmp_path / "eval")
+        repository = EvaluationRepository(database)
+        _add_judgeable_run(
+            database,
+            repository,
+            case_id="c1-001",
+            answer=answer,
+            trace_id="b" * 32,
+            run_id="run_check_review_delta",
+        )
+        provider = _CitationBatchAwareProvider()
+        service = EvaluationJudgmentService(
+            database=database,
+            repository=repository,
+            trace_catalog=_FakeTraceCatalog(
+                tmp_path,
+                blocks=blocks,
+                citation_annotation_artifact=CitationAnnotationArtifact(
+                    status="complete",
+                    model_id="fake-annotation",
+                    span_count=2,
+                    evidence_count=2,
+                    annotations=[
+                        CitationAnnotation(
+                            annotation_id="annotation_0001",
+                            span_id="span_0001",
+                            kind="sentence",
+                            start_index=0,
+                            end_index=first_end,
+                            text=answer[:first_end],
+                            block_ids=["block_1"],
+                        ),
+                        CitationAnnotation(
+                            annotation_id="annotation_0002",
+                            span_id="span_0002",
+                            kind="sentence",
+                            start_index=first_end,
+                            end_index=len(answer),
+                            text=answer[first_end:],
+                            block_ids=["block_2"],
+                        ),
+                    ],
+                ),
+            ),  # type: ignore[arg-type]
+            credentials=_MemoryCredentials(),
+            chat_provider_factory=lambda _key: provider,
+        )
+        started = await service.start(
+            "run_check_review_delta",
+            StartJudgmentRequest(
+                concurrency=1,
+                token_budget=1_000_000,
+                judge_review_confirmed=True,
+            ),
+        )
+        initial = await _wait_revision(service, started.revision_id)
+        support = next(check for check in initial.checks if check.checker_id == "citation_support")
+        attempt_id = initial.judgments[0].attempt_id
+        claims = support.payload["claim_results"]
+        assert len(claims) == 2
+
+        reviewed = service.review_llm_check(
+            initial.revision_id,
+            CheckReviewRequest(
+                attempt_id=attempt_id,
+                checker_id="citation_support",
+                claims=[
+                    CitationReviewItem(
+                        occurrence_id=claims[0]["occurrence_id"],
+                        block_ids=claims[0]["block_ids"],
+                        verdict="unsupported",
+                        reason="人工只改判第一个 claim。",
+                        evidence_quotes=[],
+                    ),
+                    CitationReviewItem(
+                        occurrence_id=claims[1]["occurrence_id"],
+                        block_ids=claims[1]["block_ids"],
+                        verdict="supported",
+                        reason=claims[1]["reason"],
+                        evidence_quotes=[],
+                    ),
+                ],
+                reason="只复核有变化的 claim。",
+                reviewer="reviewer-a",
+            ),
+        )
+
+        stored = reviewed.check_reviews[-1].payload["claim_results"]
+        assert [item["occurrence_id"] for item in stored] == [claims[0]["occurrence_id"]]
+        assert stored[0]["evidence_quotes"] == claims[0]["evidence_quotes"]
+        assert reviewed.check_reviews[-1].payload["reviewed_occurrence_ids"] == [
+            claims[0]["occurrence_id"]
+        ]
 
     asyncio.run(scenario())
 
@@ -1296,13 +1515,39 @@ def test_citation_support_is_separate_from_criterion_judgments(tmp_path: Path) -
         )
         revision = await _wait_revision(service, started.revision_id)
 
-        assert revision.status == "complete"
+        assert revision.status == "incomplete"
         assert all(judgment.normalized_result == "pass" for judgment in revision.judgments)
         citation_support = next(
             check for check in revision.checks if check.checker_id == "citation_support"
         )
-        assert citation_support.result == "fail"
-        assert citation_support.error_code == "citation_not_supported"
+        attempt_id = revision.judgments[0].attempt_id
+        assert citation_support.result == "pending"
+        assert citation_support.error_code == "citation_support_review_required"
+        assert citation_support.payload["observed_result"] == "fail"
+        assert citation_support.payload["review_status"] == "pending"
+        assert citation_support.payload["claim_results"][0]["review_status"] == "pending"
+        assert (
+            citation_support.payload["claim_results"][0]["semantic_severity"]
+            == "critical_candidate"
+        )
+        assert citation_support.payload["semantic_candidates"] == [
+            {
+                "occurrence_id": "citation_0001",
+                "semantic_severity": "critical_candidate",
+                "review_status": "pending",
+            }
+        ]
+        attempt_aggregate = next(
+            item for item in revision.attempt_aggregates if item.attempt_id == attempt_id
+        )
+        case_aggregate = next(item for item in revision.case_aggregates if item.case_id == "c1-001")
+        assert attempt_aggregate.result == "fail"
+        assert attempt_aggregate.check_failures == []
+        assert attempt_aggregate.check_quality_failures == ["citation_support"]
+        assert attempt_aggregate.review_pending is True
+        assert case_aggregate.result == "pending"
+        assert case_aggregate.review_pending_count == 1
+        assert case_aggregate.redline_violation_count == 0
         citation_request = json.loads(provider.requests[-1][1].content)
         assert set(citation_request) == {"contexts", "citations", "occurrences"}
         assert citation_request["contexts"][0]["kind"] == "paragraph"
@@ -1408,8 +1653,8 @@ def test_citation_support_judges_one_claim_with_multiple_blocks_as_a_group(
             }
         ]
         assert citation_support.result == "pass"
-        assert citation_support.checker_version == "11"
-        assert citation_support.payload["prompt_version"] == "citation-rubric-v9"
+        assert citation_support.checker_version == "18"
+        assert citation_support.payload["prompt_version"] == "citation-rubric-v11"
         assert citation_support.payload["claim_results"][0]["block_ids"] == [
             "block_1",
             "block_2",
@@ -1426,7 +1671,7 @@ def test_citation_support_judges_one_claim_with_multiple_blocks_as_a_group(
         assert block_projections["block_2"]["evidence_quotes"] == ["第二项隔离限制网络访问。"[:12]]
         assert citation_support.payload["batching"]["occurrence_count"] == 1
         assert citation_support.payload["batching"]["citation_relation_count"] == 2
-        assert provider.claim_role_request_count == 1
+        assert provider.claim_role_request_count == 0
         assert provider.evidence_role_request_count == 0
         assert provider.relation_review_request_count == 0
 
@@ -1552,7 +1797,7 @@ def test_citation_support_retries_invalid_quote_once_then_passes(
     asyncio.run(scenario())
 
 
-def test_citation_support_relation_judge_rejects_swapped_direction(
+def test_citation_support_does_not_promote_relation_advisory_to_default_gate(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
@@ -1599,20 +1844,15 @@ def test_citation_support_relation_judge_rejects_swapped_direction(
         citation_support = next(
             check for check in revision.checks if check.checker_id == "citation_support"
         )
-        assert citation_support.result == "fail"
-        assert citation_support.error_code == "citation_not_supported"
+        assert citation_support.result == "pass"
+        assert citation_support.error_code is None
         assert [
             (invocation["status"], invocation["error_code"])
             for invocation in citation_support.payload["batches"][0]["invocations"]
-        ] == [
-            ("succeeded", None),
-            ("succeeded", None),
-            ("succeeded", None),
-            ("succeeded", None),
-        ]
-        assert provider.claim_role_request_count == 1
-        assert provider.evidence_role_request_count == 1
-        assert provider.relation_review_request_count == 1
+        ] == [("succeeded", None)]
+        assert provider.claim_role_request_count == 0
+        assert provider.evidence_role_request_count == 0
+        assert provider.relation_review_request_count == 0
 
     asyncio.run(scenario())
 
@@ -1621,11 +1861,11 @@ def test_citation_support_relation_judge_rejects_swapped_direction(
     ("direction_preserved", "expected_result", "expected_error"),
     [
         (True, "pass", None),
-        (False, "fail", "citation_not_supported"),
-        (None, "pending", "citation_support_unknown"),
+        (False, "pass", None),
+        (None, "pass", None),
     ],
 )
-def test_citation_support_always_runs_relation_judge_for_supported_claim(
+def test_citation_support_keeps_relation_advisory_out_of_the_default_path(
     tmp_path: Path,
     direction_preserved: bool | None,
     expected_result: str,
@@ -1694,47 +1934,14 @@ def test_citation_support_always_runs_relation_judge_for_supported_claim(
         assert citation_support.result == expected_result
         assert citation_support.error_code == expected_error
         assert provider.citation_request_count == 1
-        assert provider.claim_role_request_count == 1
-        assert provider.evidence_role_request_count == 1
-        assert provider.relation_review_request_count == 1
+        assert provider.claim_role_request_count == 0
+        assert provider.evidence_role_request_count == 0
+        assert provider.relation_review_request_count == 0
         assert [
             invocation["status"]
             for invocation in citation_support.payload["batches"][0]["invocations"]
-        ] == ["succeeded", "succeeded", "succeeded", "succeeded"]
-        relation_projection = citation_support.payload["claim_results"][0]["relation_check"]
-        assert relation_projection["direction_preserved"] is direction_preserved
-
-        relation_output = json.loads(
-            citation_support.payload["batches"][0]["invocations"][3]["raw_output"]
-        )
-        assert relation_output["relations"][0]["direction_preserved"] is direction_preserved
-        claim_role_request = next(
-            request
-            for request in provider.requests
-            if request[0].content == CITATION_CLAIM_ROLES_SYSTEM_PROMPT
-        )
-        assert set(json.loads(claim_role_request[-1].content)) == {
-            "occurrences",
-            "contexts",
-        }
-        evidence_role_request = next(
-            request
-            for request in provider.requests
-            if request[0].content == CITATION_EVIDENCE_ROLES_SYSTEM_PROMPT
-        )
-        assert set(json.loads(evidence_role_request[-1].content)) == {
-            "occurrences",
-            "citations",
-        }
-        relation_request = next(
-            request
-            for request in provider.requests
-            if request[0].content == CITATION_RELATION_SYSTEM_PROMPT
-        )
-        assert (
-            json.loads(relation_request[-1].content)["occurrences"][0]["occurrence_id"]
-            == "citation_0001"
-        )
+        ] == ["succeeded"]
+        assert citation_support.payload["claim_results"][0]["relation_check"] is None
 
         criterion_invocations = [
             invocation for judgment in revision.judgments for invocation in judgment.invocations
@@ -1903,10 +2110,10 @@ def test_citation_support_batch_failure_cannot_hide_behind_supported_batches(
         citation_support = next(
             check for check in revision.checks if check.checker_id == "citation_support"
         )
-        assert citation_support.result == "fail"
-        assert citation_support.error_code == "citation_not_supported"
+        assert citation_support.result == "pending"
+        assert citation_support.error_code == "citation_support_review_required"
         assert citation_support.payload["batching"]["batch_count"] >= 2
-        assert citation_support.payload["batches"][0]["result"] == "fail"
+        assert citation_support.payload["batches"][0]["result"] == "pending"
         assert citation_support.payload["batches"][-1]["result"] == "pass"
 
     asyncio.run(scenario())
