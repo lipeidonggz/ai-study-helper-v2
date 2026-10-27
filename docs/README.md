@@ -8,7 +8,7 @@
 
 - 阶段：实现阶段，027 claim-aware 引用标注已完成，028 评测失败分类拆分已实现。
 - 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付、检索与 Agent 运行链、流式问答、本地 trace 诊断和逐 criterion 评测判定已实现。
-- 当前工作：037 已合并；038–041 已完成 citation evidence 合并、finish 序列恢复、证据作用域、工具输出契约、精确 block 补全和显式章节范围，等待合并。
+- 当前工作：037–042 已完成；下一步按用例集继续逐项验证。
 
 ## 设计基线
 
@@ -134,6 +134,7 @@
 - [039 · 结构化 finish 尾随序列恢复（已完成）](development/slices/039-structured-finish-recovery.md)
 - [040 · Agent 通用证据作用域约束（已完成）](development/slices/040-agent-evidence-scope.md)
 - [041 · Agent 工具输出契约与精确读取范围（已完成）](development/slices/041-agent-tool-output-and-exact-scope.md)
+- [042 · 评测结果矩阵与判定导航优化（已完成）](development/slices/042-evaluation-result-ux.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库
