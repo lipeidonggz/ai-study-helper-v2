@@ -40,6 +40,24 @@ def test_finish_allows_omitted_summary_and_repairs_unencoded_newlines() -> None:
     assert action.answer == "第一行\n第二行"
 
 
+def test_finish_recovers_extra_closing_brace() -> None:
+    first = json.dumps({"type": "finish", "answer": "完整答案"}, ensure_ascii=False)
+
+    action = parse_action(first + "}")
+
+    assert isinstance(action, FinishAction)
+    assert action.answer == "完整答案"
+
+
+def test_finish_recovers_exact_duplicate_object() -> None:
+    first = json.dumps({"type": "finish", "answer": "完整答案"}, ensure_ascii=False)
+
+    action = parse_action(first + "\n" + first)
+
+    assert isinstance(action, FinishAction)
+    assert action.answer == "完整答案"
+
+
 def test_parse_tool_action_with_json_object() -> None:
     response = json.dumps(
         {

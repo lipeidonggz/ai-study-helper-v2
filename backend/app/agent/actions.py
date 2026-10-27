@@ -93,6 +93,9 @@ def parse_action(response: str) -> ParsedAction:
             parse_constant=_reject_non_finite_number,
         )
     except (json.JSONDecodeError, ValueError) as error:
+        recovered = _recover_finish_with_trailing_serialization(response)
+        if recovered is not None:
+            return recovered
         raise ActionProtocolError("response must be one valid JSON object") from error
     if not isinstance(payload, dict):
         raise ActionProtocolError("response must be a JSON object")
@@ -114,6 +117,47 @@ def parse_action(response: str) -> ParsedAction:
     except ValidationError as error:
         raise ActionProtocolError("response does not match its action schema") from error
     raise ActionProtocolError("response type must be tool_call or finish")
+
+
+def _recover_finish_with_trailing_serialization(response: str) -> FinishAction | None:
+    """只在终端 finish 后容忍重复自身或多余右括号，不接受尾随正文。"""
+
+    escaped = _escape_control_characters_in_strings(response)
+    decoder = json.JSONDecoder()
+    try:
+        payload, end_index = decoder.raw_decode(escaped)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict) or payload.get("type") != "finish":
+        return None
+    first = escaped[:end_index]
+    try:
+        strict_payload = json.loads(
+            first,
+            object_pairs_hook=_object_without_duplicate_keys,
+            parse_constant=_reject_non_finite_number,
+        )
+    except (json.JSONDecodeError, ValueError):
+        return None
+    suffix = escaped[end_index:].strip()
+    while suffix:
+        if set(suffix) <= {"}"}:
+            break
+        try:
+            duplicate, duplicate_end = decoder.raw_decode(suffix)
+        except json.JSONDecodeError:
+            return None
+        if duplicate != strict_payload:
+            return None
+        suffix = suffix[duplicate_end:].strip()
+    try:
+        finish = _FinishResponse.model_validate(strict_payload)
+    except ValidationError:
+        return None
+    return FinishAction(
+        answer=finish.answer,
+        decision_summary=finish.decision_summary.strip(),
+    )
 
 
 def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
