@@ -242,6 +242,12 @@ def test_split_answer_spans_covers_claims_without_headings_or_code() -> None:
         "list_item",
         "table_row",
     ]
+    assert [span.structure_role for span in spans] == [
+        "body_sentence",
+        "body_sentence",
+        "body_list_item",
+        "body_table_row",
+    ]
     assert all(answer[span.start_index : span.end_index] == span.text for span in spans)
     assert [span.span_id for span in spans] == [
         "span_0001",
@@ -349,7 +355,7 @@ def test_split_answer_spans_does_not_emit_ordered_list_numbers_as_claims() -> No
     assert all(span.kind == "list_item" for span in spans)
 
 
-def test_split_answer_spans_keeps_closing_emphasis_with_its_sentence() -> None:
+def test_split_answer_spans_excludes_standalone_emphasis_headings() -> None:
     answer = (
         "**1. 通过已批准域名的外泄。** 沙箱本身工作正常，但数据仍被外泄。\n\n"
         "**2. EDR 看不见虚拟机内部。**"
@@ -357,12 +363,40 @@ def test_split_answer_spans_keeps_closing_emphasis_with_its_sentence() -> None:
 
     spans = split_answer_spans(answer)
 
+    assert [span.text for span in spans] == ["沙箱本身工作正常，但数据仍被外泄。"]
+    assert all(answer[span.start_index : span.end_index] == span.text for span in spans)
+
+
+def test_split_answer_spans_keeps_full_bold_sentence_as_body_claim() -> None:
+    answer = "**没有原文依据——“MCP 是新的攻击面”是模型层面的概括与补充。**\n\n后续正文。"
+
+    spans = split_answer_spans(answer)
+
     assert [span.text for span in spans] == [
-        "**1. 通过已批准域名的外泄。**",
-        "沙箱本身工作正常，但数据仍被外泄。",
-        "**2. EDR 看不见虚拟机内部。**",
+        "**没有原文依据——“MCP 是新的攻击面”是模型层面的概括与补充。**",
+        "后续正文。",
     ]
     assert all(answer[span.start_index : span.end_index] == span.text for span in spans)
+
+
+def test_split_answer_spans_excludes_heading_navigation_and_list_item_titles() -> None:
+    answer = (
+        "# 章节标题\n\n"
+        "**独立粗体标题**\n\n"
+        "1. **列表项标题。**\n"
+        "2. **带说明的列表项**：这里是正文事实。\n\n"
+        "- [跳转到章节](#section)\n\n"
+        "正文事实句。\n"
+    )
+
+    spans = split_answer_spans(answer)
+
+    assert [span.text for span in spans] == [
+        "2. **带说明的列表项**：这里是正文事实。",
+        "正文事实句。",
+    ]
+    assert spans[0].structure_role == "body_list_item"
+    assert spans[1].structure_role == "body_sentence"
 
 
 def test_annotator_returns_independent_claim_spans_with_exact_offsets() -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Protocol
@@ -113,6 +114,7 @@ class FakeChatProvider:
         *,
         stream_chunk_size: int = 7,
         auto_empty_citation_annotations: bool = True,
+        auto_source_meta_assertions: bool = True,
     ) -> None:
         if not responses:
             raise ValueError("fake chat provider requires at least one response")
@@ -121,6 +123,7 @@ class FakeChatProvider:
         self._responses = list(responses)
         self._stream_chunk_size = stream_chunk_size
         self._auto_empty_citation_annotations = auto_empty_citation_annotations
+        self._auto_source_meta_assertions = auto_source_meta_assertions
         self._profile = ChatProviderProfile(
             provider="fake",
             model_id="fake-agent-chat",
@@ -175,6 +178,39 @@ class FakeChatProvider:
             and "后置引用标注器" in messages[0].content
         ):
             content = '{"annotations":[]}'
+            self.requests.append(tuple(messages))
+            self.max_output_requests.append(max_output_tokens)
+            input_tokens = sum(max(1, len(message.content) // 4) for message in messages)
+            return ChatCompletionResult(
+                content=content,
+                request_id=f"fake-chat-{len(self.requests):04d}",
+                actual_model_id=self.profile.model_id,
+                finish_reason="stop",
+                input_tokens=input_tokens,
+                output_tokens=max(1, len(content) // 4),
+            )
+        if (
+            self._auto_source_meta_assertions
+            and messages
+            and messages[0].role == "system"
+            and "来源元描述门禁" in messages[0].content
+        ):
+            packet = json.loads(messages[-1].content)
+            content = json.dumps(
+                {
+                    "assessments": [
+                        {
+                            "span_id": span["span_id"],
+                            "has_content_claim": True,
+                            "source_relation": "none",
+                            "answer_relation": "none",
+                            "reason": "fake provider 默认放行正文",
+                        }
+                        for span in packet["spans"]
+                    ]
+                },
+                ensure_ascii=False,
+            )
             self.requests.append(tuple(messages))
             self.max_output_requests.append(max_output_tokens)
             input_tokens = sum(max(1, len(message.content) // 4) for message in messages)

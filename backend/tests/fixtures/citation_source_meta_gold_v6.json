@@ -1,0 +1,142 @@
+{
+  "version": "citation-source-meta-calibration-v6",
+  "review_status": "provisional",
+  "cases": {
+    "c1-001": {
+      "default_source_meta": false,
+      "overrides": [
+        {
+          "text_contains": "MCP 共出现 3 处",
+          "source_meta": true
+        }
+      ]
+    },
+    "c2-001": {
+      "default_source_meta": false,
+      "overrides": []
+    },
+    "c3-001": {
+      "default_source_meta": false,
+      "overrides": []
+    },
+    "c4-001": {
+      "default_source_meta": false,
+      "overrides": []
+    },
+    "c5-001": {
+      "default_source_meta": false,
+      "overrides": []
+    },
+    "c6-001": {
+      "default_source_meta": false,
+      "overrides": [
+        {
+          "text_contains": "文档没有把“沙箱、出口控制、虚拟机”",
+          "source_meta": true
+        }
+      ]
+    },
+    "c7-001": {
+      "default_source_meta": false,
+      "overrides": [
+        {
+          "text_contains": "Risk we missed",
+          "source_meta": true
+        },
+        {
+          "text_contains": "补充说明：文中另有",
+          "source_meta": true
+        },
+        {
+          "text_contains": "Looking ahead",
+          "source_meta": true
+        }
+      ]
+    },
+    "c8-001": {
+      "default_source_meta": false,
+      "overrides": []
+    },
+    "c9-001": {
+      "default_source_meta": false,
+      "overrides": [
+        {
+          "text_contains": "本次回答未完整完成",
+          "source_meta": true
+        },
+        {
+          "text_contains": "模型连续输出不符合结构化协议",
+          "source_meta": true
+        },
+        {
+          "text_contains": "以下内容仅基于已经获取",
+          "source_meta": true
+        }
+      ]
+    },
+    "c10-001": {
+      "default_source_meta": false,
+      "overrides": []
+    },
+    "c11-001": {
+      "default_source_meta": false,
+      "overrides": []
+    },
+    "c12-001": {
+      "default_source_meta": false,
+      "overrides": [
+        {
+          "text_contains": "文档没有给出 gVisor",
+          "source_meta": true
+        },
+        {
+          "text_contains": "文档**没有**解释 gVisor",
+          "source_meta": true
+        },
+        {
+          "text_contains": "如果你想要 gVisor",
+          "source_meta": true
+        }
+      ]
+    },
+    "c13-001": {
+      "default_source_meta": false,
+      "overrides": [
+        {
+          "text_contains": "以上内容均来自该文档",
+          "source_meta": true
+        }
+      ]
+    },
+    "c14-001": {
+      "default_source_meta": true,
+      "overrides": [
+        {
+          "text_contains": "字面核对结果",
+          "source_meta": false
+        }
+      ]
+    },
+    "c15-001": {
+      "default_source_meta": false,
+      "overrides": []
+    },
+    "cf-001": {
+      "default_source_meta": false,
+      "overrides": [
+        {
+          "text_contains": "说明：知识库中",
+          "source_meta": true
+        }
+      ]
+    },
+    "cf-002": {
+      "default_source_meta": false,
+      "overrides": []
+    },
+    "cf-003": {
+      "default_source_meta": false,
+      "overrides": []
+    }
+  }
+}

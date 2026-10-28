@@ -211,16 +211,18 @@ def test_agent_runtime_executes_tool_and_finishes(tmp_path: Path) -> None:
     assert result.answer == "MCP 位于沙箱边界章节。"
     assert result.agent_turns == 2
     assert result.tool_calls == 1
-    assert result.model_calls == 3
-    assert result.citation_annotation_model_calls == 1
+    assert result.model_calls == 4
+    assert result.citation_annotation_model_calls == 2
     citation_event = next(
         event for event in result.events if event.event_type == "citations_available"
     )
     assert citation_event.payload["status"] == "complete"
-    assert citation_event.payload["span_version"] == "claim-spans-v3"
+    assert citation_event.payload["span_version"] == "claim-spans-v4"
     assert citation_event.payload["batch_count"] == 1
     assert citation_event.payload["batch_version"] == "evidence-blocks-v1"
     assert citation_event.payload["annotations"] == []
+    assert citation_event.payload["source_meta"]["status"] == "complete"
+    assert citation_event.payload["source_meta"]["excluded_span_count"] == 0
     tool_event = next(event for event in result.events if event.event_type == "tool_call")
     assert tool_event.payload["result_tokens"] > 0
     assert "result_tokens" not in tool_event.payload["diagnostics"]
@@ -365,14 +367,56 @@ def test_annotation_failure_preserves_answer_and_marks_pending(
     assert result.citation_annotations is not None
     assert result.citation_annotations.status == "pending"
     assert result.citation_annotations.error_code == "citation_annotation_output_invalid"
-    assert result.citation_annotation_model_calls == 2
-    assert result.model_calls == 4
+    assert result.citation_annotation_model_calls == 3
+    assert result.model_calls == 5
     assert any(
         limitation.code == "citation_annotation_pending" for limitation in result.limitations
     )
     events = [event.event_type for event in result.events]
     assert "citation_annotation_started" in events
     assert "citation_annotation_failed" in events
+
+
+def test_source_meta_failure_falls_back_without_removing_citations(
+    tmp_path: Path,
+) -> None:
+    embedding_provider = _prepare_snapshot(tmp_path)
+    chat_provider = FakeChatProvider(
+        [
+            _tool_call("search_blocks", {"query": "MCP"}),
+            _finish("MCP 位于沙箱边界章节。"),
+            "not-json",
+            "not-json",
+        ],
+        auto_source_meta_assertions=False,
+    )
+    runtime = AgentRuntime(
+        tmp_path,
+        chat_provider=chat_provider,
+        embedding_provider=embedding_provider,
+    )
+
+    result = asyncio.run(runtime.run("MCP 在哪个章节？"))
+
+    assert result.status == "succeeded"
+    assert result.citation_annotations is not None
+    assert result.citation_annotations.status == "complete"
+    assert result.citation_annotations.source_meta.status == "pending"
+    assert result.citation_annotations.source_meta.fallback_to_all_spans is True
+    assert result.citation_annotation_model_calls == 3
+    assert result.model_calls == 5
+    assert any(
+        limitation.code == "citation_source_meta_fallback" for limitation in result.limitations
+    )
+    assert not any(
+        limitation.code == "citation_annotation_pending" for limitation in result.limitations
+    )
+    citation_event = next(
+        event for event in result.events if event.event_type == "citations_available"
+    )
+    assert citation_event.payload["status"] == "complete"
+    assert citation_event.payload["source_meta"]["status"] == "pending"
+    assert citation_event.payload["source_meta"]["fallback_to_all_spans"] is True
 
 
 def test_cancel_during_annotation_preserves_answer_and_usage(
@@ -430,8 +474,8 @@ def test_cancel_during_annotation_preserves_answer_and_usage(
     assert result.status == "canceled"
     assert result.termination_reason == "canceled_by_user"
     assert result.answer == "完整答案已经生成。"
-    assert result.citation_annotation_model_calls == 1
-    assert result.model_calls == 3
+    assert result.citation_annotation_model_calls == 2
+    assert result.model_calls == 4
     assert result.citation_annotations is not None
     assert result.citation_annotations.status == "complete"
     event_types = [event.event_type for event in result.events]
@@ -528,14 +572,16 @@ def test_agent_runtime_persists_parented_trace_with_tool_and_budget_data(
     assert detail.manifest.trace_status == "complete"
     assert detail.manifest.replay_scope == "retrieval"
     assert detail.manifest.versions["agent_loop_version"] == "react-structured-v4"
-    assert detail.manifest.model_calls == result.model_calls == 3
+    assert detail.manifest.model_calls == result.model_calls == 4
     citation_span = next(span for span in detail.spans if span.name == "citation.annotation")
     assert citation_span.status == "ok"
     assert citation_span.attributes["app.citation_annotation_status"] == "complete"
-    assert citation_span.attributes["app.claim_span_version"] == "claim-spans-v3"
+    assert citation_span.attributes["app.claim_span_version"] == "claim-spans-v4"
     assert citation_span.attributes["app.annotation_batch_count"] == 1
     assert citation_span.attributes["app.annotation_batch_version"] == "evidence-blocks-v1"
-    assert citation_span.attributes["app.model_calls"] == 1
+    assert citation_span.attributes["app.citation_source_meta_status"] == "complete"
+    assert citation_span.attributes["app.citation_source_meta_model_calls"] == 1
+    assert citation_span.attributes["app.model_calls"] == 2
     assert citation_span.attributes["llm.token_count.prompt"] > 0
     assert citation_span.attributes["llm.token_count.completion"] > 0
     assert {artifact.kind for artifact in detail.manifest.artifacts} >= {
@@ -559,7 +605,7 @@ def test_agent_runtime_persists_parented_trace_with_tool_and_budget_data(
         ).read_text(encoding="utf-8")
     )
     assert citation_payload["status"] == "complete"
-    assert citation_payload["span_version"] == "claim-spans-v3"
+    assert citation_payload["span_version"] == "claim-spans-v4"
     assert citation_span.attributes["llm.invocation_parameters.max_tokens"] == (
         citation_annotation_output_token_cap(citation_payload["span_count"])
     )
@@ -1201,7 +1247,7 @@ def test_agent_api_uses_saved_runtime_settings(tmp_path: Path) -> None:
     assert result["status"] == "succeeded"
     tool_event = next(event for event in result["events"] if event["event_type"] == "tool_call")
     assert tool_event["payload"]["diagnostics"]["search_profile"]["top_k"] == 3
-    assert chat_provider.max_output_requests == [4096, 4096, 640]
+    assert chat_provider.max_output_requests == [4096, 4096, 8192, 640]
 
 
 def test_runtime_settings_do_not_change_an_inflight_request(tmp_path: Path) -> None:
