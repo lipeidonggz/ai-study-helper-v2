@@ -168,6 +168,13 @@
 
 - [x] 评测台结果矩阵和样本详情能看到支持率、计数与软质量状态；沛东确认检查通过。
 
+### 判定总览单元格修正
+
+- 人工验收发现“判定项与全局检查”总览仍直接显示 citation support 的原始 CheckResult 三态，容易把软质量误解为旧的待复核或红线候选。
+- 修正后该行读取 attempt 的 `citation_support_quality`：主值显示支持率，辅助值显示优／待观察／样本少及异常数量。
+- good 使用浅绿色，review 使用浅橙色，insufficient_sample 使用浅蓝灰色，not_applicable 与 missing 使用中性灰色；不再使用代表硬失败的红色。
+- 悬浮说明补充 supported、unsupported、unknown 计数，并明确“软质量，不阻塞 attempt”；单元格点击继续打开既有 claim 复核详情。
+
 ## 反向解释
 
 | 编号 | 问题 | 负责人回答摘要 | 核对结果 | 跟进 |

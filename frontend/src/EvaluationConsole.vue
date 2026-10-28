@@ -287,6 +287,9 @@ interface JudgmentOverviewCell {
   sampleLabel: string;
   result: AttemptAggregateView["result"] | "missing";
   label: string;
+  detail: string;
+  supportQuality: CitationSupportQualityView | null;
+  supportHasAnomaly: boolean;
   focusTargetId: string;
 }
 
@@ -1843,6 +1846,49 @@ function judgmentOverviewTargetId(key: string): string {
   return `judgment-overview-${key.replace(/[^A-Za-z0-9_-]/g, "-")}`;
 }
 
+/** 把引用支持软质量转换为总览单元格的主值和辅助说明。 */
+function citationSupportOverviewLabel(
+  quality: CitationSupportQualityView | null,
+): { label: string; detail: string; hasAnomaly: boolean } {
+  if (!quality || quality.status === "not_applicable") {
+    return { label: "无引用", detail: "不适用", hasAnomaly: false };
+  }
+  const anomalyCount = quality.unsupported_count + quality.unknown_count;
+  const rate = `${((quality.support_rate ?? 0) * 100).toFixed(1)}%`;
+  if (quality.status === "insufficient_sample") {
+    return {
+      label: rate,
+      detail: anomalyCount > 0
+        ? `样本少 ${quality.occurrence_count} · ${anomalyCount} 个异常`
+        : `样本少 ${quality.occurrence_count}`,
+      hasAnomaly: anomalyCount > 0,
+    };
+  }
+  const statusLabel = quality.status === "good" ? "优" : "待观察";
+  return {
+    label: rate,
+    detail: anomalyCount > 0
+      ? `${statusLabel} · ${anomalyCount} 个异常`
+      : statusLabel,
+    hasAnomaly: anomalyCount > 0,
+  };
+}
+
+/** 为引用支持总览单元格提供完整可读的悬浮说明。 */
+function judgmentOverviewCellTitle(cell: JudgmentOverviewCell): string {
+  if (!cell.supportQuality) {
+    return `${cell.sampleLabel} · ${cell.label}`;
+  }
+  const quality = cell.supportQuality;
+  return [
+    `${cell.sampleLabel} · 引用支持 ${cell.label}`,
+    `supported ${quality.supported_count}`,
+    `unsupported ${quality.unsupported_count}`,
+    `unknown ${quality.unknown_count}`,
+    "软质量，不阻塞 attempt",
+  ].join(" · ");
+}
+
 const judgmentOverviewRows = computed<JudgmentOverviewRow[]>(() => {
   const caseRevision = caseById.value.get(judgmentCaseFilter.value);
   if (!caseRevision) {
@@ -1868,6 +1914,9 @@ const judgmentOverviewRows = computed<JudgmentOverviewRow[]>(() => {
         sampleLabel: group.sampleLabel,
         result: judgment?.normalized_result ?? "missing",
         label: judgment ? statusText(judgment.normalized_result) : "无记录",
+        detail: "",
+        supportQuality: null,
+        supportHasAnomaly: false,
         focusTargetId: judgmentOverviewTargetId(criterion.revision_id),
       };
     }),
@@ -1880,8 +1929,8 @@ const judgmentOverviewRows = computed<JudgmentOverviewRow[]>(() => {
     ],
     [
       "citation_support",
-      "引用支持",
-      "核对 claim 与联合证据是否语义一致；unknown 保持待定。",
+      "引用支持（软质量）",
+      "按已标注 occurrence 展示支持率；unknown 计入分母，不阻塞 attempt。",
     ],
   ] as const) {
     rows.push({
@@ -1900,6 +1949,23 @@ const judgmentOverviewRows = computed<JudgmentOverviewRow[]>(() => {
             sampleLabel: group.sampleLabel,
             result: "missing",
             label: "无记录",
+            detail: "",
+            supportQuality: null,
+            supportHasAnomaly: false,
+            focusTargetId: judgmentOverviewTargetId(`check:${checkerId}`),
+          };
+        }
+        if (checkerId === "citation_support") {
+          const quality = group.aggregate?.citation_support_quality ?? null;
+          const display = citationSupportOverviewLabel(quality);
+          return {
+            attemptId: group.attemptId,
+            sampleLabel: group.sampleLabel,
+            result: "pass",
+            label: display.label,
+            detail: display.detail,
+            supportQuality: quality,
+            supportHasAnomaly: display.hasAnomaly,
             focusTargetId: judgmentOverviewTargetId(`check:${checkerId}`),
           };
         }
@@ -1909,6 +1975,9 @@ const judgmentOverviewRows = computed<JudgmentOverviewRow[]>(() => {
           sampleLabel: group.sampleLabel,
           result: review?.result ?? check.result,
           label: effectiveCheckStatusText(check),
+          detail: "",
+          supportQuality: null,
+          supportHasAnomaly: false,
           focusTargetId: judgmentOverviewTargetId(`check:${checkerId}`),
         };
       }),
@@ -5628,11 +5697,21 @@ onBeforeUnmount(() => {
                           <button
                             type="button"
                             class="eval-judgment-cell"
-                            :class="`result-${cell.result}`"
-                            :title="`${cell.sampleLabel} · ${cell.label}`"
+                            :class="
+                              cell.supportQuality
+                                ? `support-${cell.supportQuality.status}`
+                                : `result-${cell.result}`
+                            "
+                            :title="judgmentOverviewCellTitle(cell)"
                             @click="openJudgmentOverviewCell(cell)"
                           >
-                            {{ cell.label }}
+                            <span>{{ cell.label }}</span>
+                            <small
+                              v-if="cell.detail"
+                              :class="{ 'support-anomaly': cell.supportHasAnomaly }"
+                            >
+                              {{ cell.detail }}
+                            </small>
                           </button>
                         </td>
                       </tr>
@@ -8368,6 +8447,18 @@ onBeforeUnmount(() => {
   font-size: 0.65rem;
 }
 
+.eval-judgment-cell span,
+.eval-judgment-cell small {
+  display: block;
+}
+
+.eval-judgment-cell small {
+  margin-top: 2px;
+  color: currentColor;
+  font-size: 0.56rem;
+  opacity: 0.78;
+}
+
 .eval-judgment-cell:hover {
   background: #eef5ef;
 }
@@ -8382,6 +8473,32 @@ onBeforeUnmount(() => {
 
 .eval-judgment-cell.result-missing {
   color: #929a94;
+}
+
+.eval-judgment-cell.support-good {
+  color: #27633e;
+  background: #edf8f0;
+}
+
+.eval-judgment-cell.support-review {
+  color: #7a5414;
+  background: #fff5dd;
+}
+
+.eval-judgment-cell.support-insufficient_sample {
+  color: #456579;
+  background: #edf4f8;
+}
+
+.eval-judgment-cell.support-not_applicable {
+  color: #7a817c;
+  background: #f4f5f4;
+}
+
+.eval-judgment-cell small.support-anomaly {
+  color: #9a6518;
+  font-weight: 700;
+  opacity: 1;
 }
 
 .eval-matrix-summary article.caution {
