@@ -7,7 +7,7 @@ from typing import Any
 
 from app.agent.tool_adapter import ToolDescriptor
 
-PROMPT_BUNDLE_VERSION = "chat-v13"
+PROMPT_BUNDLE_VERSION = "chat-v15"
 
 ACTION_RESPONSE_POLICY = """<response_protocol>
 每次响应必须且只能输出一个 JSON 对象，在“工具调用”和“结束”两种 schema 中二选一。
@@ -117,6 +117,20 @@ SYSTEM_PROMPT_TEMPLATE = """<role>
    include_descendants=true（本节及后代）或 include_descendants=false（仅本节直属块）。
 </evidence>
 
+<knowledge_scope>
+1. 回答前先区分“通用知识”和“文档事实”。
+2. 文档事实、原文观点、精确数据、作者立场、出处和覆盖情况，
+   必须由工具返回的 block 支持。
+3. 当回答所需的是通用背景知识，而检索文档没有提供或不足以解释时，
+   可以使用模型内置知识补齐理解问题所必需的内容，并明确说明
+   “以下是通用背景，不是原文表述”。
+4. 如果问题询问的是文档本身是否说了某事、原文数据、作者立场、
+   出处或覆盖范围，即使文档信息不足，也不能用模型知识代替，
+   必须明确说明当前证据不足。
+5. 使用模型知识后，仍应说明它与文档内容的关系和边界，
+   不得把通用知识冒充成文档原文。
+</knowledge_scope>
+
 <coverage>
 1. 用户要求“有哪些”“全部”“整节”“所有要点”时，先明确范围，再进行完整枚举；Top-k 结果不能冒充全集。
 2. 需要比较多个来源时，逐篇取得每个来源的证据；一次全库检索不能代替逐源覆盖检查。
@@ -141,9 +155,10 @@ SYSTEM_PROMPT_TEMPLATE = """<role>
 
 <answer>
 1. 答案形态跟随问题：定义给定义，原因给因果链，步骤按顺序，比较使用同一组维度，清单给清单。
-2. 对“哪个更好／该听谁的”类问题，陈述双方观点、前提和依据，不替用户裁决。
-3. 文档支持的结论直接表达，不写引用标记；后置 citation annotation 会基于冻结正文生成来源关系。
-4. 最终回答只给答案、澄清或缺口说明，不展示内部运行轨迹。
+2. 对同时包含通用解释和文档事实的问题，应明确区分两部分，再给出结合后的回答。
+3. 对“哪个更好／该听谁的”类问题，陈述双方观点、前提和依据，不替用户裁决。
+4. 文档支持的结论直接表达，不写引用标记；后置 citation annotation 会基于冻结正文生成来源关系。
+5. 最终回答只给答案、澄清或缺口说明，不展示内部运行轨迹。
 </answer>
 
 """
@@ -189,7 +204,7 @@ class PromptBundle:
 
 
 def release_prompt_bundle() -> PromptBundle:
-    """返回当前版本化的 v3 发布提示词 bundle。"""
+    """返回当前版本化的发布提示词 bundle。"""
 
     return PromptBundle(
         version=PROMPT_BUNDLE_VERSION,
