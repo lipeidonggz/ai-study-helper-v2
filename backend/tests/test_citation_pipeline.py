@@ -82,7 +82,7 @@ def test_pipeline_excludes_source_meta_before_annotation_and_audits_reason() -> 
     )
 
     assert outcome.artifact.status == "complete"
-    assert outcome.artifact.schema_version == "citation-annotation-v3"
+    assert outcome.artifact.schema_version == "citation-annotation-v4"
     assert outcome.artifact.span_count == 2
     assert outcome.artifact.source_meta.status == "complete"
     assert outcome.artifact.source_meta.rule_version == "citation-source-meta-rules-v4"
