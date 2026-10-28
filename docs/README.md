@@ -8,7 +8,7 @@
 
 - 阶段：实现阶段，027 claim-aware 引用标注已完成，028 评测失败分类拆分已实现。
 - 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付、检索与 Agent 运行链、流式问答、本地 trace 诊断和逐 criterion 评测判定已实现。
-- 当前工作：047／048 已修订 c8 综合归属判据并修复长答案引用标注截断；后续处理 c8 R2 覆盖问题。
+- 当前工作：049 已将 c8 R2 收敛为 7 个整体图景核心概念并激活；原冻结答案 R2 为 10/10，`chat-v14` 实验因前提不成立已撤回。
 
 ## 设计基线
 
@@ -16,7 +16,7 @@
 | --- | --- | --- |
 | [01](design/01-product-requirements.md) | 产品需求、问题空间、范围和质量属性 | 已审核 · 实现基线 |
 | [02](design/02-how-to-build-an-agent.md) | Agent 开发方法与知识面 | 已审核 · 实现基线 |
-| [03](design/03-cases-and-gold-standard.md) | 用例与金标准 | v0.4 · 实现基线 |
+| [03](design/03-cases-and-gold-standard.md) | 用例与金标准 | v0.5 · 实现基线 |
 | [04](design/04-architecture-design-method.md) | 架构设计方法 | 已审核 · 实现基线 |
 | [05](design/05-storage-and-retrieval-strategy.md) | 存储结构与检索策略 | 已审核 · 实现基线 |
 | [06](design/06-retrieval-pure-agent.md) | 检索工具、Agent 循环、提示词、trace 与部署 | 已审核 · 实现基线 |
@@ -25,7 +25,7 @@
 | [09](design/09-technology-selection.md) | 技术选型与总体架构 | v0.4 · 实现基线 |
 | [10](design/10-document-detail-design.md) | 文档详情页信息架构与数据边界 | 已审核 · 首版实现基线 |
 
-01–09 已于 2026-10-20 审核，并作为当前实现基线；03 已于 2026-10-28 完成 c6 和 c8 判据修订并更新为 v0.4，09 已依据 ADR 0004 更新为 v0.4。后续修改必须保留变更原因，同时更新本索引。
+01–09 已于 2026-10-20 审核，并作为当前实现基线；03 已于 2026-10-28 完成 c6 和 c8 判据修订并更新为 v0.5，09 已依据 ADR 0004 更新为 v0.4。后续修改必须保留变更原因，同时更新本索引。
 
 ## 记录分类
 
@@ -126,6 +126,7 @@
 - [2026-10-26 · citation-rubric-v7 语义与稳定性校准](development/experiments/2026-10-26-citation-rubric-v7-calibration.md)
 - [2026-10-26 · 引用语义支持候选与人工复核门禁](development/experiments/2026-10-26-citation-support-review-gate.md)
 - [2026-10-28 · 提示词语义对齐：来源元门禁迭代记录](development/experiments/2026-10-28-prompt-semantic-alignment.md)
+- [2026-10-28 · c8 chat-v14 跨来源综合校准](development/experiments/2026-10-28-c8-chat-v14-synthesis.md)
 - [032 · 判定总 Token 用量展示（待人工验收）](development/slices/032-judge-token-usage-visibility.md)
 - [033 · 异步 GitHub 交付与依赖门禁（已完成）](development/slices/033-async-github-delivery-gate.md)
 - [034 · c2-001 指标归属金标准修订（待确认）](development/slices/034-c2-metric-attribution.md)
@@ -143,6 +144,7 @@
 - [046 · c6 通用 containment 金标准修订（已完成）](development/slices/046-c6-generic-containment-criteria.md)
 - [047 · c8 综合框架与名称归属边界（已完成）](development/slices/047-c8-synthesis-attribution-boundary.md)
 - [048 · 引用标注输出截断后的 span 二分（已完成）](development/slices/048-citation-annotation-span-split.md)
+- [049 · c8 R2 整体图景范围校准（已完成）](development/slices/049-c8-r2-semantic-calibration.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库
