@@ -11,11 +11,12 @@ from app.agent.citation_annotation_prompt import (
     CITATION_ANNOTATION_PROMPT_VERSION,
     render_citation_annotation_messages,
 )
+from app.agent.citation_source_meta import CitationSourceMetaArtifact
 from app.agent.token_counter import ObservationTokenCounter
 from app.providers.chat import ChatMessage, ChatProvider, ChatProviderError
 
-CITATION_ANNOTATION_SCHEMA_VERSION = "citation-annotation-v2"
-CLAIM_SPAN_VERSION = "claim-spans-v3"
+CITATION_ANNOTATION_SCHEMA_VERSION = "citation-annotation-v3"
+CLAIM_SPAN_VERSION = "claim-spans-v4"
 LEGACY_CLAIM_SPAN_VERSION = "legacy-unknown"
 CITATION_ANNOTATION_BATCH_VERSION = "evidence-blocks-v1"
 LEGACY_CITATION_ANNOTATION_BATCH_VERSION = "legacy-unknown"
@@ -28,6 +29,12 @@ MAX_CITATION_ANNOTATION_ATTEMPTS = 2
 MAX_CITATION_ANNOTATION_EVIDENCE_BLOCKS_PER_BATCH = 24
 
 CitationSpanKind = Literal["sentence", "list_item", "table_row", "line"]
+CitationSpanRole = Literal[
+    "body_sentence",
+    "body_list_item",
+    "body_table_row",
+    "body_line",
+]
 CitationContextKind = Literal["paragraph", "list", "table"]
 
 
@@ -38,6 +45,7 @@ class CitationSpan(BaseModel):
 
     span_id: str
     kind: CitationSpanKind
+    structure_role: CitationSpanRole = "body_sentence"
     start_index: int = Field(ge=0)
     end_index: int = Field(gt=0)
     text: str = Field(min_length=1)
@@ -110,6 +118,9 @@ class CitationAnnotationArtifact(BaseModel):
     batch_count: int = Field(default=0, ge=0)
     batch_version: str = LEGACY_CITATION_ANNOTATION_BATCH_VERSION
     annotations: list[CitationAnnotation] = Field(default_factory=list)
+    source_meta: CitationSourceMetaArtifact = Field(
+        default_factory=CitationSourceMetaArtifact,
+    )
     error_code: str | None = None
     error_message: str | None = None
 
@@ -178,6 +189,7 @@ class CitationAnnotator:
         question: str,
         answer: str,
         evidence_blocks: list[CitationEvidenceBlock],
+        spans: list[CitationSpan] | None = None,
         spent_input_tokens: int,
         spent_output_tokens: int,
         max_context_tokens: int,
@@ -185,12 +197,12 @@ class CitationAnnotator:
     ) -> CitationAnnotationOutcome:
         """生成后置 citation annotations；正文只读，失败时返回 pending artifact。"""
 
-        spans = split_answer_spans(answer)
+        resolved_spans = split_answer_spans(answer) if spans is None else spans
         model_id = self._provider.profile.model_id
         if "\u3010\u6765\u6e90\uff1a" in answer:
             return self._pending_outcome(
                 model_id=model_id,
-                spans=spans,
+                spans=resolved_spans,
                 evidence_blocks=evidence_blocks,
                 code="citation_annotation_inline_marker_forbidden",
                 message="answer contains a legacy inline citation marker",
@@ -198,11 +210,11 @@ class CitationAnnotator:
                 input_tokens=0,
                 output_tokens=0,
             )
-        if not spans or not evidence_blocks:
+        if not resolved_spans or not evidence_blocks:
             return self._outcome(
                 status="not_applicable",
                 model_id=model_id,
-                spans=spans,
+                spans=resolved_spans,
                 evidence_blocks=evidence_blocks,
             )
 
@@ -214,7 +226,7 @@ class CitationAnnotator:
                 MAX_CITATION_ANNOTATION_EVIDENCE_BLOCKS_PER_BATCH,
             )
         ]
-        output_token_cap = citation_annotation_output_token_cap(len(spans))
+        output_token_cap = citation_annotation_output_token_cap(len(resolved_spans))
         model_calls = 0
         input_tokens = 0
         output_tokens = 0
@@ -225,7 +237,7 @@ class CitationAnnotator:
             packet = CitationAnnotationInput(
                 question=question,
                 answer=answer,
-                spans=spans,
+                spans=resolved_spans,
                 evidence_blocks=evidence_batch,
             )
             batch_messages = tuple(render_citation_annotation_messages(packet))
@@ -236,7 +248,7 @@ class CitationAnnotator:
             if estimated_input_tokens > max_context_tokens:
                 return self._pending_outcome(
                     model_id=model_id,
-                    spans=spans,
+                    spans=resolved_spans,
                     evidence_blocks=evidence_blocks,
                     code="citation_annotation_context_exceeded",
                     message=(
@@ -265,7 +277,7 @@ class CitationAnnotator:
                 ):
                     return self._pending_outcome(
                         model_id=model_id,
-                        spans=spans,
+                        spans=resolved_spans,
                         evidence_blocks=evidence_blocks,
                         code="citation_annotation_request_budget_exceeded",
                         message=(
@@ -291,7 +303,7 @@ class CitationAnnotator:
                     if not error.retryable or attempt == MAX_CITATION_ANNOTATION_ATTEMPTS:
                         return self._pending_outcome(
                             model_id=model_id,
-                            spans=spans,
+                            spans=resolved_spans,
                             evidence_blocks=evidence_blocks,
                             code="citation_annotation_model_failed",
                             message=(
@@ -321,7 +333,7 @@ class CitationAnnotator:
                         )
                     batch_annotations = _parse_annotations(
                         result.content,
-                        spans=spans,
+                        spans=resolved_spans,
                         evidence_blocks=evidence_batch,
                         answer=answer,
                     )
@@ -330,7 +342,7 @@ class CitationAnnotator:
                     if attempt == MAX_CITATION_ANNOTATION_ATTEMPTS:
                         return self._pending_outcome(
                             model_id=model_id,
-                            spans=spans,
+                            spans=resolved_spans,
                             evidence_blocks=evidence_blocks,
                             code=error.code,
                             message=f"{error}: batch {batch_index}/{len(evidence_batches)}",
@@ -346,7 +358,7 @@ class CitationAnnotator:
             if batch_annotations is None:
                 return self._pending_outcome(
                     model_id=model_id,
-                    spans=spans,
+                    spans=resolved_spans,
                     evidence_blocks=evidence_blocks,
                     code=last_error or "citation_annotation_failed",
                     message=(
@@ -362,7 +374,7 @@ class CitationAnnotator:
                 )
             annotations.extend(batch_annotations)
 
-        span_by_id = {span.span_id: span for span in spans}
+        span_by_id = {span.span_id: span for span in resolved_spans}
         merged_block_ids: dict[str, list[str]] = {}
         for annotation in annotations:
             block_ids = merged_block_ids.setdefault(annotation.span_id, [])
@@ -391,7 +403,7 @@ class CitationAnnotator:
         return self._outcome(
             status="complete",
             model_id=model_id,
-            spans=spans,
+            spans=resolved_spans,
             evidence_blocks=evidence_blocks,
             annotations=annotations,
             model_calls=model_calls,
@@ -508,6 +520,9 @@ def split_answer_spans(answer: str) -> list[CitationSpan]:
         if _HEADING_PATTERN.match(raw_line) or _TABLE_SEPARATOR_PATTERN.match(raw_line):
             flush_paragraph()
             continue
+        if _NAVIGATION_LINE_PATTERN.match(raw_line):
+            flush_paragraph()
+            continue
         if _TABLE_ROW_PATTERN.match(raw_line):
             flush_paragraph()
             if line_index + 1 < len(lines) and _TABLE_SEPARATOR_PATTERN.match(
@@ -519,6 +534,7 @@ def split_answer_spans(answer: str) -> list[CitationSpan]:
                 raw_line,
                 line_start,
                 kind="table_row",
+                structure_role="body_table_row",
                 split_semicolons=False,
             )
             continue
@@ -529,6 +545,7 @@ def split_answer_spans(answer: str) -> list[CitationSpan]:
                 raw_line,
                 line_start,
                 kind="list_item",
+                structure_role="body_list_item",
                 split_semicolons=False,
             )
             continue
@@ -732,6 +749,7 @@ def _append_text_spans(
     base_offset: int,
     *,
     kind: CitationSpanKind,
+    structure_role: CitationSpanRole | None = None,
     split_semicolons: bool = False,
 ) -> None:
     """在一个 Markdown 语义单元内按句末标点追加有界 span。"""
@@ -740,10 +758,22 @@ def _append_text_spans(
         value = text[start:end]
         if not any(char.isalnum() or "\u4e00" <= char <= "\u9fff" for char in value):
             continue
+        if _is_heading_like_claim(value):
+            continue
         spans.append(
             CitationSpan(
                 span_id="pending",
                 kind=kind,
+                structure_role=structure_role
+                or (
+                    "body_list_item"
+                    if kind == "list_item"
+                    else "body_table_row"
+                    if kind == "table_row"
+                    else "body_line"
+                    if kind == "line"
+                    else "body_sentence"
+                ),
                 start_index=base_offset + start,
                 end_index=base_offset + end,
                 text=value,
@@ -904,6 +934,26 @@ def _parse_annotations(
 
 _HEADING_PATTERN = re.compile(r"^\s{0,3}#{1,6}\s+")
 _LIST_ITEM_PATTERN = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+_NAVIGATION_LINE_PATTERN = re.compile(r"^\s*(?:(?:[-*+]|\d+[.)])\s+)?\[[^\]]+\]\(#[^)]+\)\s*$")
+_BOLD_ONLY_PATTERN = re.compile(
+    r"^(?:\*\*(?:(?!\*\*).)+\*\*|__(?:(?!__).)+__)$",
+    re.DOTALL,
+)
 _TABLE_ROW_PATTERN = re.compile(r"^\s*\|.*\|\s*$")
 _TABLE_SEPARATOR_PATTERN = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$")
 _ORDERED_LIST_MARKER_PATTERN = re.compile(r"^\s*(?:\*\*|__)?\d+\.$")
+
+
+def _is_heading_like_claim(value: str) -> bool:
+    """判断 span 是否只是 Markdown 标题或列表项标题。"""
+
+    text = value.strip().rstrip(" \t。.!！?？:：")
+    if _LIST_ITEM_PATTERN.match(text) is not None:
+        text = _LIST_ITEM_PATTERN.sub("", text, count=1).strip()
+        return _BOLD_ONLY_PATTERN.fullmatch(text) is not None
+    if _BOLD_ONLY_PATTERN.fullmatch(text) is None:
+        return False
+    inner_text = text[2:-2].strip()
+    if re.match(r"^\d+[.)]\s+", inner_text):
+        return True
+    return not inner_text.endswith(("。", "！", "？", ".", "!", "?"))

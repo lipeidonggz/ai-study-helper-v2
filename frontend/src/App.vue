@@ -266,6 +266,16 @@ interface AgentStreamPayload {
   span_version?: string;
   batch_count?: number;
   batch_version?: string;
+  source_meta?: {
+    status: "complete" | "pending" | "not_applicable";
+    rule_version: string;
+    prompt_version: string;
+    prompt_hash: string;
+    model_calls: number;
+    excluded_span_count: number;
+    fallback_to_all_spans: boolean;
+    error_code: string | null;
+  };
   error_code?: string | null;
   source_count?: number;
   message?: string;

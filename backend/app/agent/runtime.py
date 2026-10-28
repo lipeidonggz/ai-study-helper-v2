@@ -18,9 +18,9 @@ from app.agent.actions import (
     ToolAction,
     parse_action,
 )
+from app.agent.citation_pipeline import CitationPipeline
 from app.agent.citations import (
     CitationAnnotationArtifact,
-    CitationAnnotator,
     CitationEvidenceBlock,
     citation_annotation_output_token_cap,
     split_answer_spans,
@@ -628,7 +628,7 @@ class _AgentGraphExecution:
             else None
         )
         try:
-            outcome = await CitationAnnotator(
+            outcome = await CitationPipeline(
                 self._chat_provider,
                 token_counter=self._token_counter,
             ).annotate(
@@ -682,6 +682,25 @@ class _AgentGraphExecution:
                     "app.claim_span_version": outcome.artifact.span_version,
                     "app.citation_annotation_prompt_version": (outcome.artifact.prompt_version),
                     "app.citation_annotation_prompt_hash": outcome.artifact.prompt_hash,
+                    "app.citation_source_meta_status": outcome.artifact.source_meta.status,
+                    "app.citation_source_meta_rule_version": (
+                        outcome.artifact.source_meta.rule_version
+                    ),
+                    "app.citation_source_meta_prompt_version": (
+                        outcome.artifact.source_meta.prompt_version
+                    ),
+                    "app.citation_source_meta_prompt_hash": (
+                        outcome.artifact.source_meta.prompt_hash
+                    ),
+                    "app.citation_source_meta_excluded_span_count": (
+                        outcome.artifact.source_meta.excluded_span_count
+                    ),
+                    "app.citation_source_meta_fallback_to_all_spans": (
+                        outcome.artifact.source_meta.fallback_to_all_spans
+                    ),
+                    "app.citation_source_meta_model_calls": (
+                        outcome.artifact.source_meta.model_calls
+                    ),
                     "app.annotation_batch_count": outcome.artifact.batch_count,
                     "app.annotation_batch_version": outcome.artifact.batch_version,
                     "app.model_calls": outcome.model_calls,
@@ -708,6 +727,16 @@ class _AgentGraphExecution:
         input_tokens = current_input_tokens + outcome.input_tokens
         output_tokens = current_output_tokens + outcome.output_tokens
         limitations = list(state.get("limitations", []))
+        if outcome.artifact.source_meta.status == "pending":
+            source_meta_failure = (
+                outcome.artifact.source_meta.error_message
+                or outcome.artifact.source_meta.error_code
+            )
+            limitations = _with_limitation(
+                limitations,
+                code="citation_source_meta_fallback",
+                message=(f"来源预筛未完成，已回退到全量正文引用标注：{source_meta_failure}"),
+            )
         if outcome.artifact.status == "pending":
             limitations = _with_limitation(
                 limitations,
@@ -739,6 +768,16 @@ class _AgentGraphExecution:
             "batch_count": artifact_payload["batch_count"],
             "batch_version": artifact_payload["batch_version"],
             "annotations": artifact_payload["annotations"],
+            "source_meta": {
+                "status": artifact_payload["source_meta"]["status"],
+                "rule_version": artifact_payload["source_meta"]["rule_version"],
+                "prompt_version": artifact_payload["source_meta"]["prompt_version"],
+                "prompt_hash": artifact_payload["source_meta"]["prompt_hash"],
+                "model_calls": artifact_payload["source_meta"]["model_calls"],
+                "excluded_span_count": artifact_payload["source_meta"]["excluded_span_count"],
+                "fallback_to_all_spans": artifact_payload["source_meta"]["fallback_to_all_spans"],
+                "error_code": artifact_payload["source_meta"]["error_code"],
+            },
             "error_code": artifact_payload["error_code"],
             "message": artifact_payload["error_message"],
         }
