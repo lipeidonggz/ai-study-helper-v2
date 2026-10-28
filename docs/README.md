@@ -8,7 +8,7 @@
 
 - 阶段：实现阶段，027 claim-aware 引用标注已完成，028 评测失败分类拆分已实现。
 - 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付、检索与 Agent 运行链、流式问答、本地 trace 诊断和逐 criterion 评测判定已实现。
-- 当前工作：c9、c10 新数据基线通过；c11 修正 Anthropic 适用前提后重判为 10/10 pass，并已同步 active suite。
+- 当前工作：`chat-v15` 已通过 c12 主验证及 c10、c11 回归；c13 新数据仅 2/10，暴露题面与 R1 对“出口控制”的范围冲突，待校准。
 
 ## 设计基线
 
@@ -130,6 +130,8 @@
 - [2026-10-28 · c9 新数据基线](development/experiments/2026-10-28-c9-fresh-baseline.md)
 - [2026-10-28 · c10 新数据基线](development/experiments/2026-10-28-c10-fresh-baseline.md)
 - [2026-10-28 · c11 新数据基线](development/experiments/2026-10-28-c11-fresh-baseline.md)
+- [2026-10-28 · c12 新数据基线](development/experiments/2026-10-28-c12-fresh-baseline.md)
+- [2026-10-29 · c13 新数据基线](development/experiments/2026-10-29-c13-fresh-baseline.md)
 - [032 · 判定总 Token 用量展示（待人工验收）](development/slices/032-judge-token-usage-visibility.md)
 - [033 · 异步 GitHub 交付与依赖门禁（已完成）](development/slices/033-async-github-delivery-gate.md)
 - [034 · c2-001 指标归属金标准修订（待确认）](development/slices/034-c2-metric-attribution.md)
@@ -149,6 +151,7 @@
 - [048 · 引用标注输出截断后的 span 二分（已完成）](development/slices/048-citation-annotation-span-split.md)
 - [049 · c8 R2 整体图景范围校准（已完成）](development/slices/049-c8-r2-semantic-calibration.md)
 - [050 · c11 R2 适用前提校准（已完成）](development/slices/050-c11-r2-applicability.md)
+- [051 · 通用知识与文档事实边界（已完成）](development/slices/051-knowledge-scope-fallback.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库

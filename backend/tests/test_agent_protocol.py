@@ -149,7 +149,7 @@ def test_release_prompt_bundle_has_stable_version_and_hash() -> None:
     first = release_prompt_bundle()
     second = release_prompt_bundle()
 
-    assert first.version == "chat-v13"
+    assert first.version == "chat-v15"
     assert first.template_hash == second.template_hash
     assert len(first.template_hash) == 64
     assert "{{RESPONSE_POLICY}}" in first.template
@@ -167,7 +167,11 @@ def test_release_prompt_bundle_has_stable_version_and_hash() -> None:
     assert "不是完整文档目录或章节数量声明" in first.template
     assert "不得把它自行改写为“文章开头”" in first.template
     assert "只有工具结果明确给出可核验的先后关系" in first.template
-    for case_specific_token in ("83%", "93%", "17%", "0.4%", "84%"):
+    assert "区分“通用知识”和“文档事实”" in first.template
+    assert "以下是通用背景，不是原文表述" in first.template
+    assert "不能用模型知识代替" in first.template
+    assert "对同时包含通用解释和文档事实的问题" in first.template
+    for case_specific_token in ("83%", "93%", "17%", "0.4%", "84%", "gVisor", "MCP"):
         assert case_specific_token not in first.template
 
 
