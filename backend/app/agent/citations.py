@@ -9,13 +9,16 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from app.agent.citation_annotation_prompt import (
     CITATION_ANNOTATION_PROMPT_HASH,
     CITATION_ANNOTATION_PROMPT_VERSION,
+    DEFAULT_CITATION_ANNOTATION_PROMPT,
+    CitationAnnotationPrompt,
+    citation_evidence_reference,
     render_citation_annotation_messages,
 )
 from app.agent.citation_source_meta import CitationSourceMetaArtifact
 from app.agent.token_counter import ObservationTokenCounter
 from app.providers.chat import ChatMessage, ChatProvider, ChatProviderError
 
-CITATION_ANNOTATION_SCHEMA_VERSION = "citation-annotation-v3"
+CITATION_ANNOTATION_SCHEMA_VERSION = "citation-annotation-v4"
 CLAIM_SPAN_VERSION = "claim-spans-v4"
 LEGACY_CLAIM_SPAN_VERSION = "legacy-unknown"
 CITATION_ANNOTATION_BATCH_VERSION = "evidence-blocks-v1"
@@ -99,6 +102,7 @@ class CitationAnnotation(BaseModel):
     end_index: int = Field(gt=0)
     text: str = Field(min_length=1)
     block_ids: list[str] = Field(min_length=1)
+    reason: str = ""
     context_fragments: list[CitationContextFragment] = Field(default_factory=list)
 
 
@@ -144,6 +148,7 @@ class _AnnotationSelection(BaseModel):
 
     span_id: str
     block_ids: list[str] = Field(min_length=1)
+    reason: str = ""
 
 
 class _AnnotationSelectionOutput(BaseModel):
@@ -179,9 +184,11 @@ class CitationAnnotator:
         provider: ChatProvider,
         *,
         token_counter: ObservationTokenCounter,
+        prompt: CitationAnnotationPrompt = DEFAULT_CITATION_ANNOTATION_PROMPT,
     ) -> None:
         self._provider = provider
         self._token_counter = token_counter
+        self._prompt = prompt
 
     async def annotate(
         self,
@@ -240,7 +247,12 @@ class CitationAnnotator:
                 spans=resolved_spans,
                 evidence_blocks=evidence_batch,
             )
-            batch_messages = tuple(render_citation_annotation_messages(packet))
+            batch_messages = tuple(
+                render_citation_annotation_messages(
+                    packet,
+                    prompt=self._prompt,
+                )
+            )
             messages.extend(batch_messages)
             estimated_input_tokens = sum(
                 self._token_counter.count(message.content) for message in batch_messages
@@ -376,11 +388,15 @@ class CitationAnnotator:
 
         span_by_id = {span.span_id: span for span in resolved_spans}
         merged_block_ids: dict[str, list[str]] = {}
+        merged_reasons: dict[str, list[str]] = {}
         for annotation in annotations:
             block_ids = merged_block_ids.setdefault(annotation.span_id, [])
             for block_id in annotation.block_ids:
                 if block_id not in block_ids:
                     block_ids.append(block_id)
+            reasons = merged_reasons.setdefault(annotation.span_id, [])
+            if annotation.reason and annotation.reason not in reasons:
+                reasons.append(annotation.reason)
         annotations = [
             CitationAnnotation(
                 annotation_id="pending",
@@ -390,6 +406,7 @@ class CitationAnnotator:
                 end_index=span.end_index,
                 text=span.text,
                 block_ids=merged_block_ids[span.span_id],
+                reason="；".join(merged_reasons.get(span.span_id, [])),
                 context_fragments=_context_fragments_for_span(answer, span),
             )
             for span_id, _block_ids in merged_block_ids.items()
@@ -414,8 +431,8 @@ class CitationAnnotator:
             batch_count=len(evidence_batches),
         )
 
-    @staticmethod
     def _outcome(
+        self,
         *,
         status: Literal["complete", "not_applicable"],
         model_id: str,
@@ -436,6 +453,8 @@ class CitationAnnotator:
                 status=status,
                 span_version=CLAIM_SPAN_VERSION,
                 model_id=model_id,
+                prompt_version=self._prompt.version,
+                prompt_hash=self._prompt.content_hash,
                 span_count=len(spans),
                 evidence_count=len(evidence_blocks),
                 batch_count=batch_count,
@@ -449,8 +468,8 @@ class CitationAnnotator:
             raw_outputs=raw_outputs,
         )
 
-    @staticmethod
     def _pending_outcome(
+        self,
         *,
         model_id: str,
         spans: list[CitationSpan],
@@ -471,6 +490,8 @@ class CitationAnnotator:
                 status="pending",
                 span_version=CLAIM_SPAN_VERSION,
                 model_id=model_id,
+                prompt_version=self._prompt.version,
+                prompt_hash=self._prompt.content_hash,
                 span_count=len(spans),
                 evidence_count=len(evidence_blocks),
                 batch_count=batch_count,
@@ -886,6 +907,10 @@ def _parse_annotations(
 
     span_by_id = {span.span_id: span for span in spans}
     evidence_ids = {block.block_id for block in evidence_blocks}
+    reference_to_block_id = {
+        citation_evidence_reference(index): block.block_id
+        for index, block in enumerate(evidence_blocks, start=1)
+    }
     seen_span_ids: set[str] = set()
     annotations: list[CitationAnnotation] = []
     for selection in parsed.annotations:
@@ -906,13 +931,19 @@ def _parse_annotations(
                 "citation_annotation_source_duplicate",
                 f"duplicate evidence block in annotation: {selection.span_id}",
             )
-        block_ids = selection.block_ids
-        unknown_ids = [block_id for block_id in block_ids if block_id not in evidence_ids]
+        unknown_ids = [
+            block_id
+            for block_id in selection.block_ids
+            if block_id not in reference_to_block_id and block_id not in evidence_ids
+        ]
         if unknown_ids:
             raise CitationAnnotationError(
                 "citation_annotation_source_invalid",
                 f"annotation references evidence outside this attempt: {unknown_ids}",
             )
+        block_ids = [
+            reference_to_block_id.get(block_id, block_id) for block_id in selection.block_ids
+        ]
         if answer[span.start_index : span.end_index] != span.text:
             raise CitationAnnotationError(
                 "citation_annotation_span_invalid",
@@ -927,6 +958,7 @@ def _parse_annotations(
                 end_index=span.end_index,
                 text=span.text,
                 block_ids=block_ids,
+                reason=selection.reason,
             )
         )
     return sorted(annotations, key=lambda item: (item.start_index, item.end_index))

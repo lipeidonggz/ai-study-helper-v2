@@ -407,8 +407,15 @@ def test_annotator_returns_independent_claim_spans_with_exact_offsets() -> None:
             json.dumps(
                 {
                     "annotations": [
-                        {"span_id": "span_0001", "block_ids": ["block_1"]},
-                        {"span_id": "span_0002", "block_ids": ["block_1", "block_2"]},
+                        {
+                            "span_id": "span_0001",
+                            "block_ids": ["evidence_001"],
+                            "reason": "evidence_001 直接陈述第一事实。",
+                        },
+                        {
+                            "span_id": "span_0002",
+                            "block_ids": ["evidence_001", "evidence_002"],
+                        },
                     ]
                 }
             )
@@ -430,11 +437,16 @@ def test_annotator_returns_independent_claim_spans_with_exact_offsets() -> None:
         ["block_1"],
         ["block_1", "block_2"],
     ]
+    assert outcome.artifact.annotations[0].reason == "evidence_001 直接陈述第一事实。"
     assert all(
         answer[item.start_index : item.end_index] == item.text
         for item in outcome.artifact.annotations
     )
     annotation_request = json.loads(provider.requests[0][1].content)
+    assert [item["block_id"] for item in annotation_request["evidence_blocks"]] == [
+        "evidence_001",
+        "evidence_002",
+    ]
     assert [item["span_id"] for item in annotation_request["spans"]] == [
         "span_0001",
         "span_0002",
@@ -443,9 +455,12 @@ def test_annotator_returns_independent_claim_spans_with_exact_offsets() -> None:
 
 
 def test_annotation_prompt_rejects_underinformative_claim_fragments() -> None:
-    assert CITATION_ANNOTATION_PROMPT_VERSION == "claim-citation-v3"
+    assert CITATION_ANNOTATION_PROMPT_VERSION == "claim-citation-v7"
     assert "列表项内部的分号子句不得再拆分" in CITATION_ANNOTATION_SYSTEM_PROMPT
     assert "单独的确认词" in CITATION_ANNOTATION_SYSTEM_PROMPT
+    assert '"reason":"简短依据"' in CITATION_ANNOTATION_SYSTEM_PROMPT
+    assert "分别核验每个非空单元格" in CITATION_ANNOTATION_SYSTEM_PROMPT
+    assert "逐字复制" in CITATION_ANNOTATION_SYSTEM_PROMPT
 
 
 def test_long_answer_annotations_are_batched_and_merged_in_answer_order() -> None:
