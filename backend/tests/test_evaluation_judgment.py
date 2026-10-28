@@ -40,9 +40,11 @@ from app.evaluation.judgment import (
     _parse_relation_review,
 )
 from app.evaluation.models import (
+    CaseDraftCriterionView,
     CheckReviewRequest,
     CitationReviewItem,
     JudgeOverrideRequest,
+    SaveCaseDraftRequest,
     StartJudgmentRequest,
 )
 from app.evaluation.repository import EvaluationRepository
@@ -1585,6 +1587,94 @@ def test_citation_support_is_separate_from_criterion_judgments(tmp_path: Path) -
             "section_path",
             "text",
         }
+
+    asyncio.run(scenario())
+
+
+def test_frozen_run_can_be_rejudged_with_case_revision_override(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        database = EvaluationDatabase(tmp_path / "eval")
+        repository = EvaluationRepository(database)
+        _add_judgeable_run(
+            database,
+            repository,
+            case_id="c1-001",
+            answer="MCP 是外部内容边界。【来源：block_1】",
+            trace_id="b" * 32,
+            run_id="run_case_revision_override",
+        )
+        original_case = next(
+            item for item in repository.list_case_catalog() if item.case_id == "c1-001"
+        )
+        assert original_case.active_revision_id is not None
+        draft = repository.create_case_draft(
+            "c1-001",
+            updated_by="test-author",
+            base_revision_id=original_case.active_revision_id,
+        )
+        changed = draft.criteria[0].model_copy(
+            update={
+                "title": "替代判据",
+                "rule_text": "替代 case revision 的 R1 判定标准。",
+            }
+        )
+        unchanged = [
+            CaseDraftCriterionView.model_validate(item.model_dump()) for item in draft.criteria[1:]
+        ]
+        repository.save_case_draft(
+            "c1-001",
+            SaveCaseDraftRequest(
+                category=draft.category,
+                question=draft.question,
+                target_bindings=draft.target_bindings,
+                distractor_metadata=draft.distractor_metadata,
+                n=draft.n,
+                k=draft.k,
+                execution_policy=draft.execution_policy,
+                change_note="验证冻结 run 的 case revision override。",
+                criteria=[changed, *unchanged],
+                updated_by="test-author",
+            ),
+        )
+        published = repository.publish_case_draft("c1-001", reviewer="reviewer-a")
+        replacement = repository.review_case_revision(
+            published.revision_id,
+            review_status="active",
+            reviewer="reviewer-a",
+        )
+        provider = _CitationBatchAwareProvider()
+        service = EvaluationJudgmentService(
+            database=database,
+            repository=repository,
+            trace_catalog=_FakeTraceCatalog(tmp_path),  # type: ignore[arg-type]
+            credentials=_MemoryCredentials(),
+            chat_provider_factory=lambda _key: provider,
+        )
+
+        started = await service.start(
+            "run_case_revision_override",
+            StartJudgmentRequest(
+                concurrency=1,
+                token_budget=1_000_000,
+                judge_review_confirmed=True,
+                case_revision_overrides={"c1-001": replacement.revision_id},
+            ),
+        )
+        revision = await _wait_revision(service, started.revision_id)
+
+        assert revision.status == "complete"
+        assert set(item.criterion_revision_id for item in revision.judgments) == {
+            item.revision_id for item in replacement.criteria
+        }
+        assert revision.config["case_revision_overrides"] == {"c1-001": replacement.revision_id}
+        assert revision.case_aggregates[0].case_revision_id == replacement.revision_id
+        assert revision.result_matrix is not None
+        assert (
+            revision.result_matrix.categories[0].cases[0].case_revision_id
+            == replacement.revision_id
+        )
+        original_revision = repository.get_case_revisions([original_case.active_revision_id])[0]
+        assert original_revision.revision_number < replacement.revision_number
 
     asyncio.run(scenario())
 

@@ -340,10 +340,11 @@ class EvaluationJudgmentService:
         run = self._repository.get_run(run_id)
         if run.status not in {"sealed_complete", "sealed_partial", "canceled"}:
             raise ValueError("only terminal or canceled runs can be judged")
-        case_revision_ids = list(
-            dict.fromkeys(attempt.case_revision_id for attempt in run.attempts)
+        effective_run, effective_cases, _case_revision_map = self._apply_case_revision_overrides(
+            run,
+            request.case_revision_overrides,
         )
-        for case in self._repository.get_case_revisions(case_revision_ids):
+        for case in effective_cases.values():
             if any(
                 criterion.evaluator == "llm_judge"
                 and criterion.evaluator_ref != JUDGE_PROMPT_VERSION
@@ -378,6 +379,7 @@ class EvaluationJudgmentService:
                 "token_budget": request.token_budget,
                 "request_budget": request.request_budget,
                 "attempt_timeout_seconds": request.attempt_timeout_seconds,
+                "case_revision_overrides": request.case_revision_overrides,
             }
             session.add(
                 EvalEvaluationRevisionRow(
@@ -402,7 +404,7 @@ class EvaluationJudgmentService:
                 )
             )
         task = asyncio.create_task(
-            self._execute(revision_id, run, request),
+            self._execute(revision_id, effective_run, request),
             name=f"evaluation-judgment-{revision_id}",
         )
         self._tasks[revision_id] = task
@@ -560,20 +562,39 @@ class EvaluationJudgmentService:
                 for review in review_rows
             ]
             judge_usage = _build_judge_token_usage(judgment_views, check_views)
+            config = json.loads(row.config_json)
             run = self._repository.get_run(row.execution_run_id)
-            case_revision_ids = list(
-                dict.fromkeys(attempt.case_revision_id for attempt in run.attempts)
+            effective_run, effective_cases, case_revision_map = self._apply_case_revision_overrides(
+                run,
+                config.get("case_revision_overrides", {}),
             )
-            case_views = {
-                case.revision_id: case
-                for case in self._repository.get_case_revisions(case_revision_ids)
-            }
             try:
                 plan_cases = self._repository.get_plan(run.plan_id).cases
             except (KeyError, ValueError):
                 plan_cases = []
+            plan_cases = [
+                plan_case.model_copy(
+                    update={
+                        "case_revision_id": effective_revision_id,
+                        "case_id": effective_cases[effective_revision_id].case_id,
+                        "question": effective_cases[effective_revision_id].question,
+                        "n": effective_cases[effective_revision_id].n,
+                        "k": effective_cases[effective_revision_id].k,
+                        "source_n": effective_cases[effective_revision_id].n,
+                        "source_k": effective_cases[effective_revision_id].k,
+                    }
+                )
+                for plan_case in plan_cases
+                for effective_revision_id in [
+                    case_revision_map.get(
+                        plan_case.case_revision_id,
+                        plan_case.case_revision_id,
+                    )
+                ]
+                if effective_revision_id in effective_cases
+            ]
             planned_revision_ids = {plan_case.case_revision_id for plan_case in plan_cases}
-            for case in case_views.values():
+            for case in effective_cases.values():
                 if case.revision_id in planned_revision_ids:
                     continue
                 plan_cases.append(
@@ -590,17 +611,17 @@ class EvaluationJudgmentService:
                     )
                 )
             attempt_aggregates, case_aggregates = build_aggregates(
-                run=run,
+                run=effective_run,
                 plan_cases=plan_cases,
-                cases=case_views,
+                cases=effective_cases,
                 bindings=binding_views,
                 checks=check_views,
                 reviews=review_views,
             )
             result_matrix = build_result_matrix(
-                run=run,
+                run=effective_run,
                 plan_cases=plan_cases,
-                cases=case_views,
+                cases=effective_cases,
                 attempt_aggregates=attempt_aggregates,
                 case_aggregates=case_aggregates,
             )
@@ -619,7 +640,7 @@ class EvaluationJudgmentService:
                 status=revision_status,
                 checker_version_set=json.loads(row.checker_version_set_json),
                 judge_version_set=json.loads(row.judge_version_set_json),
-                config=json.loads(row.config_json),
+                config=config,
                 summary=json.loads(row.summary_json),
                 error_code=row.error_code,
                 error_message=row.error_message,
@@ -636,6 +657,68 @@ class EvaluationJudgmentService:
                 result_matrix=result_matrix,
                 judge_usage=judge_usage,
             )
+
+    def _apply_case_revision_overrides(
+        self,
+        run: RunView,
+        overrides: dict[str, str],
+    ) -> tuple[RunView, dict[str, CaseRevisionView], dict[str, str]]:
+        """把冻结 attempt 投影到可选的新 case revision，不改变原执行事实。"""
+
+        original_revision_ids = list(
+            dict.fromkeys(attempt.case_revision_id for attempt in run.attempts)
+        )
+        original_cases = {
+            case.revision_id: case
+            for case in self._repository.get_case_revisions(original_revision_ids)
+        }
+        if not overrides:
+            return run, original_cases, {}
+        original_case_by_id = {case.case_id: case for case in original_cases.values()}
+        unknown_case_ids = sorted(set(overrides) - set(original_case_by_id))
+        if unknown_case_ids:
+            raise ValueError(
+                f"case revision overrides reference cases outside this run: {unknown_case_ids}"
+            )
+        target_cases = {
+            case.revision_id: case
+            for case in self._repository.get_case_revisions(list(overrides.values()))
+        }
+        if len(target_cases) != len(set(overrides.values())):
+            raise ValueError("one or more override case revisions do not exist")
+        for case_id, target_revision_id in overrides.items():
+            target = target_cases[target_revision_id]
+            if target.case_id != case_id:
+                raise ValueError(f"case revision override belongs to another case: {case_id}")
+            if target.review_status not in {"reviewed", "active"}:
+                raise ValueError(f"override case revision is not reviewable: {target_revision_id}")
+
+        revision_map = {
+            original_revision_id: overrides.get(original_case.case_id, original_revision_id)
+            for original_revision_id, original_case in original_cases.items()
+        }
+        effective_attempts = [
+            attempt.model_copy(
+                update={
+                    "case_revision_id": revision_map[attempt.case_revision_id],
+                }
+            )
+            for attempt in run.attempts
+        ]
+        effective_cases = {
+            revision_id: target_cases.get(
+                revision_id,
+                original_cases.get(revision_id),
+            )
+            for revision_id in set(revision_map.values())
+        }
+        if any(case is None for case in effective_cases.values()):
+            raise ValueError("effective case revision could not be resolved")
+        return (
+            run.model_copy(update={"attempts": effective_attempts}),
+            {key: value for key, value in effective_cases.items() if value is not None},
+            revision_map,
+        )
 
     def override_judgment(
         self,

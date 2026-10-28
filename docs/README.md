@@ -8,7 +8,7 @@
 
 - 阶段：实现阶段，027 claim-aware 引用标注已完成，028 评测失败分类拆分已实现。
 - 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付、检索与 Agent 运行链、流式问答、本地 trace 诊断和逐 criterion 评测判定已实现。
-- 当前工作：045 将引用语义支持改为软质量门禁；后续处理 c6 关系型综合句、残缺指代和全部答案完整性。
+- 当前工作：046 已校正 c6 通用 containment 判据并通过冻结答案验证；后续处理其他用例和 Agent 回答完整性。
 
 ## 设计基线
 
@@ -16,7 +16,7 @@
 | --- | --- | --- |
 | [01](design/01-product-requirements.md) | 产品需求、问题空间、范围和质量属性 | 已审核 · 实现基线 |
 | [02](design/02-how-to-build-an-agent.md) | Agent 开发方法与知识面 | 已审核 · 实现基线 |
-| [03](design/03-cases-and-gold-standard.md) | 用例与金标准 | v0.2 · 实现基线 |
+| [03](design/03-cases-and-gold-standard.md) | 用例与金标准 | v0.3 · 实现基线 |
 | [04](design/04-architecture-design-method.md) | 架构设计方法 | 已审核 · 实现基线 |
 | [05](design/05-storage-and-retrieval-strategy.md) | 存储结构与检索策略 | 已审核 · 实现基线 |
 | [06](design/06-retrieval-pure-agent.md) | 检索工具、Agent 循环、提示词、trace 与部署 | 已审核 · 实现基线 |
@@ -25,7 +25,7 @@
 | [09](design/09-technology-selection.md) | 技术选型与总体架构 | v0.4 · 实现基线 |
 | [10](design/10-document-detail-design.md) | 文档详情页信息架构与数据边界 | 已审核 · 首版实现基线 |
 
-01–09 已于 2026-10-20 审核，并作为当前实现基线；03 已于 2026-10-23 完成 criterion 自包含修订并更新为 v0.2，09 已依据 ADR 0004 更新为 v0.4。后续修改必须保留变更原因，同时更新本索引。
+01–09 已于 2026-10-20 审核，并作为当前实现基线；03 已于 2026-10-28 完成 c6 通用 containment 判据修订并更新为 v0.3，09 已依据 ADR 0004 更新为 v0.4。后续修改必须保留变更原因，同时更新本索引。
 
 ## 记录分类
 
@@ -140,6 +140,7 @@
 - [043 · 引用标注的结构过滤与来源元门禁（已完成）](development/slices/043-citation-annotation-scope-rules.md)
 - [044 · 引用标注的表格行联合证据覆盖（已完成）](development/slices/044-citation-table-evidence-coverage.md)
 - [045 · 引用语义支持改为软质量门禁（已完成）](development/slices/045-citation-support-soft-quality-gate.md)
+- [046 · c6 通用 containment 金标准修订（已完成）](development/slices/046-c6-generic-containment-criteria.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库
