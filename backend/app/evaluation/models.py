@@ -501,6 +501,17 @@ class CheckResultView(BaseModel):
     created_at: str
 
 
+class CitationSupportQualityView(BaseModel):
+    """一个 attempt 的已标注引用语义支持质量。"""
+
+    status: Literal["good", "review", "insufficient_sample", "not_applicable"]
+    occurrence_count: int = Field(ge=0)
+    supported_count: int = Field(ge=0)
+    unsupported_count: int = Field(ge=0)
+    unknown_count: int = Field(ge=0)
+    support_rate: float | None = Field(default=None, ge=0, le=1)
+
+
 class AttemptAggregateView(BaseModel):
     """一个 attempt 的生效 criterion 与全局检查聚合。"""
 
@@ -520,6 +531,7 @@ class AttemptAggregateView(BaseModel):
     check_quality_failures: list[str] = Field(default_factory=list)
     check_pending: list[str] = Field(default_factory=list)
     review_pending: bool = False
+    citation_support_quality: CitationSupportQualityView | None = None
     reasons: list[str] = Field(default_factory=list)
 
 
@@ -557,6 +569,7 @@ class ResultMatrixAttemptView(BaseModel):
     check_failures: list[str] = Field(default_factory=list)
     quality_failures: list[str] = Field(default_factory=list)
     review_pending: bool = False
+    citation_support_quality: CitationSupportQualityView | None = None
     trace_id: str | None
     trace_status: Literal["complete", "partial", "dropped", "missing"]
     started_at: str
@@ -637,6 +650,8 @@ class EvaluationResultMatrixView(BaseModel):
     run_id: str
     run_status: RunStatus
     plan_mode: Literal["formal", "exploratory"]
+    # 旧基线保存的矩阵没有该字段，按原 N/K 聚合规则读取。
+    aggregate_rule_version: str = "023b-nk-v1"
     suite_name: str | None
     suite_revision_id: str | None
     suite_revision_number: int | None

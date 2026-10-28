@@ -378,6 +378,16 @@ interface CheckReviewView {
   created_at: string;
 }
 
+/** 一个 attempt 的已标注引用语义支持质量。 */
+interface CitationSupportQualityView {
+  status: "good" | "review" | "insufficient_sample" | "not_applicable";
+  occurrence_count: number;
+  supported_count: number;
+  unsupported_count: number;
+  unknown_count: number;
+  support_rate: number | null;
+}
+
 /** 单次 attempt 的聚合结果。 */
 interface AttemptAggregateView {
   attempt_id: string;
@@ -396,6 +406,7 @@ interface AttemptAggregateView {
   check_quality_failures: string[];
   check_pending: string[];
   review_pending: boolean;
+  citation_support_quality: CitationSupportQualityView | null;
   reasons: string[];
 }
 
@@ -431,6 +442,7 @@ interface ResultMatrixAttemptView {
   check_failures: string[];
   quality_failures: string[];
   review_pending: boolean;
+  citation_support_quality: CitationSupportQualityView | null;
   trace_id: string | null;
   trace_status: AttemptView["trace_status"];
   started_at: string;
@@ -507,6 +519,7 @@ interface EvaluationResultMatrixView {
   run_id: string;
   run_status: RunView["status"];
   plan_mode: RunView["plan_mode"];
+  aggregate_rule_version: string;
   suite_name: string | null;
   suite_revision_id: string | null;
   suite_revision_number: number | null;
@@ -1112,8 +1125,57 @@ function statusText(status: string): string {
     supported: "有证据支持",
     unsupported: "无证据支持",
     unknown: "不确定",
+    good: "优",
+    review: "待观察",
+    insufficient_sample: "样本不足",
+    not_applicable: "不适用",
   };
   return labels[status] ?? status;
+}
+
+/** 把 attempt 级引用支持质量压缩成矩阵标签。 */
+function citationSupportQualityText(
+  quality: CitationSupportQualityView | null,
+): string {
+  if (!quality || quality.status === "not_applicable") {
+    return "引用支持不适用";
+  }
+  if (quality.status === "insufficient_sample") {
+    return `引用支持样本不足（${quality.occurrence_count} 个 occurrence）`;
+  }
+  const rate = (quality.support_rate ?? 0) * 100;
+  return `引用支持${statusText(quality.status)} ${rate.toFixed(1)}%（${quality.supported_count}/${quality.occurrence_count}）`;
+}
+
+/** 引用支持是软质量提示，不改变矩阵结果颜色。 */
+function citationSupportQualityClass(
+  quality: CitationSupportQualityView | null,
+): string {
+  if (quality?.status === "good") {
+    return "eval-matrix-support-good";
+  }
+  if (quality?.status === "review") {
+    return "eval-matrix-warning";
+  }
+  return "";
+}
+
+/** 汇总 case 内各 attempt 的引用支持软质量状态。 */
+function matrixCaseCitationSupportSummary(
+  matrixCase: ResultMatrixCaseView,
+): string {
+  const qualities = matrixCase.attempts.flatMap((attempt) =>
+    attempt.citation_support_quality ? [attempt.citation_support_quality] : [],
+  );
+  if (!qualities.length) {
+    return "";
+  }
+  const good = qualities.filter((quality) => quality.status === "good").length;
+  const review = qualities.filter((quality) => quality.status === "review").length;
+  const insufficient = qualities.filter(
+    (quality) => quality.status === "insufficient_sample",
+  ).length;
+  return `引用支持：优 ${good} · 待观察 ${review} · 样本不足 ${insufficient}`;
 }
 
 /** 为结果矩阵中的 case 提供仅用于扫读的背景提示，不改变 case 聚合状态。 */
@@ -1193,8 +1255,8 @@ function diagnosticErrorText(code: string): string {
     judge_prompt_version_mismatch: "当前判官提示词版本与 criterion 不匹配",
     citation_block_missing: "答案引用的知识块不在本次检索证据中",
     citation_not_supported: "答案引用存在，但证据原文不支持对应主张",
-    citation_support_review_required: "语义判官发现红线候选，等待人工复核",
-    citation_semantic_redline_confirmed: "人工复核确认引用语义不支持答案",
+    citation_support_review_required: "语义判官发现不支持候选，已计入软质量",
+    citation_semantic_redline_confirmed: "人工确认引用语义不支持答案（软质量问题）",
     citation_support_unknown: "现有证据不足以判断引用是否支持答案",
     citation_support_input_too_large: "本次引用证据超过支持检查输入上限",
     citation_support_unit_too_large: "单个引用上下文或证据超过安全输入上限",
@@ -1249,6 +1311,23 @@ function citationBatchSummary(check: CheckResultView): string {
     ? ` · ${preflightFailureCount} 个超限项`
     : "";
   return `${batchCount} 批 · ${contextCount} 个上下文 · ${occurrenceCount} 个引用组 · ${blockCount} 个 block${failureText}`;
+}
+
+/** 根据生效 claim 结果展示引用支持软质量，不影响门禁结论。 */
+function citationSupportCheckQualityText(check: CheckResultView): string {
+  if (check.checker_id !== "citation_support") {
+    return "";
+  }
+  const groups = effectiveCitationGroups(check);
+  if (!groups.length) {
+    return "引用支持不适用";
+  }
+  const supported = groups.filter((group) => group.verdict === "supported").length;
+  if (groups.length < 10) {
+    return `引用支持样本不足（${groups.length} 个 occurrence）`;
+  }
+  const rate = (supported / groups.length) * 100;
+  return `引用支持${rate >= 90 ? "优" : "待观察"} ${rate.toFixed(1)}%（${supported}/${groups.length}）`;
 }
 
 /** 读取检查 payload 中的字符串数组。 */
@@ -4688,7 +4767,8 @@ onBeforeUnmount(() => {
                 <small>
                   判定完整性：{{ statusText(evaluationRevision?.status ?? "") }} ·
                   {{ resultMatrix.totals.case_exploratory_count }} 条探索性 ·
-                  共 {{ resultMatrix.totals.case_count }} 个 case
+                  共 {{ resultMatrix.totals.case_count }} 个 case ·
+                  聚合规则 {{ resultMatrix.aggregate_rule_version }}
                 </small>
               </article>
               <article>
@@ -4820,6 +4900,9 @@ onBeforeUnmount(() => {
                     <span v-if="matrixCase.review_pending_count">
                       待复核 {{ matrixCase.review_pending_count }}
                     </span>
+                    <span v-if="matrixCaseCitationSupportSummary(matrixCase)">
+                      {{ matrixCaseCitationSupportSummary(matrixCase) }}
+                    </span>
                     <span>
                       {{ formatTokens(matrixCase.input_tokens + matrixCase.output_tokens) }} token
                     </span>
@@ -4884,6 +4967,13 @@ onBeforeUnmount(() => {
                       </span>
                       <span v-if="attempt.review_pending" class="eval-matrix-warning">
                         等待人工复核
+                      </span>
+                      <span
+                        v-if="attempt.citation_support_quality"
+                        :class="citationSupportQualityClass(attempt.citation_support_quality)"
+                        :title="`supported ${attempt.citation_support_quality.supported_count} · unsupported ${attempt.citation_support_quality.unsupported_count} · unknown ${attempt.citation_support_quality.unknown_count}`"
+                      >
+                        {{ citationSupportQualityText(attempt.citation_support_quality) }}
                       </span>
                       <span
                         v-if="
@@ -5891,9 +5981,10 @@ onBeforeUnmount(() => {
                 <article>
                   <strong>引用支持</strong>
                   <p>
-                    模型判官按 claim 联合查看被引用的证据原文。判为 unsupported
-                    时显示为未确认的普通失败，但不会自动成为红线；人工确认后才阻断。
-                    判为 unknown 时保持待定。只有引用完整且答案包含显式引用时才会执行。
+                    模型判官按 claim 联合查看被引用的证据原文。支持率按
+                    supported／全部已标注 occurrence 计算，unknown 计入分母。
+                    至少 10 个 occurrence 时，达到 90% 显示为优，低于 90% 显示待观察；
+                    它不改变 attempt、case 或 N/K 的通过结论。只有引用完整且答案包含显式引用时才会执行。
                   </p>
                 </article>
               </div>
@@ -5923,6 +6014,12 @@ onBeforeUnmount(() => {
                 </small>
                 <small v-if="citationBatchSummary(check)">
                   {{ citationBatchSummary(check) }}
+                </small>
+                <small
+                  v-if="check.checker_id === 'citation_support'"
+                  class="eval-soft-quality"
+                >
+                  {{ citationSupportCheckQualityText(check) }} · 软质量，不阻塞通过
                 </small>
                 <small
                   v-if="
@@ -8452,6 +8549,15 @@ onBeforeUnmount(() => {
 .eval-matrix-warning {
   color: #8a5a16;
   font-weight: 700;
+}
+
+.eval-matrix-support-good {
+  color: #2f6b45;
+  font-weight: 700;
+}
+
+.eval-soft-quality {
+  color: #725d2a;
 }
 
 .eval-matrix-attempt-actions {

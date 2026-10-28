@@ -143,7 +143,33 @@ def _integrity_check(attempt_id: str, result: str = "pass") -> CheckResultView:
     )
 
 
-def test_attempt_aggregation_uses_fail_priority_and_human_check_review() -> None:
+def _support_check(
+    attempt_id: str,
+    verdicts: list[str],
+    *,
+    result: str = "pending",
+) -> CheckResultView:
+    return CheckResultView(
+        check_result_id=f"check_support_{attempt_id}",
+        attempt_id=attempt_id,
+        checker_id="citation_support",
+        checker_version="18",
+        result=result,  # type: ignore[arg-type]
+        payload={
+            "claim_results": [
+                {
+                    "occurrence_id": f"citation_{index:04d}",
+                    "verdict": verdict,
+                }
+                for index, verdict in enumerate(verdicts, start=1)
+            ]
+        },
+        error_code=None,
+        created_at="2026-10-23T00:00:00+00:00",
+    )
+
+
+def test_citation_support_failure_does_not_change_attempt_or_case_result() -> None:
     r = _criterion("R", "r1")
     x = _criterion("X", "x1")
     case = _case([r, x])
@@ -183,11 +209,12 @@ def test_attempt_aggregation_uses_fail_priority_and_human_check_review() -> None
         reviews=[review],
     )
 
-    assert attempts[0].result == "fail"
-    assert attempts[0].check_failures == ["citation_support"]
+    assert attempts[0].result == "pass"
+    assert attempts[0].check_failures == []
+    assert _cases[0].result == "pass"
     assert _cases[0].x_violation_count == 0
-    assert _cases[0].check_failure_count == 1
-    assert _cases[0].redline_violation_count == 1
+    assert _cases[0].check_failure_count == 0
+    assert _cases[0].redline_violation_count == 0
 
 
 def test_case_aggregation_applies_k_threshold_exploratory_and_redline() -> None:
@@ -254,7 +281,7 @@ def test_case_aggregation_applies_k_threshold_exploratory_and_redline() -> None:
     assert redline.redline_violation_count == 1
 
 
-def test_case_redline_breakdown_does_not_double_count_same_attempt() -> None:
+def test_citation_support_failure_does_not_count_as_redline() -> None:
     r = _criterion("R", "r1")
     x = _criterion("X", "x1")
     case = _case([r, x])
@@ -283,8 +310,109 @@ def test_case_redline_breakdown_does_not_double_count_same_attempt() -> None:
     )
 
     assert cases[0].x_violation_count == 1
-    assert cases[0].check_failure_count == 1
+    assert cases[0].check_failure_count == 0
     assert cases[0].redline_violation_count == 1
+
+
+def test_citation_support_rate_is_a_soft_attempt_quality_metric() -> None:
+    r = _criterion("R", "r1")
+    x = _criterion("X", "x1")
+    case = _case([r, x])
+    run = _run([_attempt("attempt_1")])
+
+    attempts, cases = build_aggregates(
+        run=run,
+        plan_cases=[_plan(case, n=1, k=1)],
+        cases={case.revision_id: case},
+        bindings=[
+            _binding("attempt_1", r, "pass"),
+            _binding("attempt_1", x, "pass"),
+        ],
+        checks=[
+            _integrity_check("attempt_1"),
+            _support_check(
+                "attempt_1",
+                ["supported"] * 8 + ["unsupported", "unknown"],
+            ),
+        ],
+        reviews=[],
+    )
+
+    assert attempts[0].result == "pass"
+    assert attempts[0].citation_support_quality is not None
+    quality = attempts[0].citation_support_quality
+    assert quality.status == "review"
+    assert quality.occurrence_count == 10
+    assert quality.supported_count == 8
+    assert quality.unsupported_count == 1
+    assert quality.unknown_count == 1
+    assert quality.support_rate == 0.8
+    assert cases[0].result == "pass"
+    matrix = build_result_matrix(
+        run=run,
+        plan_cases=[_plan(case, n=1, k=1)],
+        cases={case.revision_id: case},
+        attempt_aggregates=attempts,
+        case_aggregates=cases,
+    )
+    matrix_quality = matrix.categories[0].cases[0].attempts[0].citation_support_quality
+    assert matrix_quality == quality
+
+
+def test_citation_support_rate_uses_supported_denominator_and_small_sample_rule() -> None:
+    case = _case([_criterion("R", "r1")])
+    good_run = _run([_attempt("attempt_good"), _attempt("attempt_small")])
+    bindings = [
+        _binding("attempt_good", case.criteria[0], "pass"),
+        _binding("attempt_small", case.criteria[0], "pass"),
+    ]
+    attempts, _cases = build_aggregates(
+        run=good_run,
+        plan_cases=[_plan(case, n=2, k=2)],
+        cases={case.revision_id: case},
+        bindings=bindings,
+        checks=[
+            _integrity_check("attempt_good"),
+            _integrity_check("attempt_small"),
+            _support_check("attempt_good", ["supported"] * 9 + ["unknown"]),
+            _support_check("attempt_small", ["supported"] * 3, result="pass"),
+        ],
+        reviews=[],
+    )
+
+    quality_by_attempt = {item.attempt_id: item.citation_support_quality for item in attempts}
+    good = quality_by_attempt["attempt_good"]
+    small = quality_by_attempt["attempt_small"]
+    assert good is not None
+    assert good.status == "good"
+    assert good.support_rate == 0.9
+    assert good.unknown_count == 1
+    assert small is not None
+    assert small.status == "insufficient_sample"
+    assert small.support_rate == 1.0
+
+
+def test_citation_integrity_failure_still_blocks_a_soft_quality_attempt() -> None:
+    case = _case([_criterion("R", "r1")])
+    run = _run([_attempt("attempt_1")])
+
+    attempts, cases = build_aggregates(
+        run=run,
+        plan_cases=[_plan(case, n=1, k=1)],
+        cases={case.revision_id: case},
+        bindings=[_binding("attempt_1", case.criteria[0], "pass")],
+        checks=[
+            _integrity_check("attempt_1", result="fail"),
+            _support_check("attempt_1", ["supported"] * 10, result="pass"),
+        ],
+        reviews=[],
+    )
+
+    assert attempts[0].result == "fail"
+    assert attempts[0].check_failures == ["citation_integrity"]
+    assert attempts[0].citation_support_quality is not None
+    assert attempts[0].citation_support_quality.status == "good"
+    assert cases[0].result == "fail"
 
 
 def test_result_matrix_groups_categories_and_separates_quality_from_cost() -> None:
