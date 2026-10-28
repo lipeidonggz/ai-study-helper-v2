@@ -124,6 +124,7 @@
 - [031 · 引用语义与 annotation 校准人工验收（已完成）](development/manual-tests/031-citation-semantic-calibration.md)
 - [2026-10-26 · citation-rubric-v7 语义与稳定性校准](development/experiments/2026-10-26-citation-rubric-v7-calibration.md)
 - [2026-10-26 · 引用语义支持候选与人工复核门禁](development/experiments/2026-10-26-citation-support-review-gate.md)
+- [2026-10-28 · 提示词语义对齐：来源元门禁迭代记录](development/experiments/2026-10-28-prompt-semantic-alignment.md)
 - [032 · 判定总 Token 用量展示（待人工验收）](development/slices/032-judge-token-usage-visibility.md)
 - [033 · 异步 GitHub 交付与依赖门禁（已完成）](development/slices/033-async-github-delivery-gate.md)
 - [034 · c2-001 指标归属金标准修订（待确认）](development/slices/034-c2-metric-attribution.md)
