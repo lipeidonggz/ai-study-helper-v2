@@ -8,7 +8,7 @@
 
 - 阶段：实现阶段，027 claim-aware 引用标注已完成，028 评测失败分类拆分已实现。
 - 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付、检索与 Agent 运行链、流式问答、本地 trace 诊断和逐 criterion 评测判定已实现。
-- 当前工作：044 已完成表格行联合证据验证；下一步处理 c6 关系型综合句和残缺指代。
+- 当前工作：045 将引用语义支持改为软质量门禁；后续处理 c6 关系型综合句、残缺指代和全部答案完整性。
 
 ## 设计基线
 
@@ -65,6 +65,7 @@
 - [0015 · 有界恢复合法 finish 后的序列化尾随内容](decisions/0015-bounded-finish-serialization-recovery.md)
 - [0016 · 证据覆盖范围不得小于结论影响范围](decisions/0016-evidence-scope-cannot-exceed-tool-results.md)
 - [0017 · 精确 block 读取与显式章节范围](decisions/0017-exact-block-read-and-explicit-section-scope.md)
+- [0018 · 引用语义支持阶段性改为软质量门禁](decisions/0018-citation-support-as-soft-quality-gate.md)
 - [0008 · Harness 统一计算 Tool Observation token](decisions/0008-harness-owned-result-token-accounting.md)
 - [切片控制契约与证据包模板](development/slices/TEMPLATE.md)
 - [001 · 桌面 sidecar 最小启动链（已完成）](development/slices/001-desktop-sidecar-bootstrap.md)
@@ -138,6 +139,7 @@
 - [042 · 评测结果矩阵与判定导航优化（已完成）](development/slices/042-evaluation-result-ux.md)
 - [043 · 引用标注的结构过滤与来源元门禁（已完成）](development/slices/043-citation-annotation-scope-rules.md)
 - [044 · 引用标注的表格行联合证据覆盖（已完成）](development/slices/044-citation-table-evidence-coverage.md)
+- [045 · 引用语义支持改为软质量门禁（已完成）](development/slices/045-citation-support-soft-quality-gate.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库

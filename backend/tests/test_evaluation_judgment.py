@@ -48,6 +48,7 @@ from app.evaluation.models import (
 from app.evaluation.repository import EvaluationRepository
 from app.evaluation.storage_models import (
     EvalAttemptRow,
+    EvalEvaluationRevisionRow,
     EvalExecutionPlanRow,
     EvalExecutionRunRow,
 )
@@ -1056,16 +1057,20 @@ def test_human_can_review_llm_citation_support_but_not_integrity(
             item for item in initial.attempt_aggregates if item.attempt_id == attempt_id
         )
         initial_case = next(item for item in initial.case_aggregates if item.case_id == "c1-001")
-        assert initial.status == "incomplete"
+        assert initial.status == "complete"
         assert original_support.result == "pending"
-        assert initial_attempt.result == "fail"
-        assert initial_attempt.check_quality_failures == ["citation_support"]
-        assert initial_attempt.review_pending is True
+        assert initial_attempt.result == "pass"
+        assert initial_attempt.check_quality_failures == []
+        assert initial_attempt.review_pending is False
         assert initial_attempt.check_failures == []
+        assert initial_attempt.citation_support_quality is not None
+        assert initial_attempt.citation_support_quality.status == "insufficient_sample"
+        assert initial_attempt.citation_support_quality.support_rate == 0.0
         assert initial_case.result == "pending"
-        assert initial_case.quality_failure_count == 1
-        assert initial_case.review_pending_count == 1
+        assert initial_case.quality_failure_count == 0
+        assert initial_case.review_pending_count == 0
         assert initial_case.redline_violation_count == 0
+        assert all("citation_support" not in reason for reason in initial_case.reasons)
 
         reviewed = service.review_llm_check(
             initial.revision_id,
@@ -1089,9 +1094,13 @@ def test_human_can_review_llm_citation_support_but_not_integrity(
         attempt_aggregate = next(
             item for item in reviewed.attempt_aggregates if item.attempt_id == attempt_id
         )
-        assert "citation_support" in attempt_aggregate.check_failures
+        assert attempt_aggregate.result == "pass"
+        assert attempt_aggregate.check_failures == []
         assert attempt_aggregate.check_quality_failures == []
         assert attempt_aggregate.review_pending is False
+        assert attempt_aggregate.citation_support_quality is not None
+        assert attempt_aggregate.citation_support_quality.supported_count == 0
+        assert attempt_aggregate.citation_support_quality.unsupported_count == 1
         rejected = service.review_llm_check(
             initial.revision_id,
             CheckReviewRequest(
@@ -1134,7 +1143,9 @@ def test_human_can_review_llm_citation_support_but_not_integrity(
         disputed_attempt = next(
             item for item in disputed.attempt_aggregates if item.attempt_id == attempt_id
         )
-        assert disputed_attempt.result == "pending"
+        assert disputed_attempt.result == "pass"
+        assert disputed_attempt.citation_support_quality is not None
+        assert disputed_attempt.citation_support_quality.unknown_count == 1
         assert disputed.check_reviews[-1].result == "pending"
         with pytest.raises(ValueError):
             service.review_llm_check(
@@ -1515,7 +1526,7 @@ def test_citation_support_is_separate_from_criterion_judgments(tmp_path: Path) -
         )
         revision = await _wait_revision(service, started.revision_id)
 
-        assert revision.status == "incomplete"
+        assert revision.status == "complete"
         assert all(judgment.normalized_result == "pass" for judgment in revision.judgments)
         citation_support = next(
             check for check in revision.checks if check.checker_id == "citation_support"
@@ -1541,13 +1552,23 @@ def test_citation_support_is_separate_from_criterion_judgments(tmp_path: Path) -
             item for item in revision.attempt_aggregates if item.attempt_id == attempt_id
         )
         case_aggregate = next(item for item in revision.case_aggregates if item.case_id == "c1-001")
-        assert attempt_aggregate.result == "fail"
+        assert attempt_aggregate.result == "pass"
         assert attempt_aggregate.check_failures == []
-        assert attempt_aggregate.check_quality_failures == ["citation_support"]
-        assert attempt_aggregate.review_pending is True
+        assert attempt_aggregate.check_quality_failures == []
+        assert attempt_aggregate.review_pending is False
+        assert attempt_aggregate.citation_support_quality is not None
+        assert attempt_aggregate.citation_support_quality.status == "insufficient_sample"
+        assert attempt_aggregate.citation_support_quality.unsupported_count == 1
         assert case_aggregate.result == "pending"
-        assert case_aggregate.review_pending_count == 1
+        assert case_aggregate.review_pending_count == 0
         assert case_aggregate.redline_violation_count == 0
+        assert all("citation_support" not in reason for reason in case_aggregate.reasons)
+        with database.session() as session, session.begin():
+            stored_revision = session.get(EvalEvaluationRevisionRow, revision.revision_id)
+            assert stored_revision is not None
+            stored_revision.status = "incomplete"
+            stored_revision.error_code = None
+        assert service.get_revision(revision.revision_id).status == "complete"
         citation_request = json.loads(provider.requests[-1][1].content)
         assert set(citation_request) == {"contexts", "citations", "occurrences"}
         assert citation_request["contexts"][0]["kind"] == "paragraph"

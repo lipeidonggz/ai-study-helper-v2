@@ -10,6 +10,7 @@ from app.evaluation.models import (
     CaseRevisionView,
     CheckResultView,
     CheckReviewView,
+    CitationSupportQualityView,
     EffectiveJudgmentBindingView,
     EvaluationResultMatrixView,
     PlanCaseView,
@@ -19,6 +20,10 @@ from app.evaluation.models import (
     ResultMatrixTotalsView,
     RunView,
 )
+
+CITATION_SUPPORT_MIN_OCCURRENCES = 10
+CITATION_SUPPORT_GOOD_RATE = 0.9
+AGGREGATE_RULE_VERSION = "023b-nk-v2-citation-soft"
 
 
 def build_aggregates(
@@ -37,6 +42,9 @@ def build_aggregates(
     for check in checks:
         checks_by_attempt.setdefault(check.attempt_id, []).append(check)
     effective_reviews = {(item.attempt_id, item.checker_id): item for item in reviews}
+    review_history: dict[tuple[str, str], list[CheckReviewView]] = {}
+    for review in reviews:
+        review_history.setdefault((review.attempt_id, review.checker_id), []).append(review)
 
     attempt_aggregates: list[AttemptAggregateView] = []
     for attempt in run.attempts:
@@ -81,12 +89,19 @@ def build_aggregates(
         check_quality_failures: list[str] = []
         check_pending: list[str] = []
         review_pending = False
+        citation_support_quality: CitationSupportQualityView | None = None
         attempt_checks = {
             check.checker_id: check for check in checks_by_attempt.get(attempt.attempt_id, [])
         }
         for checker_id, check in attempt_checks.items():
             review = effective_reviews.get((attempt.attempt_id, checker_id))
             result = review.result if review is not None else check.result
+            if checker_id == "citation_support":
+                citation_support_quality = _citation_support_quality(
+                    check,
+                    review_history.get((attempt.attempt_id, checker_id), []),
+                )
+                continue
             if result == "fail":
                 check_failures.append(checker_id)
             elif result == "pending":
@@ -114,6 +129,10 @@ def build_aggregates(
             reasons.append(f"{x_pending} 条边界 X 判定待定")
         if check_pending:
             reasons.append("跨项检查待定：" + "、".join(check_pending))
+        if citation_support_quality is not None:
+            quality_reason = _citation_support_quality_reason(citation_support_quality)
+            if quality_reason:
+                reasons.append(quality_reason)
 
         if r_fail or x_violated or check_failures or check_quality_failures:
             result = "fail"
@@ -139,6 +158,7 @@ def build_aggregates(
                 check_quality_failures=check_quality_failures,
                 check_pending=check_pending,
                 review_pending=review_pending,
+                citation_support_quality=citation_support_quality,
                 reasons=reasons,
             )
         )
@@ -215,6 +235,74 @@ def _case_aggregate(
     )
 
 
+def _citation_support_quality(
+    check: CheckResultView,
+    reviews: list[CheckReviewView],
+) -> CitationSupportQualityView:
+    """从原始 claim verdict 和人工复核计算软质量指标。"""
+
+    claims = _citation_support_verdicts(check.payload)
+    for review in reviews:
+        claims.update(_citation_support_verdicts(review.payload))
+    occurrence_count = len(claims)
+    supported_count = sum(verdict == "supported" for verdict in claims.values())
+    unsupported_count = sum(verdict == "unsupported" for verdict in claims.values())
+    unknown_count = occurrence_count - supported_count - unsupported_count
+    support_rate = supported_count / occurrence_count if occurrence_count else None
+    if occurrence_count == 0:
+        status = "not_applicable"
+    elif occurrence_count < CITATION_SUPPORT_MIN_OCCURRENCES:
+        status = "insufficient_sample"
+    elif support_rate is not None and support_rate >= CITATION_SUPPORT_GOOD_RATE:
+        status = "good"
+    else:
+        status = "review"
+    return CitationSupportQualityView(
+        status=status,
+        occurrence_count=occurrence_count,
+        supported_count=supported_count,
+        unsupported_count=unsupported_count,
+        unknown_count=unknown_count,
+        support_rate=support_rate,
+    )
+
+
+def _citation_support_verdicts(payload: dict[str, object]) -> dict[str, str]:
+    """读取可审计 claim verdict；未知或损坏项按 unknown 处理。"""
+
+    raw_claims = payload.get("claim_results")
+    if not isinstance(raw_claims, list):
+        return {}
+    claims: dict[str, str] = {}
+    for raw_claim in raw_claims:
+        if not isinstance(raw_claim, dict):
+            continue
+        occurrence_id = raw_claim.get("occurrence_id")
+        if not isinstance(occurrence_id, str) or not occurrence_id:
+            continue
+        verdict = raw_claim.get("verdict")
+        normalized_verdict = (
+            verdict if verdict in {"supported", "unsupported", "unknown"} else "unknown"
+        )
+        claims[occurrence_id] = str(normalized_verdict)
+    return claims
+
+
+def _citation_support_quality_reason(quality: CitationSupportQualityView) -> str | None:
+    """生成矩阵中可读的软质量说明，不参与门禁判断。"""
+
+    if quality.status == "not_applicable":
+        return None
+    if quality.status == "insufficient_sample":
+        return f"引用支持样本不足：{quality.occurrence_count} 个 occurrence"
+    rate = (quality.support_rate or 0.0) * 100
+    status_text = "优" if quality.status == "good" else "待观察"
+    return (
+        f"引用支持{status_text}：{rate:.1f}%"
+        f"（{quality.supported_count}/{quality.occurrence_count}）"
+    )
+
+
 def build_result_matrix(
     *,
     run: RunView,
@@ -288,6 +376,7 @@ def build_result_matrix(
         run_id=run.run_id,
         run_status=run.status,
         plan_mode=run.plan_mode,
+        aggregate_rule_version=AGGREGATE_RULE_VERSION,
         suite_name=run.suite_name,
         suite_revision_id=run.suite_revision_id,
         suite_revision_number=run.suite_revision_number,
@@ -316,6 +405,9 @@ def _result_matrix_attempt(
         check_failures=[] if aggregate is None else aggregate.check_failures,
         quality_failures=([] if aggregate is None else aggregate.check_quality_failures),
         review_pending=aggregate.review_pending if aggregate is not None else False,
+        citation_support_quality=(
+            aggregate.citation_support_quality if aggregate is not None else None
+        ),
         trace_id=attempt.trace_id,
         trace_status=attempt.trace_status,
         started_at=attempt.started_at,

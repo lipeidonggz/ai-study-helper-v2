@@ -604,10 +604,19 @@ class EvaluationJudgmentService:
                 attempt_aggregates=attempt_aggregates,
                 case_aggregates=case_aggregates,
             )
+            # 历史 revision 可能因旧 citation_support 门禁被标记为 incomplete；
+            # 读取时按当前软质量规则重新投影，避免仅因软检查 pending 隐藏结果矩阵。
+            revision_status = _expect_status(row.status)
+            if revision_status in {"complete", "incomplete"} and row.error_code is None:
+                revision_status = (
+                    "incomplete"
+                    if any(item.result == "pending" for item in attempt_aggregates)
+                    else "complete"
+                )
             return EvaluationRevisionView(
                 revision_id=row.revision_id,
                 execution_run_id=row.execution_run_id,
-                status=_expect_status(row.status),
+                status=revision_status,
                 checker_version_set=json.loads(row.checker_version_set_json),
                 judge_version_set=json.loads(row.judge_version_set_json),
                 config=json.loads(row.config_json),
@@ -1926,6 +1935,7 @@ class EvaluationJudgmentService:
                 .where(
                     EvalCheckResultRow.evaluation_revision_id == revision_id,
                     EvalCheckResultRow.result == "pending",
+                    EvalCheckResultRow.checker_id != "citation_support",
                 )
             )
             revision.status = (

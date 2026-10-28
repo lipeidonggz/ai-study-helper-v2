@@ -5,6 +5,8 @@
 - 确认日期：2026-10-27
 - 影响范围：引用完整性、引用支持判官、人工复核、attempt 红线聚合、评测成本与基线资格
 
+> 2026-10-28 修订：决定 3、4、5、8 中把 citation support 作为 attempt/case 阻塞门禁的规则，已由 [ADR 0018](./0018-citation-support-as-soft-quality-gate.md) 阶段性替换；citation integrity 硬红线、原始事实保留与关系诊断不默认启用的规则继续有效。
+
 ## 背景
 
 引用完整性可以由程序确定性验证，例如 span 是否存在、block 是否来自本次 attempt、quote 是否能逐字回溯。引用语义支持则不同：它依赖自然语言解释、目标框架、范围和语义关系，即使常驻温度固定，LLM judge 仍存在输出抖动和误伤。

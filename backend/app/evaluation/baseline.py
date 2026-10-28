@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from sqlalchemy import select
 
+from app.evaluation.aggregation import AGGREGATE_RULE_VERSION
 from app.evaluation.database import EvaluationDatabase
 from app.evaluation.models import (
     BaselineCaseDeltaView,
@@ -32,8 +33,6 @@ from app.evaluation.storage_models import (
     EvalBaselineRow,
 )
 from app.storage.models import utc_iso, utc_now
-
-AGGREGATE_RULE_VERSION = "023b-nk-v1"
 
 
 @dataclass(frozen=True, slots=True)
