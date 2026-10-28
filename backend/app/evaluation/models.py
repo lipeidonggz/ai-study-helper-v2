@@ -392,6 +392,7 @@ class StartJudgmentRequest(BaseModel):
     request_budget: int = Field(default=500, ge=1)
     attempt_timeout_seconds: int = Field(default=60, ge=10, le=300)
     judge_review_confirmed: bool = False
+    case_revision_overrides: dict[str, str] = Field(default_factory=dict)
 
 
 class JudgeInvocationView(BaseModel):
