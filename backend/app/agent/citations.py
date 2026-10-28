@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -21,7 +21,7 @@ from app.providers.chat import ChatMessage, ChatProvider, ChatProviderError
 CITATION_ANNOTATION_SCHEMA_VERSION = "citation-annotation-v4"
 CLAIM_SPAN_VERSION = "claim-spans-v4"
 LEGACY_CLAIM_SPAN_VERSION = "legacy-unknown"
-CITATION_ANNOTATION_BATCH_VERSION = "evidence-blocks-v1"
+CITATION_ANNOTATION_BATCH_VERSION = "evidence-blocks-v2-span-split"
 LEGACY_CITATION_ANNOTATION_BATCH_VERSION = "legacy-unknown"
 MAX_CITATION_ANNOTATION_OUTPUT_TOKENS = 4_096
 # 固定 schema 开销与单条 span→block_ids 关系的保守 token 估计；不读取用户回答预算。
@@ -159,6 +159,17 @@ class _AnnotationSelectionOutput(BaseModel):
     annotations: list[_AnnotationSelection]
 
 
+@dataclass(slots=True)
+class _AnnotationCallState:
+    """一次 annotation 调用树共享的审计计数。"""
+
+    model_calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    messages: list[ChatMessage] = field(default_factory=list)
+    raw_outputs: list[str] = field(default_factory=list)
+
+
 class CitationAnnotationError(ValueError):
     """引用标注无法安全完成时的稳定协议错误。"""
 
@@ -233,155 +244,35 @@ class CitationAnnotator:
                 MAX_CITATION_ANNOTATION_EVIDENCE_BLOCKS_PER_BATCH,
             )
         ]
-        output_token_cap = citation_annotation_output_token_cap(len(resolved_spans))
-        model_calls = 0
-        input_tokens = 0
-        output_tokens = 0
+        call_state = _AnnotationCallState()
         annotations: list[CitationAnnotation] = []
-        messages: list[ChatMessage] = []
-        raw_outputs: list[str] = []
         for batch_index, evidence_batch in enumerate(evidence_batches, start=1):
-            packet = CitationAnnotationInput(
-                question=question,
-                answer=answer,
-                spans=resolved_spans,
-                evidence_blocks=evidence_batch,
-            )
-            batch_messages = tuple(
-                render_citation_annotation_messages(
-                    packet,
-                    prompt=self._prompt,
-                )
-            )
-            messages.extend(batch_messages)
-            estimated_input_tokens = sum(
-                self._token_counter.count(message.content) for message in batch_messages
-            )
-            if estimated_input_tokens > max_context_tokens:
-                return self._pending_outcome(
-                    model_id=model_id,
+            try:
+                batch_annotations = await self._annotate_span_group(
+                    question=question,
+                    answer=answer,
                     spans=resolved_spans,
-                    evidence_blocks=evidence_blocks,
-                    code="citation_annotation_context_exceeded",
-                    message=(
-                        "citation annotation input exceeds max_context_tokens: "
-                        f"batch {batch_index}/{len(evidence_batches)}, "
-                        f"{estimated_input_tokens}>{max_context_tokens}"
-                    ),
-                    model_calls=model_calls,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    messages=tuple(messages),
-                    raw_outputs=tuple(raw_outputs),
+                    evidence_blocks=evidence_batch,
+                    batch_index=batch_index,
                     batch_count=len(evidence_batches),
+                    spent_input_tokens=spent_input_tokens,
+                    spent_output_tokens=spent_output_tokens,
+                    max_context_tokens=max_context_tokens,
+                    max_request_tokens=max_request_tokens,
+                    state=call_state,
                 )
-            batch_annotations: list[CitationAnnotation] | None = None
-            last_error: str | None = None
-            for attempt in range(1, MAX_CITATION_ANNOTATION_ATTEMPTS + 1):
-                if (
-                    spent_input_tokens
-                    + spent_output_tokens
-                    + input_tokens
-                    + output_tokens
-                    + estimated_input_tokens
-                    + output_token_cap
-                    > max_request_tokens
-                ):
-                    return self._pending_outcome(
-                        model_id=model_id,
-                        spans=resolved_spans,
-                        evidence_blocks=evidence_blocks,
-                        code="citation_annotation_request_budget_exceeded",
-                        message=(
-                            "citation annotation would exceed the attempt request budget: "
-                            f"batch {batch_index}/{len(evidence_batches)}"
-                        ),
-                        model_calls=model_calls,
-                        input_tokens=input_tokens,
-                        output_tokens=output_tokens,
-                        messages=tuple(messages),
-                        raw_outputs=tuple(raw_outputs),
-                        batch_count=len(evidence_batches),
-                    )
-                try:
-                    result = await self._provider.complete(
-                        batch_messages,
-                        max_output_tokens=output_token_cap,
-                    )
-                except ChatProviderError as error:
-                    model_calls += 1
-                    input_tokens += estimated_input_tokens
-                    last_error = error.code
-                    if not error.retryable or attempt == MAX_CITATION_ANNOTATION_ATTEMPTS:
-                        return self._pending_outcome(
-                            model_id=model_id,
-                            spans=resolved_spans,
-                            evidence_blocks=evidence_blocks,
-                            code="citation_annotation_model_failed",
-                            message=(
-                                f"{error.message}: batch {batch_index}/{len(evidence_batches)}"
-                            ),
-                            model_calls=model_calls,
-                            input_tokens=input_tokens,
-                            output_tokens=output_tokens,
-                            messages=tuple(messages),
-                            raw_outputs=tuple(raw_outputs),
-                            batch_count=len(evidence_batches),
-                        )
-                    continue
-
-                model_calls += 1
-                input_tokens += result.input_tokens
-                output_tokens += result.output_tokens
-                raw_outputs.append(result.content)
-                try:
-                    if result.finish_reason == "length":
-                        raise CitationAnnotationError(
-                            "citation_annotation_output_truncated",
-                            (
-                                "citation annotation output reached the token limit: "
-                                f"batch {batch_index}/{len(evidence_batches)}"
-                            ),
-                        )
-                    batch_annotations = _parse_annotations(
-                        result.content,
-                        spans=resolved_spans,
-                        evidence_blocks=evidence_batch,
-                        answer=answer,
-                    )
-                except CitationAnnotationError as error:
-                    last_error = error.code
-                    if attempt == MAX_CITATION_ANNOTATION_ATTEMPTS:
-                        return self._pending_outcome(
-                            model_id=model_id,
-                            spans=resolved_spans,
-                            evidence_blocks=evidence_blocks,
-                            code=error.code,
-                            message=f"{error}: batch {batch_index}/{len(evidence_batches)}",
-                            model_calls=model_calls,
-                            input_tokens=input_tokens,
-                            output_tokens=output_tokens,
-                            messages=tuple(messages),
-                            raw_outputs=tuple(raw_outputs),
-                            batch_count=len(evidence_batches),
-                        )
-                    continue
-                break
-            if batch_annotations is None:
+            except CitationAnnotationError as error:
                 return self._pending_outcome(
                     model_id=model_id,
                     spans=resolved_spans,
                     evidence_blocks=evidence_blocks,
-                    code=last_error or "citation_annotation_failed",
-                    message=(
-                        "citation annotation did not produce a valid result: "
-                        f"batch {batch_index}/{len(evidence_batches)}"
-                    ),
-                    model_calls=model_calls,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    messages=tuple(messages),
-                    raw_outputs=tuple(raw_outputs),
+                    code=error.code,
+                    message=str(error),
+                    model_calls=call_state.model_calls,
+                    input_tokens=call_state.input_tokens,
+                    output_tokens=call_state.output_tokens,
+                    messages=tuple(call_state.messages),
+                    raw_outputs=tuple(call_state.raw_outputs),
                     batch_count=len(evidence_batches),
                 )
             annotations.extend(batch_annotations)
@@ -423,12 +314,155 @@ class CitationAnnotator:
             spans=resolved_spans,
             evidence_blocks=evidence_blocks,
             annotations=annotations,
-            model_calls=model_calls,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            messages=tuple(messages),
-            raw_outputs=tuple(raw_outputs),
+            model_calls=call_state.model_calls,
+            input_tokens=call_state.input_tokens,
+            output_tokens=call_state.output_tokens,
+            messages=tuple(call_state.messages),
+            raw_outputs=tuple(call_state.raw_outputs),
             batch_count=len(evidence_batches),
+        )
+
+    async def _annotate_span_group(
+        self,
+        *,
+        question: str,
+        answer: str,
+        spans: list[CitationSpan],
+        evidence_blocks: list[CitationEvidenceBlock],
+        batch_index: int,
+        batch_count: int,
+        spent_input_tokens: int,
+        spent_output_tokens: int,
+        max_context_tokens: int,
+        max_request_tokens: int,
+        state: _AnnotationCallState,
+    ) -> list[CitationAnnotation]:
+        """标注一个 span 组；输出截断时递归二分，避免整批 pending。"""
+
+        packet = CitationAnnotationInput(
+            question=question,
+            answer=answer,
+            spans=spans,
+            evidence_blocks=evidence_blocks,
+        )
+        messages = tuple(
+            render_citation_annotation_messages(
+                packet,
+                prompt=self._prompt,
+            )
+        )
+        state.messages.extend(messages)
+        estimated_input_tokens = sum(
+            self._token_counter.count(message.content) for message in messages
+        )
+        if estimated_input_tokens > max_context_tokens:
+            raise CitationAnnotationError(
+                "citation_annotation_context_exceeded",
+                (
+                    "citation annotation input exceeds max_context_tokens: "
+                    f"batch {batch_index}/{batch_count}, spans={len(spans)}, "
+                    f"{estimated_input_tokens}>{max_context_tokens}"
+                ),
+            )
+
+        output_token_cap = citation_annotation_output_token_cap(len(spans))
+        last_error: str | None = None
+        for attempt in range(1, MAX_CITATION_ANNOTATION_ATTEMPTS + 1):
+            if (
+                spent_input_tokens
+                + spent_output_tokens
+                + state.input_tokens
+                + state.output_tokens
+                + estimated_input_tokens
+                + output_token_cap
+                > max_request_tokens
+            ):
+                raise CitationAnnotationError(
+                    "citation_annotation_request_budget_exceeded",
+                    (
+                        "citation annotation would exceed the attempt request budget: "
+                        f"batch {batch_index}/{batch_count}, spans={len(spans)}"
+                    ),
+                )
+            try:
+                result = await self._provider.complete(
+                    messages,
+                    max_output_tokens=output_token_cap,
+                )
+            except ChatProviderError as error:
+                state.model_calls += 1
+                state.input_tokens += estimated_input_tokens
+                last_error = error.code
+                if not error.retryable or attempt == MAX_CITATION_ANNOTATION_ATTEMPTS:
+                    raise CitationAnnotationError(
+                        "citation_annotation_model_failed",
+                        (f"{error.message}: batch {batch_index}/{batch_count}, spans={len(spans)}"),
+                    ) from error
+                continue
+
+            state.model_calls += 1
+            state.input_tokens += result.input_tokens
+            state.output_tokens += result.output_tokens
+            state.raw_outputs.append(result.content)
+            if result.finish_reason == "length":
+                if len(spans) > 1:
+                    midpoint = len(spans) // 2
+                    left = await self._annotate_span_group(
+                        question=question,
+                        answer=answer,
+                        spans=spans[:midpoint],
+                        evidence_blocks=evidence_blocks,
+                        batch_index=batch_index,
+                        batch_count=batch_count,
+                        spent_input_tokens=spent_input_tokens,
+                        spent_output_tokens=spent_output_tokens,
+                        max_context_tokens=max_context_tokens,
+                        max_request_tokens=max_request_tokens,
+                        state=state,
+                    )
+                    right = await self._annotate_span_group(
+                        question=question,
+                        answer=answer,
+                        spans=spans[midpoint:],
+                        evidence_blocks=evidence_blocks,
+                        batch_index=batch_index,
+                        batch_count=batch_count,
+                        spent_input_tokens=spent_input_tokens,
+                        spent_output_tokens=spent_output_tokens,
+                        max_context_tokens=max_context_tokens,
+                        max_request_tokens=max_request_tokens,
+                        state=state,
+                    )
+                    return [*left, *right]
+                last_error = "citation_annotation_output_truncated"
+                if attempt == MAX_CITATION_ANNOTATION_ATTEMPTS:
+                    raise CitationAnnotationError(
+                        last_error,
+                        (
+                            "citation annotation output reached the token limit: "
+                            f"batch {batch_index}/{batch_count}, span={spans[0].span_id}"
+                        ),
+                    )
+                continue
+
+            try:
+                return _parse_annotations(
+                    result.content,
+                    spans=spans,
+                    evidence_blocks=evidence_blocks,
+                    answer=answer,
+                )
+            except CitationAnnotationError as error:
+                last_error = error.code
+                if attempt == MAX_CITATION_ANNOTATION_ATTEMPTS:
+                    raise CitationAnnotationError(
+                        error.code,
+                        (f"{error}: batch {batch_index}/{batch_count}, spans={len(spans)}"),
+                    ) from error
+
+        raise CitationAnnotationError(
+            last_error or "citation_annotation_failed",
+            f"citation annotation failed: batch {batch_index}/{batch_count}",
         )
 
     def _outcome(

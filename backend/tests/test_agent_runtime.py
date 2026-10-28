@@ -9,7 +9,10 @@ import httpx
 import pytest
 from langgraph.errors import GraphRecursionError
 
-from app.agent.citations import citation_annotation_output_token_cap
+from app.agent.citations import (
+    CITATION_ANNOTATION_BATCH_VERSION,
+    citation_annotation_output_token_cap,
+)
 from app.agent.runtime import (
     AgentRunConfig,
     AgentRuntime,
@@ -219,7 +222,7 @@ def test_agent_runtime_executes_tool_and_finishes(tmp_path: Path) -> None:
     assert citation_event.payload["status"] == "complete"
     assert citation_event.payload["span_version"] == "claim-spans-v4"
     assert citation_event.payload["batch_count"] == 1
-    assert citation_event.payload["batch_version"] == "evidence-blocks-v1"
+    assert citation_event.payload["batch_version"] == CITATION_ANNOTATION_BATCH_VERSION
     assert citation_event.payload["annotations"] == []
     assert citation_event.payload["source_meta"]["status"] == "complete"
     assert citation_event.payload["source_meta"]["excluded_span_count"] == 0
@@ -578,7 +581,10 @@ def test_agent_runtime_persists_parented_trace_with_tool_and_budget_data(
     assert citation_span.attributes["app.citation_annotation_status"] == "complete"
     assert citation_span.attributes["app.claim_span_version"] == "claim-spans-v4"
     assert citation_span.attributes["app.annotation_batch_count"] == 1
-    assert citation_span.attributes["app.annotation_batch_version"] == "evidence-blocks-v1"
+    assert (
+        citation_span.attributes["app.annotation_batch_version"]
+        == CITATION_ANNOTATION_BATCH_VERSION
+    )
     assert citation_span.attributes["app.citation_source_meta_status"] == "complete"
     assert citation_span.attributes["app.citation_source_meta_model_calls"] == 1
     assert citation_span.attributes["app.model_calls"] == 2

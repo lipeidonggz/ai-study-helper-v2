@@ -15,10 +15,12 @@ from app.agent.citations import (
     CitationAnnotation,
     CitationAnnotationInput,
     CitationAnnotator,
+    CitationEvidenceBlock,
 )
 from app.agent.token_counter import ConservativeObservationTokenCounter
 from app.evaluation.citation_prompt import CitationEvidenceInput
 from app.evaluation.database import EvaluationDatabase
+from app.evaluation.evidence import EvidenceBlock, _extract_evidence
 from app.evaluation.judgment import (
     EvaluationJudgmentService,
     _build_citation_task,
@@ -48,7 +50,10 @@ def extract_frozen_packets(
         for artifact in detail.manifest.artifacts
         if artifact.kind == "citation.annotation.prompt"
     ]
+    evidence_blocks = _extract_evidence(detail, trace_catalog, [])
+    packets_by_artifact: list[CitationAnnotationInput] = []
     for artifact in prompt_artifacts:
+        artifact_packets: list[CitationAnnotationInput] = []
         path = trace_catalog.artifact_path(trace_id, artifact.artifact_id)
         messages = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(messages, list):
@@ -61,12 +66,65 @@ def extract_frozen_packets(
                 and "后置引用标注器" in content
                 and index + 1 < len(messages)
             ):
-                packets.append(
+                artifact_packets.append(
                     CitationAnnotationInput.model_validate_json(messages[index + 1]["content"])
                 )
-    if not packets:
+        if not artifact_packets:
+            continue
+        base = artifact_packets[0]
+        if any(
+            packet.question != base.question
+            or packet.answer != base.answer
+            or packet.spans != base.spans
+            for packet in artifact_packets[1:]
+        ):
+            raise ValueError(f"annotation batches disagree on frozen answer: {trace_id}")
+        merged_evidence = list(
+            {
+                block.block_id: block
+                for packet in artifact_packets
+                for block in packet.evidence_blocks
+            }.values()
+        )
+        packets_by_artifact.append(base.model_copy(update={"evidence_blocks": merged_evidence}))
+
+    if not packets_by_artifact:
         raise ValueError(f"trace has no citation annotation packet: {trace_id}")
+    packets.extend(
+        restore_frozen_evidence_ids(packet, evidence_blocks) for packet in packets_by_artifact
+    )
     return packets
+
+
+def restore_frozen_evidence_ids(
+    packet: CitationAnnotationInput,
+    evidence_blocks: list[EvidenceBlock],
+) -> CitationAnnotationInput:
+    """把 prompt 中的短 evidence 引用恢复成 trace 的真实 block_id。"""
+
+    evidence_by_signature: dict[tuple[str, tuple[str, ...], str], list[EvidenceBlock]] = (
+        defaultdict(list)
+    )
+    for block in evidence_blocks:
+        evidence_by_signature[(block.doc_id, tuple(block.section_path), block.text)].append(block)
+    restored_blocks: list[CitationEvidenceBlock] = []
+    for block in packet.evidence_blocks:
+        signature = (block.doc_id, tuple(block.section_path), block.text)
+        candidates = evidence_by_signature.get(signature, [])
+        if not candidates:
+            raise ValueError(f"frozen evidence block cannot be mapped to trace: {block.block_id}")
+        candidate = candidates.pop(0)
+        restored_blocks.append(
+            CitationEvidenceBlock(
+                block_id=candidate.block_id,
+                doc_id=block.doc_id,
+                doc_title=block.doc_title,
+                source_label=block.source_label,
+                section_path=block.section_path,
+                text=block.text,
+            )
+        )
+    return packet.model_copy(update={"evidence_blocks": restored_blocks})
 
 
 def summarize_records(
@@ -125,6 +183,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--case-id", action="append", default=[])
     parser.add_argument("--attempt-id", action="append", default=[])
     parser.add_argument("--judge-target-span", action="append", default=[])
+    parser.add_argument("--judge-citations", action="store_true")
     parser.add_argument("--prompt-file", type=Path)
     parser.add_argument("--prompt-version", default="candidate")
     return parser.parse_args()
@@ -179,7 +238,7 @@ async def _run(args: argparse.Namespace) -> None:
             credentials=WindowsCredentialStore(),
             chat_provider_factory=lambda _key: DeepSeekChatProvider(api_key),
         )
-        if args.judge_target_span
+        if args.judge_target_span or args.judge_citations
         else None
     )
     semaphore = asyncio.Semaphore(args.concurrency)
@@ -226,11 +285,15 @@ async def _run(args: argparse.Namespace) -> None:
                 )
             judge_result: dict[str, Any] | None = None
             if judgment_service is not None:
-                target_annotations = [
-                    annotation
-                    for annotation in annotations
-                    if annotation.span_id in args.judge_target_span
-                ]
+                target_annotations = (
+                    annotations
+                    if args.judge_citations
+                    else [
+                        annotation
+                        for annotation in annotations
+                        if annotation.span_id in args.judge_target_span
+                    ]
+                )
                 citations = [
                     CitationEvidenceInput(
                         block_id=block_id,
