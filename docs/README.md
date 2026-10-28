@@ -8,7 +8,7 @@
 
 - 阶段：实现阶段，027 claim-aware 引用标注已完成，028 评测失败分类拆分已实现。
 - 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付、检索与 Agent 运行链、流式问答、本地 trace 诊断和逐 criterion 评测判定已实现。
-- 当前工作：049 已将 c8 R2 收敛为 7 个整体图景核心概念并激活；原冻结答案 R2 为 10/10，`chat-v14` 实验因前提不成立已撤回。
+- 当前工作：049 已完成并合并；c9 已使用当前产品配置新跑 N=10，50/50 criterion 通过，达到 K=9。
 
 ## 设计基线
 
@@ -127,6 +127,7 @@
 - [2026-10-26 · 引用语义支持候选与人工复核门禁](development/experiments/2026-10-26-citation-support-review-gate.md)
 - [2026-10-28 · 提示词语义对齐：来源元门禁迭代记录](development/experiments/2026-10-28-prompt-semantic-alignment.md)
 - [2026-10-28 · c8 chat-v14 跨来源综合校准](development/experiments/2026-10-28-c8-chat-v14-synthesis.md)
+- [2026-10-28 · c9 新数据基线](development/experiments/2026-10-28-c9-fresh-baseline.md)
 - [032 · 判定总 Token 用量展示（待人工验收）](development/slices/032-judge-token-usage-visibility.md)
 - [033 · 异步 GitHub 交付与依赖门禁（已完成）](development/slices/033-async-github-delivery-gate.md)
 - [034 · c2-001 指标归属金标准修订（待确认）](development/slices/034-c2-metric-attribution.md)
