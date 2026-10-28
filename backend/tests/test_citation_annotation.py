@@ -153,6 +153,61 @@ class _TruncatedAnnotationProvider:
         )
 
 
+class _SplittingAnnotationProvider:
+    """超过两个 span 时模拟输出截断，二分后的子组返回合法结果。"""
+
+    def __init__(self) -> None:
+        self._profile = FakeChatProvider(["unused"]).profile
+        self.span_counts: list[int] = []
+        self.max_output_tokens: list[int | None] = []
+
+    @property
+    def profile(self) -> ChatProviderProfile:
+        return self._profile
+
+    async def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> ChatCompletionResult:
+        payload = json.loads(messages[-1].content)
+        spans = payload["spans"]
+        self.span_counts.append(len(spans))
+        self.max_output_tokens.append(max_output_tokens)
+        assert max_output_tokens == citation_annotation_output_token_cap(len(spans))
+        if len(spans) > 2:
+            return ChatCompletionResult(
+                content='{"annotations":[{"span_id":"span_0001","block_ids":["ev',
+                request_id=f"split-{len(self.span_counts)}",
+                actual_model_id=self.profile.model_id,
+                finish_reason="length",
+                input_tokens=100,
+                output_tokens=4096,
+            )
+        block_id = payload["evidence_blocks"][0]["block_id"]
+        return ChatCompletionResult(
+            content=json.dumps(
+                {
+                    "annotations": [
+                        {
+                            "span_id": span["span_id"],
+                            "block_ids": [block_id],
+                            "reason": "子批证据直接支持。",
+                        }
+                        for span in spans
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            request_id=f"split-{len(self.span_counts)}",
+            actual_model_id=self.profile.model_id,
+            finish_reason="stop",
+            input_tokens=80,
+            output_tokens=30,
+        )
+
+
 class _MemoryTraceCatalog:
     def __init__(self, trace: TraceDetailRecord, files: dict[str, Path]) -> None:
         self._trace = trace
@@ -538,6 +593,44 @@ def test_annotation_output_length_is_reported_as_truncation() -> None:
     assert outcome.artifact.error_code == "citation_annotation_output_truncated"
     assert outcome.model_calls == 2
     assert provider.calls == 2
+
+
+def test_annotation_output_truncation_splits_spans_and_merges_in_order() -> None:
+    provider = _SplittingAnnotationProvider()
+    answer = "第一事实成立。第二事实成立。第三事实成立。第四事实成立。"
+
+    outcome = asyncio.run(
+        CitationAnnotator(
+            provider,
+            token_counter=ConservativeObservationTokenCounter(),
+        ).annotate(
+            question="请说明事实",
+            answer=answer,
+            evidence_blocks=_evidence(),
+            spent_input_tokens=10,
+            spent_output_tokens=5,
+            max_context_tokens=100_000,
+            max_request_tokens=100_000,
+        )
+    )
+
+    assert outcome.artifact.status == "complete"
+    assert outcome.artifact.batch_version == "evidence-blocks-v2-span-split"
+    assert provider.span_counts == [4, 2, 2]
+    assert provider.max_output_tokens == [
+        citation_annotation_output_token_cap(4),
+        citation_annotation_output_token_cap(2),
+        citation_annotation_output_token_cap(2),
+    ]
+    assert outcome.model_calls == 3
+    assert len(outcome.messages) == 6
+    assert len(outcome.raw_outputs) == 3
+    assert [item.span_id for item in outcome.artifact.annotations] == [
+        "span_0001",
+        "span_0002",
+        "span_0003",
+        "span_0004",
+    ]
 
 
 @pytest.mark.parametrize(
