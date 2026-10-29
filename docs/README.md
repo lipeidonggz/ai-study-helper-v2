@@ -8,7 +8,7 @@
 
 - 阶段：实现阶段，027 claim-aware 引用标注已完成，028 评测失败分类拆分已实现。
 - 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付、检索与 Agent 运行链、流式问答、本地 trace 诊断和逐 criterion 评测判定已实现。
-- 当前工作：`chat-v15` 已通过 c12 主验证及 c10、c11 回归；c13 新数据仅 2/10，暴露题面与 R1 对“出口控制”的范围冲突，待校准。
+- 当前工作：`chat-v15` 已通过 c12 主验证及 c10、c11 回归；c13 已校正题面与 R1，删除低影响 X1 后使用 `judge-rubric-v3` reason-first 重判为 5/10。当前剩余问题是枚举型问题的生成侧类别覆盖不稳定，待用最终题面重跑 N=10。
 
 ## 设计基线
 
@@ -16,7 +16,7 @@
 | --- | --- | --- |
 | [01](design/01-product-requirements.md) | 产品需求、问题空间、范围和质量属性 | 已审核 · 实现基线 |
 | [02](design/02-how-to-build-an-agent.md) | Agent 开发方法与知识面 | 已审核 · 实现基线 |
-| [03](design/03-cases-and-gold-standard.md) | 用例与金标准 | v0.6 · 实现基线 |
+| [03](design/03-cases-and-gold-standard.md) | 用例与金标准 | v0.7 · 实现基线 |
 | [04](design/04-architecture-design-method.md) | 架构设计方法 | 已审核 · 实现基线 |
 | [05](design/05-storage-and-retrieval-strategy.md) | 存储结构与检索策略 | 已审核 · 实现基线 |
 | [06](design/06-retrieval-pure-agent.md) | 检索工具、Agent 循环、提示词、trace 与部署 | 已审核 · 实现基线 |
@@ -25,7 +25,7 @@
 | [09](design/09-technology-selection.md) | 技术选型与总体架构 | v0.4 · 实现基线 |
 | [10](design/10-document-detail-design.md) | 文档详情页信息架构与数据边界 | 已审核 · 首版实现基线 |
 
-01–09 已于 2026-10-20 审核，并作为当前实现基线；03 已于 2026-10-28 完成 c6、c8 和 c11 判据修订并更新为 v0.6，09 已依据 ADR 0004 更新为 v0.4。后续修改必须保留变更原因，同时更新本索引。
+01–09 已于 2026-10-20 审核，并作为当前实现基线；03 已于 2026-10-29 完成 c6、c8、c11 和 c13 判据修订并更新为 v0.7，09 已依据 ADR 0004 更新为 v0.4。后续修改必须保留变更原因，同时更新本索引。
 
 ## 记录分类
 
@@ -132,6 +132,7 @@
 - [2026-10-28 · c11 新数据基线](development/experiments/2026-10-28-c11-fresh-baseline.md)
 - [2026-10-28 · c12 新数据基线](development/experiments/2026-10-28-c12-fresh-baseline.md)
 - [2026-10-29 · c13 新数据基线](development/experiments/2026-10-29-c13-fresh-baseline.md)
+- [2026-10-29 · Judge reason-first 输出顺序校准](development/experiments/2026-10-29-judge-reason-first.md)
 - [032 · 判定总 Token 用量展示（待人工验收）](development/slices/032-judge-token-usage-visibility.md)
 - [033 · 异步 GitHub 交付与依赖门禁（已完成）](development/slices/033-async-github-delivery-gate.md)
 - [034 · c2-001 指标归属金标准修订（待确认）](development/slices/034-c2-metric-attribution.md)
@@ -152,6 +153,8 @@
 - [049 · c8 R2 整体图景范围校准（已完成）](development/slices/049-c8-r2-semantic-calibration.md)
 - [050 · c11 R2 适用前提校准（已完成）](development/slices/050-c11-r2-applicability.md)
 - [051 · 通用知识与文档事实边界（已完成）](development/slices/051-knowledge-scope-fallback.md)
+- [052 · c13 补充隔离手段范围校准（已完成）](development/slices/052-c13-additional-controls-scope.md)
+- [053 · Judge reason-first 输出契约（已完成）](development/slices/053-judge-reason-first-output.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库

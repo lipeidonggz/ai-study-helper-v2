@@ -55,13 +55,13 @@ def test_evaluation_api_exposes_seeded_suite_without_product_routes(
             ]
             assert len(body) == 1
             assert body[0]["case_count"] == 18
-            assert sum(len(case["criteria"]) for case in body[0]["cases"]) == 69
+            assert sum(len(case["criteria"]) for case in body[0]["cases"]) == 70
             prompt = await client.get(
                 "/api/eval/judge-prompt",
                 headers={"x-launch-token": TOKEN},
             )
             assert prompt.status_code == 200
-            assert prompt.json()["version"] == "judge-rubric-v2"
+            assert prompt.json()["version"] == "judge-rubric-v3"
             citation_prompt = await client.get(
                 "/api/eval/citation-prompt",
                 headers={"x-launch-token": TOKEN},

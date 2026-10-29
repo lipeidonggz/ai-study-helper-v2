@@ -240,7 +240,7 @@ def test_design_case_seed_is_complete_and_deterministic() -> None:
     second = load_design_case_seeds()
 
     assert len(first) == 18
-    assert sum(len(case.criteria) for case in first) == 69
+    assert sum(len(case.criteria) for case in first) == 70
     assert [case.content_hash for case in first] == [case.content_hash for case in second]
     assert all(criterion.revision_id for case in first for criterion in case.criteria)
     assert {criterion.rule_type for case in first for criterion in case.criteria} == {
@@ -413,7 +413,7 @@ def test_repository_seed_is_idempotent(tmp_path: Path) -> None:
 
     suite = repository.get_suite_revision("sr_design03_r1")
     assert suite.case_count == 18
-    assert sum(len(case.criteria) for case in suite.cases) == 69
+    assert sum(len(case.criteria) for case in suite.cases) == 70
 
 
 def test_existing_seed_revision_is_not_extended_by_design_changes(tmp_path: Path) -> None:
