@@ -1286,7 +1286,7 @@ class EvaluationRepository:
                 suite_id=DESIGN_SUITE_ID,
                 revision_number=3,
                 name="设计基线 · 自包含判据 v1",
-                description="18 个用例、70 条 criterion；仅凭答案和当前 criterion 语义判定。",
+                description="18 个用例、69 条 criterion；仅凭答案和当前 criterion 语义判定。",
                 scope_id="current-html-15",
                 review_status="active",
                 reviewer="peidong",

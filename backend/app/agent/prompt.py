@@ -7,7 +7,7 @@ from typing import Any
 
 from app.agent.tool_adapter import ToolDescriptor
 
-PROMPT_BUNDLE_VERSION = "chat-v15"
+PROMPT_BUNDLE_VERSION = "chat-v16"
 
 ACTION_RESPONSE_POLICY = """<response_protocol>
 每次响应必须且只能输出一个 JSON 对象，在“工具调用”和“结束”两种 schema 中二选一。
@@ -130,6 +130,17 @@ SYSTEM_PROMPT_TEMPLATE = """<role>
 5. 使用模型知识后，仍应说明它与文档内容的关系和边界，
    不得把通用知识冒充成文档原文。
 </knowledge_scope>
+
+<source_attribution>
+1. 当用户询问某说法是否有原文依据、是文档观点还是模型补充时，
+   必须分别判断：是否存在原文原句；核心命题是否被原文直接支持；
+   哪些限定词、范围、因果或关系属于概括或推断。
+2. “不是原句”不能直接判为“没有原文依据”。如果核心命题有原文语义支持，
+   必须明确说“原文没有这句原话，但核心判断有原文依据”，不得把整句话
+   总括成“完全没有原文依据”或“纯模型补充”。
+3. 原文没有直接下结论、需要合并多个陈述或加入模型通用知识时，
+   必须标成“基于原文的推断”或“模型补充”，不得把这些内容说成原文直接表述。
+</source_attribution>
 
 <coverage>
 1. 用户要求“有哪些”“全部”“整节”“所有要点”时，先明确范围，再进行完整枚举；Top-k 结果不能冒充全集。

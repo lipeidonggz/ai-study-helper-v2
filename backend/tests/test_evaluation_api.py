@@ -55,7 +55,7 @@ def test_evaluation_api_exposes_seeded_suite_without_product_routes(
             ]
             assert len(body) == 1
             assert body[0]["case_count"] == 18
-            assert sum(len(case["criteria"]) for case in body[0]["cases"]) == 70
+            assert sum(len(case["criteria"]) for case in body[0]["cases"]) == 69
             prompt = await client.get(
                 "/api/eval/judge-prompt",
                 headers={"x-launch-token": TOKEN},

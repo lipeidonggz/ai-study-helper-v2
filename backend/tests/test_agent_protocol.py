@@ -149,7 +149,7 @@ def test_release_prompt_bundle_has_stable_version_and_hash() -> None:
     first = release_prompt_bundle()
     second = release_prompt_bundle()
 
-    assert first.version == "chat-v15"
+    assert first.version == "chat-v16"
     assert first.template_hash == second.template_hash
     assert len(first.template_hash) == 64
     assert "{{RESPONSE_POLICY}}" in first.template
@@ -226,3 +226,6 @@ def test_list_blocks_contract_requires_explicit_descendant_scope() -> None:
     assert "include_descendants" in properties
     assert "省略 section_paths 表示整篇" in descriptor.description
     assert "include_descendants=false" in release_prompt_bundle().template
+    source_attribution = release_prompt_bundle().template
+    assert "“不是原句”不能直接判为“没有原文依据”" in source_attribution
+    assert "基于原文的推断”或“模型补充”" in source_attribution
