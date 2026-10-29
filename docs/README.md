@@ -8,7 +8,7 @@
 
 - 阶段：实现阶段，027 claim-aware 引用标注已完成，028 评测失败分类拆分已实现。
 - 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付、检索与 Agent 运行链、流式问答、本地 trace 诊断和逐 criterion 评测判定已实现。
-- 当前工作：c13 原题恢复与千篇规模检索链路登记为 [BL-0012](development/backlog.md)。c14 先收紧来源归属总判断并用旧答案建立 0/10 失败基线，再由 `chat-v16` 运行新 N=10，结果为 9/10；全量用例回归待统一执行。
+- 当前工作：c14 在 `chat-v16` 下达到 9/10；c15 新数据为 8/10，两个失败均为同一项 Cowork 威胁模型描述缺失。c13 原题恢复与千篇规模检索链路登记为 [BL-0012](development/backlog.md)；全量用例回归待统一执行。
 
 ## 设计基线
 
@@ -135,6 +135,7 @@
 - [2026-10-29 · Judge reason-first 输出顺序校准](development/experiments/2026-10-29-judge-reason-first.md)
 - [2026-10-29 · c13 开放范围补充检索问题分析](development/experiments/2026-10-29-c13-open-scope-retrieval-analysis.md)
 - [2026-10-29 · c14 新数据基线](development/experiments/2026-10-29-c14-fresh-baseline.md)
+- [2026-10-29 · c15 新数据基线](development/experiments/2026-10-29-c15-fresh-baseline.md)
 - [032 · 判定总 Token 用量展示（待人工验收）](development/slices/032-judge-token-usage-visibility.md)
 - [033 · 异步 GitHub 交付与依赖门禁（已完成）](development/slices/033-async-github-delivery-gate.md)
 - [034 · c2-001 指标归属金标准修订（待确认）](development/slices/034-c2-metric-attribution.md)
@@ -159,6 +160,7 @@
 - [053 · Judge reason-first 输出契约（已完成）](development/slices/053-judge-reason-first-output.md)
 - [054 · c14 来源归属范围收敛（已完成）](development/slices/054-c14-provenance-scope.md)
 - [055 · 来源归属总判断与分层表达（已完成）](development/slices/055-source-attribution-language.md)
+- [056 · 评测样本答案复用问答 Markdown 渲染（已完成）](development/slices/056-evaluation-answer-markdown.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库
