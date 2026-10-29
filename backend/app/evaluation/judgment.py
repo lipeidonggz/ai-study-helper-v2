@@ -55,6 +55,8 @@ from app.evaluation.evidence import (
 from app.evaluation.judge_prompt import (
     JUDGE_PROMPT_HASH,
     JUDGE_PROMPT_VERSION,
+    SUPPORTED_JUDGE_PROMPT_VERSIONS,
+    judge_prompt_hash_for_version,
     render_judge_messages,
 )
 from app.evaluation.models import (
@@ -344,10 +346,18 @@ class EvaluationJudgmentService:
             run,
             request.case_revision_overrides,
         )
+        selected_judge_versions = sorted(
+            {
+                criterion.evaluator_ref
+                for case in effective_cases.values()
+                for criterion in case.criteria
+                if criterion.evaluator == "llm_judge" and criterion.evaluator_ref is not None
+            }
+        )
         for case in effective_cases.values():
             if any(
                 criterion.evaluator == "llm_judge"
-                and criterion.evaluator_ref != JUDGE_PROMPT_VERSION
+                and criterion.evaluator_ref not in SUPPORTED_JUDGE_PROMPT_VERSIONS
                 for criterion in case.criteria
             ):
                 raise ValueError(
@@ -390,6 +400,7 @@ class EvaluationJudgmentService:
                     judge_version_set_json=_json(
                         {
                             "prompt_version": JUDGE_PROMPT_VERSION,
+                            "prompt_versions": selected_judge_versions,
                             "prompt_hash": JUDGE_PROMPT_HASH,
                             "citation_prompt_version": CITATION_SUPPORT_PROMPT_VERSION,
                             "citation_prompt_hash": CITATION_SUPPORT_PROMPT_HASH,
@@ -1163,13 +1174,14 @@ class EvaluationJudgmentService:
             )
         if task.criterion.evaluator == "checker":
             return _checker_judgment(task)
-        if task.criterion.evaluator_ref != JUDGE_PROMPT_VERSION:
+        prompt_version = task.criterion.evaluator_ref
+        if prompt_version is None or prompt_version not in SUPPORTED_JUDGE_PROMPT_VERSIONS:
             return _pending_judgment(
                 task,
                 "judge_prompt_version_mismatch",
                 reason=(
-                    f"criterion requires {task.criterion.evaluator_ref}; "
-                    f"current judge prompt is {JUDGE_PROMPT_VERSION}"
+                    f"criterion requires unsupported judge prompt {prompt_version}; "
+                    f"supported versions are {sorted(SUPPORTED_JUDGE_PROMPT_VERSIONS)}"
                 ),
             )
         return await self._llm_judgment(
@@ -1185,6 +1197,10 @@ class EvaluationJudgmentService:
         budget: _JudgeBudget,
         timeout_seconds: int,
     ) -> _TaskOutcome:
+        prompt_version = task.criterion.evaluator_ref
+        if prompt_version is None:
+            raise RuntimeError("LLM judge criterion has no prompt version")
+        prompt_hash = judge_prompt_hash_for_version(prompt_version)
         messages = render_judge_messages(
             JudgeInputPacket(
                 answer=task.attempt.answer or "",
@@ -1192,11 +1208,13 @@ class EvaluationJudgmentService:
                     rule_type=task.criterion.rule_type,
                     rule_text=task.criterion.rule_text,
                 ),
-            )
+            ),
+            prompt_version=prompt_version,
         )
         input_json = _json(
             {
-                "prompt_version": JUDGE_PROMPT_VERSION,
+                "prompt_version": prompt_version,
+                "prompt_hash": prompt_hash,
                 "messages": [
                     {"role": message.role, "content": message.content} for message in messages
                 ],
@@ -1324,7 +1342,7 @@ class EvaluationJudgmentService:
             attempt_id=task.attempt.attempt_id,
             criterion=task.criterion,
             executor="llm_judge",
-            executor_ref=f"{JUDGE_PROMPT_VERSION}:{provider.profile.model_id}",
+            executor_ref=f"{prompt_version}:{provider.profile.model_id}",
             verdict=parsed.verdict,
             normalized_result=_normalize_verdict(task.criterion.rule_type, parsed.verdict),
             reason=parsed.reason,
@@ -1958,7 +1976,12 @@ class EvaluationJudgmentService:
                         invocation_id=f"invocation_{uuid4().hex}",
                         judgment_id=judgment_id,
                         attempt_number=invocation.attempt_number,
-                        prompt_version=JUDGE_PROMPT_VERSION,
+                        prompt_version=(
+                            outcome.criterion.evaluator_ref
+                            if outcome.executor == "llm_judge"
+                            and outcome.criterion.evaluator_ref is not None
+                            else JUDGE_PROMPT_VERSION
+                        ),
                         model_id=self._chat_provider().profile.model_id,
                         input_hash=hashlib.sha256(invocation.input_json.encode()).hexdigest(),
                         output_hash=(
@@ -2549,14 +2572,14 @@ def _pending_judgment(
     *,
     reason: str,
     executor: str = "llm_judge",
-    executor_ref: str = JUDGE_PROMPT_VERSION,
+    executor_ref: str | None = None,
     invocations: Sequence[_InvocationDraft] = (),
 ) -> _TaskOutcome:
     return _TaskOutcome(
         attempt_id=task.attempt.attempt_id,
         criterion=task.criterion,
         executor=executor,
-        executor_ref=executor_ref,
+        executor_ref=(executor_ref or task.criterion.evaluator_ref or JUDGE_PROMPT_VERSION),
         verdict="unknown",
         normalized_result="pending",
         reason=reason,
