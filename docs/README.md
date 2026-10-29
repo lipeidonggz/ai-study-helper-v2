@@ -8,7 +8,7 @@
 
 - 阶段：实现阶段，027 claim-aware 引用标注已完成，028 评测失败分类拆分已实现。
 - 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付、检索与 Agent 运行链、流式问答、本地 trace 诊断和逐 criterion 评测判定已实现。
-- 当前工作：`chat-v15` 已通过 c12 主验证及 c10、c11 回归；c13 已校正题面与 R1，删除低影响 X1 后使用 `judge-rubric-v3` reason-first 重判为 5/10。当前剩余问题是枚举型问题的生成侧类别覆盖不稳定，待用最终题面重跑 N=10。
+- 当前工作：`chat-v15` 已通过 c12 主验证及 c10、c11 回归；c13 单篇文章题面与四类 R1 仅作为过渡基线，不能代表第 13 类的跨知识库补充召回。原题恢复与 1,000 篇规模检索链路已登记为高优先级 [BL-0012](development/backlog.md)，先完成其余 active 用例。
 
 ## 设计基线
 
@@ -133,6 +133,7 @@
 - [2026-10-28 · c12 新数据基线](development/experiments/2026-10-28-c12-fresh-baseline.md)
 - [2026-10-29 · c13 新数据基线](development/experiments/2026-10-29-c13-fresh-baseline.md)
 - [2026-10-29 · Judge reason-first 输出顺序校准](development/experiments/2026-10-29-judge-reason-first.md)
+- [2026-10-29 · c13 开放范围补充检索问题分析](development/experiments/2026-10-29-c13-open-scope-retrieval-analysis.md)
 - [032 · 判定总 Token 用量展示（待人工验收）](development/slices/032-judge-token-usage-visibility.md)
 - [033 · 异步 GitHub 交付与依赖门禁（已完成）](development/slices/033-async-github-delivery-gate.md)
 - [034 · c2-001 指标归属金标准修订（待确认）](development/slices/034-c2-metric-attribution.md)
