@@ -7,7 +7,8 @@ from app.evaluation.evidence import JudgeInputPacket
 from app.providers.chat import ChatMessage
 
 JUDGE_PROMPT_V2_VERSION = "judge-rubric-v2"
-JUDGE_PROMPT_VERSION = "judge-rubric-v3"
+JUDGE_PROMPT_V3_VERSION = "judge-rubric-v3"
+JUDGE_PROMPT_VERSION = "judge-rubric-v4"
 
 JUDGE_V2_SYSTEM_PROMPT = """<role>
 你是评测判官。每次只判断一个 criterion 是否被 answer 满足。
@@ -43,7 +44,7 @@ criterion.rule_text 是唯一判定标准。
 </output>
 """
 
-JUDGE_SYSTEM_PROMPT = """<role>
+JUDGE_V3_SYSTEM_PROMPT = """<role>
 你是评测判官。每次只判断一个 criterion 是否被 answer 满足。
 </role>
 
@@ -81,14 +82,58 @@ criterion.rule_text 是唯一判定标准。
 </output>
 """
 
+JUDGE_SYSTEM_PROMPT = """<role>
+你是评测判官。每次只判断一个 criterion 是否被 answer 满足。
+</role>
+
+<criterion_rules>
+criterion.rule_text 是唯一判定标准。
+使用正常语言理解判断同义表达、事实蕴含、遗漏和矛盾，但不得增加 criterion 未写明的条件。
+除非 criterion.rule_text 明确要求内容必须出现在某个表格列、列表项、段落、
+脚注或其他位置，否则 answer 任意位置的语义等价内容都应计入满足。
+不得因为内容位于表后、补充说明、脚注或相邻段落而判为缺失。
+</criterion_rules>
+
+<decision_order>
+1. 先逐项核对 criterion 的要求以及 answer 中对应的事实，写出可核验的判断理由。
+2. 理由必须明确说明全部要求是否满足；若存在遗漏、矛盾或无法判断，必须在理由中先写明。
+3. 完成理由后，再根据同一段理由选择最终 verdict。
+4. verdict 必须与理由最后一句的结论一致，不得出现理由认定缺少必要内容、verdict 却表示满足的矛盾。
+</decision_order>
+
+<verdict_rules>
+对 R 判定项：
+- satisfied：答案满足该判定标准；
+- unsatisfied：答案明确违反、遗漏或错误满足该判定标准；
+- unknown：现有输入不足以可靠判断。
+
+对 X 判定项：
+- violated：答案明确出现该边界违规；
+- not_violated：现有答案没有出现该违规；
+- unknown：现有输入不足以可靠判断。
+</verdict_rules>
+
+<output>
+只输出一个 JSON 对象，不输出 Markdown、代码围栏或额外说明。
+字段必须按以下顺序输出：
+{
+  "reason": "可核验的简短理由，先明确说明是否缺少必要内容",
+  "verdict": "satisfied | unsatisfied | unknown | violated | not_violated"
+}
+</output>
+"""
+
 JUDGE_V2_PROMPT_HASH = hashlib.sha256(JUDGE_V2_SYSTEM_PROMPT.encode()).hexdigest()
+JUDGE_V3_PROMPT_HASH = hashlib.sha256(JUDGE_V3_SYSTEM_PROMPT.encode()).hexdigest()
 JUDGE_PROMPT_HASH = hashlib.sha256(JUDGE_SYSTEM_PROMPT.encode()).hexdigest()
 JUDGE_SYSTEM_PROMPTS = {
     JUDGE_PROMPT_V2_VERSION: JUDGE_V2_SYSTEM_PROMPT,
+    JUDGE_PROMPT_V3_VERSION: JUDGE_V3_SYSTEM_PROMPT,
     JUDGE_PROMPT_VERSION: JUDGE_SYSTEM_PROMPT,
 }
 JUDGE_PROMPT_HASHES = {
     JUDGE_PROMPT_V2_VERSION: JUDGE_V2_PROMPT_HASH,
+    JUDGE_PROMPT_V3_VERSION: JUDGE_V3_PROMPT_HASH,
     JUDGE_PROMPT_VERSION: JUDGE_PROMPT_HASH,
 }
 SUPPORTED_JUDGE_PROMPT_VERSIONS = frozenset(JUDGE_SYSTEM_PROMPTS)

@@ -9,6 +9,7 @@ from sqlalchemy import delete, func, select
 
 from app.evaluation.cases import load_design_case_seeds
 from app.evaluation.database import EvaluationDatabase
+from app.evaluation.judge_prompt import JUDGE_PROMPT_VERSION
 from app.evaluation.models import (
     AttemptView,
     CaseCatalogItem,
@@ -1311,7 +1312,7 @@ class EvaluationRepository:
         seeds: list[CaseSeed],
         reviewed_at: datetime,
     ) -> None:
-        """创建只向主判官发送答案和 criterion 的 active revision v2。"""
+        """创建最小判官输入契约 v2，并使用当前 Judge rubric。"""
 
         configured_revision_ids: list[str] = []
         for seed in seeds:
@@ -1324,7 +1325,7 @@ class EvaluationRepository:
             for criterion in seed.criteria:
                 checker = seed.case_id == "cf-003" and criterion.criterion_id.endswith("-r1")
                 evaluator = "checker" if checker else "llm_judge"
-                evaluator_ref = "truncation_declared" if checker else "judge-rubric-v2"
+                evaluator_ref = "truncation_declared" if checker else JUDGE_PROMPT_VERSION
                 revision_id = (
                     f"ccr_{seed.case_id.replace('-', '_')}_"
                     f"{criterion.criterion_id.rsplit('-', 1)[-1]}_minimal_judge_v2"
@@ -1346,9 +1347,10 @@ class EvaluationRepository:
                             "evaluator": evaluator,
                             "evaluator_ref": evaluator_ref,
                             "judge_ready": "minimal-v2",
+                            "rubric_version": JUDGE_PROMPT_VERSION,
                         }
                     ),
-                    change_note="主判官最小输入 v2：修正设计表分区标题被并入规则文本。",
+                    change_note=(f"主判官最小输入契约 v2；默认使用 {JUDGE_PROMPT_VERSION}。"),
                     review_status="active",
                     reviewer="023A-seed",
                     reviewed_at=reviewed_at,
@@ -1386,9 +1388,10 @@ class EvaluationRepository:
                             "case": seed.content_hash,
                             "criteria": criterion_hashes,
                             "judge_ready": "minimal-v2",
+                            "rubric_version": JUDGE_PROMPT_VERSION,
                         }
                     ),
-                    change_note="主判官最小输入 v2，修正规则文本中的分区标题污染。",
+                    change_note=(f"主判官最小输入契约 v2，默认使用 {JUDGE_PROMPT_VERSION}。"),
                     review_status="active",
                     reviewer="023A-seed",
                     reviewed_at=reviewed_at,

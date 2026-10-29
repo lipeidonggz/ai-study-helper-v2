@@ -586,7 +586,7 @@ def test_llm_judge_builds_whitelist_input_and_judgments(tmp_path: Path) -> None:
         )
         assert all(
             invocation.input_json
-            and json.loads(invocation.input_json)["prompt_version"] == "judge-rubric-v2"
+            and json.loads(invocation.input_json)["prompt_version"] == "judge-rubric-v4"
             for judgment in revision.judgments
             for invocation in judgment.invocations
         )

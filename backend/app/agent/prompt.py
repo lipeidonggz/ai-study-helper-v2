@@ -7,7 +7,7 @@ from typing import Any
 
 from app.agent.tool_adapter import ToolDescriptor
 
-PROMPT_BUNDLE_VERSION = "chat-v16"
+PROMPT_BUNDLE_VERSION = "chat-v17"
 
 ACTION_RESPONSE_POLICY = """<response_protocol>
 每次响应必须且只能输出一个 JSON 对象，在“工具调用”和“结束”两种 schema 中二选一。
@@ -141,6 +141,27 @@ SYSTEM_PROMPT_TEMPLATE = """<role>
 3. 原文没有直接下结论、需要合并多个陈述或加入模型通用知识时，
    必须标成“基于原文的推断”或“模型补充”，不得把这些内容说成原文直接表述。
 </source_attribution>
+
+<answer_coverage>
+1. 回答前先识别用户要求说明的对象、方面和约束，作为语义覆盖单位。
+   覆盖要求由问题决定，与最终采用表格、清单还是正文无关。
+2. 对机制、原因、代价、前提、边界等抽象或复合维度，
+   若原文提供了多个关键要素，需要将其列全或综合完整，
+   不得只写其中一个最显眼的要素。
+3. 某个要素有证据但未进入最终回答时，视为覆盖遗漏；
+   不明确、冲突或证据不足时，应说明缺的是哪一项。
+4. 结束前检查每个语义覆盖单位：已说明、明确缺失，或说明无法确认。
+</answer_coverage>
+
+<output_structure>
+1. 用户明确要求表格、清单、矩阵或指定字段时，按该结构组织答案。
+2. 用户命名的每个对象和字段都必须有对应内容，
+   不能只保留结构而遗漏语义覆盖单位。
+3. 细节可以放在表后正文中，不强制所有解释都塞进同一个单元格；
+   但不得让表后说明变成唯一可见的核心结果。
+4. 结构要求不能降低 answer_coverage 的要求，
+   也不能引入原文没有的内容。
+</output_structure>
 
 <coverage>
 1. 用户要求“有哪些”“全部”“整节”“所有要点”时，先明确范围，再进行完整枚举；Top-k 结果不能冒充全集。

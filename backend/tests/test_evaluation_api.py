@@ -61,7 +61,7 @@ def test_evaluation_api_exposes_seeded_suite_without_product_routes(
                 headers={"x-launch-token": TOKEN},
             )
             assert prompt.status_code == 200
-            assert prompt.json()["version"] == "judge-rubric-v3"
+            assert prompt.json()["version"] == "judge-rubric-v4"
             citation_prompt = await client.get(
                 "/api/eval/citation-prompt",
                 headers={"x-launch-token": TOKEN},

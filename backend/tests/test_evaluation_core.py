@@ -461,11 +461,18 @@ def test_minimal_judge_seed_routes_semantic_and_truncation_criteria(
     c1 = next(case for case in active_suite.cases if case.case_id == "c1-001")
     cf3 = next(case for case in active_suite.cases if case.case_id == "cf-003")
     assert all(criterion.evaluator == "llm_judge" for criterion in c1.criteria)
+    assert all(
+        criterion.evaluator_ref == "judge-rubric-v4"
+        for case in active_suite.cases
+        for criterion in case.criteria
+        if criterion.evaluator == "llm_judge"
+    )
     assert len(cf3.criteria) == 2
     assert [criterion.title for criterion in cf3.criteria] == ["截断事实", "截断声明"]
     assert cf3.criteria[0].evaluator == "checker"
     assert cf3.criteria[0].evaluator_ref == "truncation_declared"
     assert cf3.criteria[1].evaluator == "llm_judge"
+    assert cf3.criteria[1].evaluator_ref == "judge-rubric-v4"
 
 
 def test_runner_pauses_resumes_and_seals_at_attempt_boundary(
