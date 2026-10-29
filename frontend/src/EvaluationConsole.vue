@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import { fetchWithTimeout } from "./api";
+import { renderChatMarkdown } from "./chat-markdown";
 import TraceArtifactContentViewer from "./TraceArtifactContentViewer.vue";
 import TraceDetailViewer from "./TraceDetailViewer.vue";
 import type { TraceArtifact, TraceDetail } from "./trace";
@@ -1724,6 +1725,12 @@ const matrixJudgmentQuestion = computed(() => {
     caseById.value.get(group.caseRevisionId)?.question ??
     "问题原文不可用"
   );
+});
+
+/** 与产品问答正文复用同一安全 Markdown 渲染入口。 */
+const matrixJudgmentAnswerHtml = computed(() => {
+  const answer = matrixJudgmentGroup.value?.answer;
+  return answer ? renderChatMarkdown(answer, new Map()) : "";
 });
 
 const hasOpenMatrixModal = computed(
@@ -5855,7 +5862,12 @@ onBeforeUnmount(() => {
             </p>
             <details class="eval-answer-view">
               <summary>查看答案</summary>
-              <pre>{{ matrixJudgmentGroup.answer || "无答案" }}</pre>
+              <div
+                v-if="matrixJudgmentGroup.answer"
+                class="chat-answer-text eval-answer-markdown"
+                v-html="matrixJudgmentAnswerHtml"
+              />
+              <p v-else class="eval-empty">无答案</p>
             </details>
             <section class="eval-modal-section">
               <h4>R／X 判定</h4>
@@ -7686,18 +7698,14 @@ onBeforeUnmount(() => {
   font-weight: 700;
 }
 
-.eval-answer-view pre {
-  max-height: 240px;
+.eval-answer-markdown {
+  max-height: 420px;
   overflow: auto;
   margin: 7px 0 0;
   border-radius: 7px;
-  padding: 8px;
-  color: #48574d;
+  padding: 12px 14px;
   background: #fff;
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-  font-size: 0.7rem;
-  line-height: 1.55;
-  white-space: pre-wrap;
+  scrollbar-gutter: stable;
 }
 
 .eval-rule-badge {
