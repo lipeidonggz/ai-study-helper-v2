@@ -8,7 +8,7 @@
 
 - 阶段：实现阶段，027 claim-aware 引用标注已完成，028 评测失败分类拆分已实现。
 - 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付、检索与 Agent 运行链、流式问答、本地 trace 诊断和逐 criterion 评测判定已实现。
-- 当前工作：全部 active Judge criteria 已迁移到 v4；c14 在 `chat-v16` 下为 9/10，c15 使用 `chat-v17` 的通用语义覆盖与输出结构规则后达到 9/10。c13 原题恢复与千篇规模检索链路登记为 [BL-0012](development/backlog.md)；全量用例回归待统一执行。
+- 当前工作：全部 active Judge criteria 已迁移到 v4；c14 为 9/10，c15 达到 9/10；cf-001 收敛为“目标范围可见”并以 10/10 通过；cf-002 新数据 10/10 通过，稳定同时说明能力边界和文档指代不明。c13 原题恢复与千篇规模检索链路登记为 [BL-0012](development/backlog.md)；全量用例回归待统一执行。
 
 ## 设计基线
 
@@ -137,6 +137,8 @@
 - [2026-10-29 · c14 新数据基线](development/experiments/2026-10-29-c14-fresh-baseline.md)
 - [2026-10-29 · c15 新数据基线](development/experiments/2026-10-29-c15-fresh-baseline.md)
 - [2026-10-29 · active Judge v3 全量迁移](development/experiments/2026-10-29-judge-v3-active-migration.md)
+- [2026-10-29 · cf-001 新数据基线](development/experiments/2026-10-29-cf001-fresh-baseline.md)
+- [2026-10-29 · cf-002 新数据基线](development/experiments/2026-10-29-cf002-fresh-baseline.md)
 - [032 · 判定总 Token 用量展示（待人工验收）](development/slices/032-judge-token-usage-visibility.md)
 - [033 · 异步 GitHub 交付与依赖门禁（已完成）](development/slices/033-async-github-delivery-gate.md)
 - [034 · c2-001 指标归属金标准修订（待确认）](development/slices/034-c2-metric-attribution.md)
@@ -166,6 +168,8 @@
 - [058 · Judge v4 位置无关语义判定（已完成）](development/slices/058-judge-v4-location-neutrality.md)
 - [059 · c15 用户监督能力语义校准（已完成）](development/slices/059-c15-supervision-semantics.md)
 - [060 · 语义覆盖与输出结构分离（已完成）](development/slices/060-answer-coverage-and-structure.md)
+- [061 · cf-001 透明目标选择（已完成）](development/slices/061-cf001-transparent-target-selection.md)
+- [062 · retired case revision 的历史判定读取（已完成）](development/slices/062-retired-case-revision-history.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库

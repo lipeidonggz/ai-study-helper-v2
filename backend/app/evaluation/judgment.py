@@ -342,9 +342,11 @@ class EvaluationJudgmentService:
         run = self._repository.get_run(run_id)
         if run.status not in {"sealed_complete", "sealed_partial", "canceled"}:
             raise ValueError("only terminal or canceled runs can be judged")
+        requested_overrides = dict(request.case_revision_overrides)
+        effective_overrides = requested_overrides or self._latest_active_case_overrides(run)
         effective_run, effective_cases, _case_revision_map = self._apply_case_revision_overrides(
             run,
-            request.case_revision_overrides,
+            effective_overrides,
         )
         selected_judge_versions = sorted(
             {
@@ -389,7 +391,7 @@ class EvaluationJudgmentService:
                 "token_budget": request.token_budget,
                 "request_budget": request.request_budget,
                 "attempt_timeout_seconds": request.attempt_timeout_seconds,
-                "case_revision_overrides": request.case_revision_overrides,
+                "case_revision_overrides": effective_overrides,
             }
             session.add(
                 EvalEvaluationRevisionRow(
@@ -421,6 +423,24 @@ class EvaluationJudgmentService:
         self._tasks[revision_id] = task
         task.add_done_callback(lambda _task: self._tasks.pop(revision_id, None))
         return self.get_revision(revision_id)
+
+    def _latest_active_case_overrides(self, run: RunView) -> dict[str, str]:
+        """把未显式指定 revision 的冻结 attempts 映射到当前 active revision。"""
+
+        original_revision_ids = list(
+            dict.fromkeys(attempt.case_revision_id for attempt in run.attempts)
+        )
+        original_cases = self._repository.get_case_revisions(original_revision_ids)
+        active_revision_by_case = {
+            item.case_id: item.active_revision_id
+            for item in self._repository.list_case_catalog()
+            if item.active_revision_id is not None
+        }
+        return {
+            case.case_id: active_revision_by_case[case.case_id]
+            for case in original_cases
+            if case.case_id in active_revision_by_case
+        }
 
     async def shutdown(self) -> None:
         """关闭判定后台任务；重启恢复按 incomplete 处理。"""
@@ -578,6 +598,7 @@ class EvaluationJudgmentService:
             effective_run, effective_cases, case_revision_map = self._apply_case_revision_overrides(
                 run,
                 config.get("case_revision_overrides", {}),
+                allow_retired=True,
             )
             try:
                 plan_cases = self._repository.get_plan(run.plan_id).cases
@@ -673,8 +694,15 @@ class EvaluationJudgmentService:
         self,
         run: RunView,
         overrides: dict[str, str],
+        *,
+        allow_retired: bool = False,
     ) -> tuple[RunView, dict[str, CaseRevisionView], dict[str, str]]:
-        """把冻结 attempt 投影到可选的新 case revision，不改变原执行事实。"""
+        """把冻结 attempt 投影到 case revision，不改变原执行事实。
+
+        新建判定只允许使用 reviewed／active revision。读取已写入判定的历史
+        revision 时还必须允许 retired，因为 override 是当时的冻结事实，不能
+        因后续 revision 生效而让历史记录失去可读性。
+        """
 
         original_revision_ids = list(
             dict.fromkeys(attempt.case_revision_id for attempt in run.attempts)
@@ -701,7 +729,10 @@ class EvaluationJudgmentService:
             target = target_cases[target_revision_id]
             if target.case_id != case_id:
                 raise ValueError(f"case revision override belongs to another case: {case_id}")
-            if target.review_status not in {"reviewed", "active"}:
+            allowed_review_statuses = {"reviewed", "active"}
+            if allow_retired:
+                allowed_review_statuses.add("retired")
+            if target.review_status not in allowed_review_statuses:
                 raise ValueError(f"override case revision is not reviewable: {target_revision_id}")
 
         revision_map = {

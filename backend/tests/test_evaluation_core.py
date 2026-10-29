@@ -249,6 +249,15 @@ def test_design_case_seed_is_complete_and_deterministic() -> None:
     }
     c1 = next(case for case in first if case.case_id == "c1-001")
     assert c1.criteria[1].rule_text.endswith("没有说明其所属类别，不算满足。")
+    cf1 = next(case for case in first if case.case_id == "cf-001")
+    assert (
+        cf1.question == "刚才那篇 OpenAI 的、那篇 Anthropic 的，它们对 agent 工程怎么做有什么看法？"
+    )
+    assert len(cf1.criteria) == 1
+    assert "答案必须让用户能够判断当前回答实际采用了哪些文档" in cf1.criteria[0].rule_text
+    assert "一侧采用多篇相关文档可以接受" in cf1.criteria[0].rule_text
+    assert "是否提问、是否等待用户回复" in cf1.criteria[0].rule_text
+    assert "不要求使用固定措辞" in cf1.criteria[0].rule_text
     assert not any(
         criterion.rule_text.endswith(" 边界") for case in first for criterion in case.criteria
     )

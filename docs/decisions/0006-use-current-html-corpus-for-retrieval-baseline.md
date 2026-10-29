@@ -49,7 +49,7 @@ OpenAI《A Practical Guide to Building Agents》不进入当前基线。未来�
 ## 对用例的影响
 
 - `cf-003` 的“四篇要点”改为当前库内四篇：Anthropic《Building Effective Agents》、OpenAI《New tools for building agents》、OpenAI《Harness engineering》、Anthropic《How we contain Claude》。
-- `cf-001` 不再依赖“多篇 OpenAI 文档都提到人在回路”，改为跨 OpenAI／Anthropic 的开放式工程观点消歧；环境仍有多篇候选，题目仍无法唯一确定。
+- `cf-001` 改为跨 OpenAI／Anthropic 的指代消歧：题面使用“刚才那篇”，但会话没有对应前文。答案必须让用户看见实际采用的文档和推断依据；为回答宽泛主题，一侧采用多篇相关文档可以接受。
 - 以《How we contain Claude》和《Harness engineering》为原文锚点的主用例保持不变，这两篇都在当前快照中。
 
 ## 后果
