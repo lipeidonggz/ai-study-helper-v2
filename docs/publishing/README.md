@@ -28,3 +28,4 @@
 - [10 · DeepSeek RAG 实战：为问答系统实现可验证的可信引用（附源码）](./10-deepseek-rag-trustworthy-citations.md)
 - [11 · RAG 可信引用评测纠偏：为什么引用语义支持不应成为绝对红线](./11-rag-citation-evaluation-redline.md)
 - [12 · 提示词不是“看起来清楚”就够了：如何让具体模型在任务上与你对齐](./12-prompt-semantic-alignment.md)
+- [13 · 澄清不是追问：好的 Agent 应该让“不精确”变得可见、可纠正](./13-clarification-is-not-a-follow-up-question.md)

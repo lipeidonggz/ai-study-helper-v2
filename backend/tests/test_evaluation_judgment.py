@@ -1657,7 +1657,6 @@ def test_frozen_run_can_be_rejudged_with_case_revision_override(tmp_path: Path) 
                 concurrency=1,
                 token_budget=1_000_000,
                 judge_review_confirmed=True,
-                case_revision_overrides={"c1-001": replacement.revision_id},
             ),
         )
         revision = await _wait_revision(service, started.revision_id)
@@ -1675,6 +1674,32 @@ def test_frozen_run_can_be_rejudged_with_case_revision_override(tmp_path: Path) 
         )
         original_revision = repository.get_case_revisions([original_case.active_revision_id])[0]
         assert original_revision.revision_number < replacement.revision_number
+
+        repository.review_case_revision(
+            replacement.revision_id,
+            review_status="retired",
+            reviewer="reviewer-a",
+        )
+        historical = service.get_revision(revision.revision_id)
+        assert historical.status == "complete"
+        assert (
+            historical.result_matrix.categories[0].cases[0].case_revision_id
+            == replacement.revision_id
+        )
+        assert any(
+            item.revision_id == revision.revision_id
+            for item in service.list_run_revisions("run_case_revision_override")
+        )
+        with pytest.raises(ValueError, match="override case revision is not reviewable"):
+            await service.start(
+                "run_case_revision_override",
+                StartJudgmentRequest(
+                    concurrency=1,
+                    token_budget=1_000_000,
+                    judge_review_confirmed=True,
+                    case_revision_overrides={"c1-001": replacement.revision_id},
+                ),
+            )
 
     asyncio.run(scenario())
 
@@ -2622,7 +2647,7 @@ def test_request_budget_exhaustion_keeps_judgments_pending(tmp_path: Path) -> No
     asyncio.run(scenario())
 
 
-def test_judging_rejects_run_bound_to_legacy_prompt_revision(tmp_path: Path) -> None:
+def test_judging_rejects_explicit_retired_case_revision(tmp_path: Path) -> None:
     async def scenario() -> None:
         database = EvaluationDatabase(tmp_path / "eval")
         repository = EvaluationRepository(database)
@@ -2649,13 +2674,14 @@ def test_judging_rejects_run_bound_to_legacy_prompt_revision(tmp_path: Path) -> 
             chat_provider_factory=lambda _key: FakeChatProvider(["unused"]),
         )
 
-        with pytest.raises(ValueError, match="different judge prompt revision"):
+        with pytest.raises(ValueError, match="override case revision is not reviewable"):
             await service.start(
                 "run_judge_legacy_prompt",
                 StartJudgmentRequest(
                     concurrency=1,
                     token_budget=1_000_000,
                     judge_review_confirmed=True,
+                    case_revision_overrides={"c1-001": "cr_c1_001_selfcontained_v1"},
                 ),
             )
 
