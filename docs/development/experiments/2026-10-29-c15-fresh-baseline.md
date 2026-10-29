@@ -59,8 +59,68 @@ R3 当前要求三种模式的威胁模型与隔离边界，其中 Cowork 部分
 
 在确认前不修改 c15 判据、提示词或重跑 Agent。
 
+## 全量 Judge v3 迁移后重判
+
+全部 active LLM judge criteria 迁移到 v3 后，对同一 run 做两次冻结重判：
+
+- 新 active case revision：`cr_c15_001_8a87e56d8461`
+- 第一次 judgment：`evalrev_8c7ba13b6f0f4cfab6ebe1e05134b3f1`
+- 第二次 judgment：`evalrev_defbeac29dc84886b6b9e1a05b6ba850`
+- 两次 case 结果均为 5/10
+- 第一次 criterion：54 pass、6 fail
+- 第二次 criterion：55 pass、5 fail
+
+两次 v3 都不是 v2 的 8/10，说明 c15 对 Judge 版本敏感。具体差异见 [Judge v3 全量迁移实验](2026-10-29-judge-v3-active-migration.md)。
+
+## Judge v4 与 R3 语义校准
+
+- v4 位置无关重判：5/10，criterion 55 pass、5 fail。
+- 最终 R3 监督能力语义 revision：`cr_c15_001_8e3e924a477c`
+- Judgment：`evalrev_7746eae747884557858ef36efbd6b49a`
+- criterion：56 pass、4 fail、0 pending
+- case：7 pass、3 fail，未达到 K=9
+
+最终 3 个失败：
+
+- `b114e9e0...`：R3 缺少 Cowork 用户监督能力假设；
+- `40833a6c...`：同类 R3 缺失；
+- `7056ba70...`：R2 缺少 Claude Code 本地运行位置，R3 缺少监督能力假设。
+
+R4 的位置误杀已消除；剩余问题属于 Agent 对复合维度的覆盖不完整。
+
+## chat-v17 通用覆盖规则
+
+新增：
+
+- `answer_coverage`：识别问题要求的语义覆盖单位；机制、原因、代价、前提、边界等复合维度有多个关键要素时不得只写一个显眼点；
+- `output_structure`：用户指定表格、清单、矩阵或字段时保持对应结构，但细节可以放在表后。
+
+固定现场：
+
+- prompt bundle：`chat-v17`
+- prompt hash：`ceba17252fd6ff920caebd8c51c6b83b3d37bf1b0786d5c6090ff835c5c74a93`
+- run：`run_3703aae0e8a947bb8368868259364d64`
+- Agent：10/10 succeeded，0 infrastructure failure
+- model calls：60
+- input tokens：424,180
+- output tokens：38,943
+
+首次判定 `evalrev_09e74132086c449bb13db4ff95a35263` 为 58 pass、1 fail、1 pending。pending 来自判官未返回合法 criterion 结果，不是 Agent 失败。
+
+对同一 run 第二次重判：
+
+- Judgment revision：`evalrev_563a075780124887b5d3e0cacceac71e`
+- criterion：59 pass、1 fail、0 pending
+- case：9/10，达到 K=9
+- X1/X3：全部通过
+
+唯一失败：
+
+- `attempt_20014899...`：R3 只写了 Cowork 防止模型不对齐和挂载/VM 边界，没有写不能依赖用户判断 bash 风险，因此不能把 HITL 审批作为可靠安全边界。
+
+结果从旧答案的 7/10 提升到新答案的 9/10，但没有证明所有复合维度都能稳定覆盖。
+
 ## 复现
 
 - 执行脚本：`backend/.runtime/run_case_fresh.py --case-id c15-001`
 - 结果文件：`backend/.runtime/c15-fresh-result.json`
-
