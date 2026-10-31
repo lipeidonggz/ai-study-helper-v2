@@ -148,7 +148,7 @@
 - 启动方式：GitHub API 创建固定 commit ref。
 - 用户操作序列：打开对外文章 → 点击实验链接 → 查看固定 commit 中的代码与记录。
 - 预期结果：链接可打开，内容与发布时快照一致，且不在 `main`。
-- 实际结果：远端 `research/065-topic-coverage-20261031` 指向 `c7d69ba97a55395431b406e4893ed70fe79f5f6a`，`research/066-section-routing-20261031` 指向 `528ff57d1f7fa85182afcfca745cbc5b9f740498`；066 的父提交是远端 065。annotated tag `research-topic-coverage-2026-10-31` 已创建并回读。文章发布于远端 `docs/topic-coverage-article`，commit 为 `5dd40897596c258b9a8c5b19743f77704722875e`，所有研究链接均返回 HTTP 200。
+- 实际结果：远端 `research/065-topic-coverage-20261031` 与 `research/066-section-routing-20261031` 均已创建并回读；066 的父提交是远端 065。annotated tag `research-topic-coverage-2026-10-31` 已创建。文章发布于远端 `docs/topic-coverage-article`，当前 commit 为 `8c8e9b6be9c42b0abd8ea58d28574fb5872dcd3c`，所有研究及站内引用链接均返回 HTTP 200。
 
 ### 失败探针
 
