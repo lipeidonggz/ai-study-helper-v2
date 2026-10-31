@@ -113,7 +113,7 @@
 - [x] 065 研究提交已创建。
 - [x] 066 研究提交建立在 065 之上。
 - [x] 远端研究分支和 tag 已创建并回读。
-- [ ] 文章使用固定 commit 链接。
+- [x] 文章使用固定 commit 链接。
 - [x] 变更清单不含大型运行产物。
 
 ## 决策账本
@@ -148,7 +148,7 @@
 - 启动方式：GitHub API 创建固定 commit ref。
 - 用户操作序列：打开对外文章 → 点击实验链接 → 查看固定 commit 中的代码与记录。
 - 预期结果：链接可打开，内容与发布时快照一致，且不在 `main`。
-- 实际结果：远端 `research/065-topic-coverage-20261031` 指向 `c7d69ba97a55395431b406e4893ed70fe79f5f6a`，`research/066-section-routing-20261031` 指向 `4085abe2e7ed8565fb1facdb0daf59190527077c`；066 的父提交是远端 065。annotated tag `research-topic-coverage-2026-10-31` 已创建并回读。
+- 实际结果：远端 `research/065-topic-coverage-20261031` 指向 `c7d69ba97a55395431b406e4893ed70fe79f5f6a`，`research/066-section-routing-20261031` 指向 `528ff57d1f7fa85182afcfca745cbc5b9f740498`；066 的父提交是远端 065。annotated tag `research-topic-coverage-2026-10-31` 已创建并回读。文章发布于远端 `docs/topic-coverage-article`，commit 为 `5dd40897596c258b9a8c5b19743f77704722875e`，所有研究链接均返回 HTTP 200。
 
 ### 失败探针
 
