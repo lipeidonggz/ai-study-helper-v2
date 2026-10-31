@@ -1199,7 +1199,7 @@ def test_protected_agent_api_runs_with_injected_providers(tmp_path: Path) -> Non
     assert result["answer"] == "API 运行成功"
     assert result["answer_completeness"] == "complete"
     assert result["limitations"] == []
-    assert result["prompt_bundle_version"] == "chat-v17"
+    assert result["prompt_bundle_version"] == "chat-v19"
     assert result["observation_token_counter_version"] == "chat-budget-conservative-v1"
     assert result["citation_annotations"]["status"] == "not_applicable"
     assert result["citation_annotation_model_calls"] == 0

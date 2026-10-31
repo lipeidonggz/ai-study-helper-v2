@@ -8,12 +8,13 @@ import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from typing import Literal
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app import __version__
 from app.agent.factory import AgentExecutionService
@@ -48,8 +49,8 @@ from app.ingestion.models import (
 )
 from app.ingestion.service import IngestionService
 from app.ingestion.source import UrlFetcher
-from app.providers.chat import ChatProvider
-from app.providers.embeddings import EmbeddingProvider
+from app.providers.chat import ChatProvider, DeepSeekChatProvider
+from app.providers.embeddings import DashScopeEmbeddingProvider, EmbeddingProvider
 from app.settings.models import (
     ChatProviderTestResult,
     ModelSettingsResponse,
@@ -62,6 +63,8 @@ from app.settings.models import (
 from app.settings.runtime_service import RuntimeSettingsService
 from app.settings.service import ModelSettingsService
 from app.storage.credentials import (
+    CHAT_API_KEY_USERNAME,
+    EMBEDDING_API_KEY_USERNAME,
     CredentialStore,
     WindowsCredentialStore,
 )
@@ -75,6 +78,10 @@ from app.tasks.service import BackgroundTaskService
 from app.tracing.catalog import TraceCatalog, TraceInvalidError, TraceNotFoundError
 from app.tracing.models import TraceDetailRecord, TraceListItem
 from app.tracing.store import TraceStore
+from app.wiki.build_models import WikiBuildResult, WikiCompilationResult
+from app.wiki.build_service import WikiBuildService
+from app.wiki.compilation_service import WikiCompilationService
+from app.wiki.errors import WikiCompilationError
 from app.workspace.models import ResetWorkspaceRequest, ResetWorkspaceResponse
 from app.workspace.service import WorkspaceResetService
 
@@ -94,6 +101,16 @@ class RuntimeResponse(BaseModel):
     version: str
     pid: int
     uptime_seconds: float
+
+
+class WikiCompileRequest(BaseModel):
+    """同步触发一次 Wiki 全量或增量编译。"""
+
+    snapshot_id: str | None = None
+    base_build_id: str | None = None
+    granularity: Literal["focused", "standard", "exhaustive"] = "standard"
+    materialize_pages: bool = True
+    map_parallel: int = Field(default=1, ge=1, le=8)
 
 
 ALLOWED_ORIGINS = [
@@ -164,6 +181,12 @@ def create_app(
         RuntimeSettingsService(StorageDatabase(resolved_data_root))
         if resolved_data_root is not None
         else None
+    )
+    wiki_compilation_service = (
+        WikiCompilationService(resolved_data_root) if resolved_data_root is not None else None
+    )
+    wiki_build_service = (
+        WikiBuildService(resolved_data_root) if resolved_data_root is not None else None
     )
     agent_stream_service = AgentRunStreamService()
     trace_store = TraceStore(resolved_data_root) if resolved_data_root is not None else None
@@ -242,6 +265,42 @@ def create_app(
 
         return JSONResponse(
             status_code=failure.http_status,
+            content={
+                "error": {
+                    "code": failure.code,
+                    "message": failure.message,
+                    "retryable": failure.retryable,
+                }
+            },
+        )
+
+    @app.exception_handler(WikiCompilationError)
+    async def wiki_failure_handler(
+        _request: Request,
+        failure: WikiCompilationError,
+    ) -> JSONResponse:
+        """把 Wiki 领域错误转换为稳定 API 错误，不暴露模型或文件细节。"""
+
+        http_status = 422
+        if failure.retryable:
+            http_status = 503
+        elif failure.code in {
+            "wiki_artifact_invalid",
+            "wiki_page_invalid",
+            "wiki_build_write_failed",
+            "wiki_page_write_failed",
+        }:
+            http_status = 500
+        elif failure.code in {
+            "wiki_build_not_ready_for_snapshot",
+            "wiki_build_not_found",
+            "wiki_topic_not_found",
+            "wiki_page_not_materialized",
+            "wiki_snapshot_mismatch",
+        }:
+            http_status = 409
+        return JSONResponse(
+            status_code=http_status,
             content={
                 "error": {
                     "code": failure.code,
@@ -378,6 +437,92 @@ def create_app(
                 503,
             )
         return collection_service.current()
+
+    @app.post(
+        "/api/wiki/compile",
+        response_model=WikiCompilationResult,
+        dependencies=protected,
+    )
+    async def compile_wiki(request: WikiCompileRequest) -> WikiCompilationResult:
+        """同步编译当前或指定 snapshot 的 Wiki build。"""
+
+        if (
+            wiki_compilation_service is None
+            or wiki_build_service is None
+            or collection_service is None
+        ):
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        snapshot_id = request.snapshot_id
+        if snapshot_id is None:
+            current = collection_service.current()
+            if current is None:
+                raise WikiCompilationError(
+                    "wiki_snapshot_unavailable",
+                    "no active collection snapshot is available",
+                )
+            snapshot_id = current.pointer.snapshot_id
+        chat_key = resolved_credentials.get(CHAT_API_KEY_USERNAME)
+        embedding_key = resolved_credentials.get(EMBEDDING_API_KEY_USERNAME)
+        if not chat_key:
+            raise IngestFailure(
+                "chat_api_key_missing",
+                "configure a chat API key before compiling Wiki",
+                409,
+            )
+        if not embedding_key:
+            raise IngestFailure(
+                "embedding_api_key_missing",
+                "configure an embedding API key before compiling Wiki",
+                409,
+            )
+        chat_provider = (
+            chat_provider_factory(chat_key)
+            if chat_provider_factory is not None
+            else DeepSeekChatProvider(chat_key)
+        )
+        embedding_provider = (
+            embedding_provider_factory()
+            if embedding_provider_factory is not None
+            else DashScopeEmbeddingProvider(embedding_key)
+        )
+        if request.base_build_id is None:
+            return await wiki_compilation_service.compile_full(
+                snapshot_id,
+                chat_provider=chat_provider,
+                embedding_provider=embedding_provider,
+                granularity=request.granularity,
+                materialize_pages=request.materialize_pages,
+                map_parallel=request.map_parallel,
+            )
+        return await wiki_compilation_service.compile_incremental(
+            snapshot_id,
+            chat_provider=chat_provider,
+            embedding_provider=embedding_provider,
+            base_build_id=request.base_build_id,
+            granularity=request.granularity,
+            materialize_pages=request.materialize_pages,
+            map_parallel=request.map_parallel,
+        )
+
+    @app.get(
+        "/api/wiki/current/{snapshot_id}",
+        response_model=WikiBuildResult,
+        dependencies=protected,
+    )
+    async def current_wiki_build(snapshot_id: str) -> WikiBuildResult:
+        """返回与指定 snapshot 匹配的 active Wiki build。"""
+
+        if wiki_build_service is None:
+            raise IngestFailure(
+                "data_root_unavailable",
+                "application data root is not configured",
+                503,
+            )
+        return wiki_build_service.active_for_snapshot(snapshot_id)
 
     @app.get(
         "/api/collections/current/documents/{doc_id}",

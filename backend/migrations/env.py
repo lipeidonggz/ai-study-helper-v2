@@ -8,6 +8,7 @@ from sqlalchemy import engine_from_config, pool
 from app.storage import collection_models as _collection_models  # noqa: F401
 from app.storage import settings_models as _settings_models  # noqa: F401
 from app.storage import task_models as _task_models  # noqa: F401
+from app.storage import wiki_models as _wiki_models  # noqa: F401
 from app.storage.models import Base
 
 config = context.config
