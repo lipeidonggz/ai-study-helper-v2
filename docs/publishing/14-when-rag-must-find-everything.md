@@ -6,7 +6,7 @@
 
 > **适合谁读**：正在做 Agentic RAG、知识库问答、主题研究、长答案检索或 LLM Wiki 的工程师和产品负责人。
 
-> **系列位置**：本文接续 [05 · Agentic RAG 检索侧落地](./05-retrieval-design-to-implementation.md)。那篇讲的是块级工具如何形成可靠的 Agent 检索链路；本篇讨论一个更窄也更难的问题：当块级检索已经能工作，为什么“围绕主题找全”仍然需要另一种知识形态。
+> **系列位置**：本文接续 [05 · Agentic RAG 检索侧落地](https://github.com/lipeidonggz/ai-study-helper-v2/blob/c56571fbc7322956df3125f28a36b127bd4e24b6/docs/publishing/05-retrieval-design-to-implementation.md)。那篇讲的是块级工具如何形成可靠的 Agent 检索链路；本篇讨论一个更窄也更难的问题：当块级检索已经能工作，为什么“围绕主题找全”仍然需要另一种知识形态。
 
 > **代码库**：[lipeidonggz/ai-study-helper-v2](https://github.com/lipeidonggz/ai-study-helper-v2)
 
@@ -32,7 +32,7 @@
 
 而 Wiki 需要额外编译，页面内容经过模型改写，还必须补一条“页面段落 → 原始 block”的回源链。它增加成本、版本和一致性负担，却不是 18 个用例的普遍前提。
 
-[存储与检索策略](../design/05-storage-and-retrieval-strategy.md)因此做了明确取舍：
+[存储与检索策略](https://github.com/lipeidonggz/ai-study-helper-v2/blob/c56571fbc7322956df3125f28a36b127bd4e24b6/docs/design/05-storage-and-retrieval-strategy.md)因此做了明确取舍：
 
 ```text
 先做增强的向量块 + Agentic 检索
@@ -78,7 +78,7 @@
 - `c15-001`：
   > 把Anthropic《How we contain Claude》里的三种隔离模式整理成一张表：模式／产品／机制／威胁模型／代价。
 
-这些问题的共同点是：检索目标可以由一条或几条明确查询表达，相关性排序、局部回查和多轮补充足以解决。完整 18 条用例及其金标准见 [03 · 用例集与金标准](../design/03-cases-and-gold-standard.md)。
+这些问题的共同点是：检索目标可以由一条或几条明确查询表达，相关性排序、局部回查和多轮补充足以解决。完整 18 条用例及其金标准见 [03 · 用例集与金标准](https://github.com/lipeidonggz/ai-study-helper-v2/blob/c56571fbc7322956df3125f28a36b127bd4e24b6/docs/design/03-cases-and-gold-standard.md)。
 
 ---
 
