@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 from pydantic import (
     BaseModel,
@@ -81,6 +81,24 @@ class ToolExecution:
 
 class ToolUnavailableError(Exception):
     """模型请求了白名单之外的工具。"""
+
+
+class AgentToolAdapter(Protocol):
+    """Agent Runtime 可组合使用的一组工具。"""
+
+    @property
+    def descriptors(self) -> list[ToolDescriptor]:
+        """返回当前可用工具说明。"""
+        ...
+
+    @property
+    def contract_version(self) -> str:
+        """返回工具组合的稳定契约版本。"""
+        ...
+
+    async def execute(self, tool_name: str, arguments: dict[str, Any]) -> ToolExecution:
+        """执行一个可用工具。"""
+        ...
 
 
 class _ToolArgs(BaseModel):
@@ -309,6 +327,12 @@ class RetrievalToolAdapter:
 
         return list(self._descriptors.values())
 
+    @property
+    def contract_version(self) -> str:
+        """返回检索工具契约版本。"""
+
+        return TOOL_CONTRACT_VERSION
+
     async def execute(self, tool_name: str, arguments: dict[str, Any]) -> ToolExecution:
         """校验参数并执行一个工具；业务失败作为公共 error payload 返回。"""
 
@@ -421,6 +445,41 @@ class RetrievalToolAdapter:
                 )
             )
         raise AssertionError("known tool dispatch must return")
+
+
+class CompositeToolAdapter:
+    """按工具名把请求路由到多个冻结工具集。"""
+
+    def __init__(self, adapters: list[AgentToolAdapter]) -> None:
+        self._adapters = list(adapters)
+        self._descriptors: list[ToolDescriptor] = []
+        self._routes: dict[str, AgentToolAdapter] = {}
+        for adapter in self._adapters:
+            for descriptor in adapter.descriptors:
+                if descriptor.name in self._routes:
+                    raise ValueError(f"duplicate tool descriptor: {descriptor.name}")
+                self._routes[descriptor.name] = adapter
+                self._descriptors.append(descriptor)
+
+    @property
+    def descriptors(self) -> list[ToolDescriptor]:
+        """返回所有子工具集的冻结描述。"""
+
+        return list(self._descriptors)
+
+    @property
+    def contract_version(self) -> str:
+        """组合版本使用子工具集版本的有序并集。"""
+
+        return "+".join(adapter.contract_version for adapter in self._adapters)
+
+    async def execute(self, tool_name: str, arguments: dict[str, Any]) -> ToolExecution:
+        """将工具调用路由到唯一所属的子工具集。"""
+
+        adapter = self._routes.get(tool_name)
+        if adapter is None:
+            raise ToolUnavailableError(tool_name)
+        return await adapter.execute(tool_name, arguments)
 
 
 def _public_error(

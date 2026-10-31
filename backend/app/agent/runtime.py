@@ -34,6 +34,8 @@ from app.agent.token_counter import (
 )
 from app.agent.tool_adapter import (
     TOOL_CONTRACT_VERSION,
+    AgentToolAdapter,
+    CompositeToolAdapter,
     RetrievalToolAdapter,
     ToolUnavailableError,
 )
@@ -49,6 +51,9 @@ from app.retrieval.hybrid import DEFAULT_HYBRID_RETRIEVAL_PROFILE, HybridRetriev
 from app.retrieval.service import RetrievalFailure, RetrievalReadService, RetrievalSnapshotReader
 from app.tracing.models import TraceMode, TraceStatus
 from app.tracing.store import TraceSession, TraceSpanHandle, TraceStore, new_trace_id
+from app.wiki.build_service import WikiBuildService
+from app.wiki.errors import WikiCompilationError
+from app.wiki.tool_adapter import WikiToolAdapter
 
 AGENT_LOOP_VERSION = "react-structured-v4"
 _PARTIAL_ANSWER_NOTICE = "**内容未完**：本次回答因运行预算限制提前结束，以上内容可能不完整。"
@@ -65,6 +70,9 @@ TOOL_ACTIVITY_LABELS = {
     "list_blocks": "正在读取文档内容",
     "get_blocks": "正在补全原文",
     "scan_term": "正在核对原文",
+    "search_wiki_topics": "正在查看 Wiki 主题入口",
+    "read_wiki_page": "正在读取 Wiki 页面",
+    "get_topic_evidence": "正在读取 Wiki 主题证据",
 }
 
 
@@ -212,6 +220,7 @@ class AgentRuntime:
         retrieval_profile: HybridRetrievalProfile = DEFAULT_HYBRID_RETRIEVAL_PROFILE,
         trace_store: TraceStore | None = None,
         trace_mode: TraceMode = "off",
+        enable_wiki_tools: bool = False,
     ) -> None:
         self._data_root = data_root.resolve()
         self._chat_provider = chat_provider
@@ -222,6 +231,7 @@ class AgentRuntime:
         self._retrieval_profile = retrieval_profile
         self._trace_store = trace_store
         self._trace_mode = trace_mode
+        self._enable_wiki_tools = enable_wiki_tools
 
     async def run(
         self,
@@ -268,15 +278,45 @@ class AgentRuntime:
                             snapshot_status=reader.manifest.status,
                             completeness=reader.completeness,
                         )
-                    adapter = RetrievalToolAdapter(
-                        reader,
-                        self._embedding_provider,
-                        search_profile=self._retrieval_profile,
-                    )
+                    tool_adapters: list[AgentToolAdapter] = [
+                        RetrievalToolAdapter(
+                            reader,
+                            self._embedding_provider,
+                            search_profile=self._retrieval_profile,
+                        )
+                    ]
+                    wiki_status = "disabled"
+                    wiki_build_id: str | None = None
+                    if self._enable_wiki_tools:
+                        try:
+                            wiki_build = WikiBuildService(self._data_root).active_for_snapshot(
+                                reader.snapshot_id
+                            )
+                        except WikiCompilationError:
+                            wiki_status = "not_ready_for_snapshot"
+                        else:
+                            wiki_status = "ready"
+                            wiki_build_id = wiki_build.build_id
+                            tool_adapters.append(
+                                WikiToolAdapter(
+                                    self._data_root,
+                                    snapshot_id=reader.snapshot_id,
+                                    embedding_provider=self._embedding_provider,
+                                )
+                            )
+                    adapter = CompositeToolAdapter(tool_adapters)
+                    if trace_session is not None:
+                        trace_session.set_tool_runtime(
+                            tool_contract_version=adapter.contract_version,
+                            wiki_status=wiki_status,
+                            wiki_build_id=wiki_build_id,
+                        )
                     execution = _AgentGraphExecution(
                         question=normalized_question,
                         reader=reader,
                         adapter=adapter,
+                        wiki_status=wiki_status,
+                        wiki_build_id=wiki_build_id,
                         chat_provider=self._chat_provider,
                         config=self._config,
                         prompt_bundle=self._prompt_bundle,
@@ -468,7 +508,9 @@ class _AgentGraphExecution:
         *,
         question: str,
         reader: RetrievalSnapshotReader,
-        adapter: RetrievalToolAdapter,
+        adapter: AgentToolAdapter,
+        wiki_status: str,
+        wiki_build_id: str | None,
         chat_provider: ChatProvider,
         config: AgentRunConfig,
         prompt_bundle: PromptBundle,
@@ -481,6 +523,8 @@ class _AgentGraphExecution:
         self._question = question
         self._reader = reader
         self._adapter = adapter
+        self._wiki_status = wiki_status
+        self._wiki_build_id = wiki_build_id
         self._chat_provider = chat_provider
         self._config = config
         self._prompt_bundle = prompt_bundle
@@ -502,13 +546,21 @@ class _AgentGraphExecution:
             event_type="snapshot_bound",
             payload={"snapshot_id": self._reader.snapshot_id},
         )
+        wiki_status = AgentEvent(
+            event_type="wiki_status",
+            payload={
+                "status": self._wiki_status,
+                "build_id": self._wiki_build_id,
+            },
+        )
         if self._emit is not None:
             self._emit(run_started)
             self._emit(snapshot_bound)
+            self._emit(wiki_status)
         initial: _AgentGraphState = {
             "question": self._question,
             "history": [],
-            "events": [run_started, snapshot_bound],
+            "events": [run_started, snapshot_bound, wiki_status],
             "pending_action": None,
             "final_answer": None,
             "status": "running",
@@ -2138,6 +2190,7 @@ class _AgentGraphExecution:
         return {
             "snapshot_id": manifest.snapshot_id,
             "completeness": manifest.completeness,
+            "wiki_status": self._wiki_status,
             "failed_documents": [
                 {
                     "doc_id": failure.doc_id,

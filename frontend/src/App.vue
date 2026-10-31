@@ -262,7 +262,14 @@ interface AgentStreamPayload {
   output_source?: "provider" | "estimated";
   sources?: AgentChatSource[];
   annotations?: AgentChatCitation[];
-  status?: "complete" | "pending" | "not_applicable";
+  status?:
+    | "complete"
+    | "pending"
+    | "not_applicable"
+    | "disabled"
+    | "not_ready_for_snapshot"
+    | "ready";
+  build_id?: string | null;
   span_version?: string;
   batch_count?: number;
   batch_version?: string;
@@ -2652,6 +2659,12 @@ function applyAgentStreamEvent(envelope: AgentStreamEnvelope): void {
       break;
     case "snapshot_bound":
       chatSnapshotId.value = payload.snapshot_id ?? chatSnapshotId.value;
+      break;
+    case "wiki_status":
+      if (payload.status === "not_ready_for_snapshot") {
+        chatWarning.value =
+          "Wiki 尚未完成当前知识库的处理，部分主题工具暂时不可用；当前仍会使用原文检索。";
+      }
       break;
     case "activity_changed":
       chatActivity.value = payload.label ?? chatActivity.value;

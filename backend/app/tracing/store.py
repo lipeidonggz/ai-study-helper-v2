@@ -526,6 +526,19 @@ class TraceSession:
         self._snapshot_status = snapshot_status
         self._completeness = completeness
 
+    def set_tool_runtime(
+        self,
+        *,
+        tool_contract_version: str,
+        wiki_status: str,
+        wiki_build_id: str | None,
+    ) -> None:
+        """记录请求实际绑定的工具组合与 Wiki 可用状态。"""
+
+        self._versions["tool_contract_version"] = tool_contract_version
+        self._versions["wiki_status"] = wiki_status
+        self._versions["wiki_build_id"] = wiki_build_id
+
     def finish(
         self,
         *,

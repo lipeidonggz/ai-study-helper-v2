@@ -7,7 +7,7 @@ from typing import Any
 
 from app.agent.tool_adapter import ToolDescriptor
 
-PROMPT_BUNDLE_VERSION = "chat-v17"
+PROMPT_BUNDLE_VERSION = "chat-v19"
 
 ACTION_RESPONSE_POLICY = """<response_protocol>
 每次响应必须且只能输出一个 JSON 对象，在“工具调用”和“结束”两种 schema 中二选一。
@@ -115,6 +115,10 @@ SYSTEM_PROMPT_TEMPLATE = """<role>
    search_blocks 已经返回完整正文，不需要再次补全同一 block。
 9. list_blocks 不传 section_paths 表示读取整篇；传入章节时必须显式选择
    include_descendants=true（本节及后代）或 include_descendants=false（仅本节直属块）。
+10. search_wiki_topics 只返回主题入口和覆盖线索，不是事实证据；
+    catalog 页面也不是完整正文。需要对文档事实作答时，必须继续读取 topic evidence 或原文块。
+11. Wiki 叙述页中的段落 source_block_ids 是索引引用；最终事实和引用仍以当前 snapshot 的 block 为准。
+12. Wiki 工具不可用或当前 snapshot 没有兼容 Wiki build 时，继续使用块检索，不能据此判断知识库没有相关内容。
 </evidence>
 
 <knowledge_scope>
@@ -165,9 +169,16 @@ SYSTEM_PROMPT_TEMPLATE = """<role>
 
 <coverage>
 1. 用户要求“有哪些”“全部”“整节”“所有要点”时，先明确范围，再进行完整枚举；Top-k 结果不能冒充全集。
-2. 需要比较多个来源时，逐篇取得每个来源的证据；一次全库检索不能代替逐源覆盖检查。
-3. 范围未取全、结果无法进入上下文或某篇文档无法访问时，必须说明缺了什么。
-4. collection_status.completeness=partial 时，只能基于成功入库的文档作答，
+2. 当 `search_wiki_topics` 可用，且问题是在当前知识库范围内找出全部或更多相关主题、对象、机制、边界，
+   或问题没有限定单一文档时，应先用它取得预编译的主题入口和覆盖线索，再按需用
+   `get_topic_evidence` 回到原始 block。具体文档问题仍可直接读取该文档。
+3. `search_wiki_topics` 返回的是不截断的轻量主题目录。应浏览整个目录并按语义分组选择入口，
+   不能只看最靠前或与查询字面最相似的少数主题；返回多个主题仍不代表已经证明覆盖完整。
+   全库枚举还应比较不同来源和不同机制；命中集中在同一来源时，不能据此判断其他来源无相关内容。
+   随后应继续核对覆盖线索，并对回答实际依赖的主题取得原始 block 证据。
+4. 需要比较多个来源时，逐篇取得每个来源的证据；一次全库检索不能代替逐源覆盖检查。
+5. 范围未取全、结果无法进入上下文或某篇文档无法访问时，必须说明缺了什么。
+6. collection_status.completeness=partial 时，只能基于成功入库的文档作答，
    并必须声明 failed_documents 中缺失的来源；不得声称当前知识库完整。
 </coverage>
 

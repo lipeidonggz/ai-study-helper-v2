@@ -8,6 +8,7 @@
 
 - 阶段：实现阶段，027 claim-aware 引用标注已完成，028 评测失败分类拆分已实现。
 - 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付、检索与 Agent 运行链、流式问答、本地 trace 诊断和逐 criterion 评测判定已实现。
+- LLM Wiki 初版：069–074 已完成 snapshot topic map、身份账本、topic build/search、topic 叙述页、增量更新和 Agent 三工具接入；真实 c13 的主题 rediscovery 成立，主 Agent 的开放找全效果继续由 BL-0012 跟踪。
 - 当前工作：全部 active Judge criteria 已迁移到 v4；c14 为 9/10，c15 达到 9/10；cf-001 收敛为“目标范围可见”并以 10/10 通过；cf-002 新数据 10/10 通过，稳定同时说明能力边界和文档指代不明。c13 原题恢复与千篇规模检索链路登记为 [BL-0012](development/backlog.md)；全量用例回归待统一执行。
 
 ## 设计基线
@@ -24,6 +25,7 @@
 | [08](design/08-evaluation-console-design.md) | 评测台、诊断与回归 | 已审核 · 实现基线 |
 | [09](design/09-technology-selection.md) | 技术选型与总体架构 | v0.4 · 实现基线 |
 | [10](design/10-document-detail-design.md) | 文档详情页信息架构与数据边界 | 已审核 · 首版实现基线 |
+| [11](design/11-llm-wiki-compilation.md) | LLM Wiki 全库编译、主题台账、页面与回源 | 069–074 初版实现基线已确认 |
 
 01–09 已于 2026-10-20 审核，并作为当前实现基线；03 已于 2026-10-29 完成 c6、c8、c11、c13、c14 和 c15 判据修订并更新为 v0.10，09 已依据 ADR 0004 更新为 v0.4。后续修改必须保留变更原因，同时更新本索引。
 
@@ -132,6 +134,8 @@
 - [2026-10-28 · c11 新数据基线](development/experiments/2026-10-28-c11-fresh-baseline.md)
 - [2026-10-28 · c12 新数据基线](development/experiments/2026-10-28-c12-fresh-baseline.md)
 - [2026-10-29 · c13 新数据基线](development/experiments/2026-10-29-c13-fresh-baseline.md)
+- [2026-10-31 · LLM Wiki 证据地图 c13-003 探索](development/experiments/2026-10-31-llm-wiki-evidence-map-c13.md)
+- [2026-11-01 · LLM Wiki 全库编译与 c13 固定快照验证](development/experiments/2026-11-01-llm-wiki-compilation.md)
 - [2026-10-29 · Judge reason-first 输出顺序校准](development/experiments/2026-10-29-judge-reason-first.md)
 - [2026-10-29 · c13 开放范围补充检索问题分析](development/experiments/2026-10-29-c13-open-scope-retrieval-analysis.md)
 - [2026-10-29 · c14 新数据基线](development/experiments/2026-10-29-c14-fresh-baseline.md)
@@ -170,6 +174,13 @@
 - [060 · 语义覆盖与输出结构分离（已完成）](development/slices/060-answer-coverage-and-structure.md)
 - [061 · cf-001 透明目标选择（已完成）](development/slices/061-cf001-transparent-target-selection.md)
 - [062 · retired case revision 的历史判定读取（已完成）](development/slices/062-retired-case-revision-history.md)
+- [068 · LLM Wiki 证据地图（暂停，转 11 号设计）](development/slices/068-llm-wiki-evidence-map.md)
+- [069 · Snapshot Topic Map（已完成）](development/slices/069-snapshot-topic-map.md)
+- [070 · Wiki Identity Ledger（已完成）](development/slices/070-wiki-identity-ledger.md)
+- [071 · Wiki Topic Build + Search（已完成）](development/slices/071-wiki-topic-search.md)
+- [072 · Wiki Narrative Pages（已完成）](development/slices/072-wiki-narrative-pages.md)
+- [073 · Wiki Incremental Build（已完成）](development/slices/073-wiki-incremental-build.md)
+- [074 · Wiki Agent Tools（已完成；覆盖效果继续 BL-0012）](development/slices/074-wiki-agent-tools.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库

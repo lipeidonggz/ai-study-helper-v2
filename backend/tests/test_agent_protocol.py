@@ -149,7 +149,7 @@ def test_release_prompt_bundle_has_stable_version_and_hash() -> None:
     first = release_prompt_bundle()
     second = release_prompt_bundle()
 
-    assert first.version == "chat-v17"
+    assert first.version == "chat-v19"
     assert first.template_hash == second.template_hash
     assert len(first.template_hash) == 64
     assert "{{RESPONSE_POLICY}}" in first.template
@@ -171,7 +171,23 @@ def test_release_prompt_bundle_has_stable_version_and_hash() -> None:
     assert "以下是通用背景，不是原文表述" in first.template
     assert "不能用模型知识代替" in first.template
     assert "对同时包含通用解释和文档事实的问题" in first.template
-    for case_specific_token in ("83%", "93%", "17%", "0.4%", "84%", "gVisor", "MCP"):
+    assert "当前知识库范围内找出全部或更多相关主题" in first.template
+    assert "应先用它取得预编译的主题入口和覆盖线索" in first.template
+    assert "`get_topic_evidence` 回到原始 block" in first.template
+    for case_specific_token in (
+        "83%",
+        "93%",
+        "17%",
+        "0.4%",
+        "84%",
+        "gVisor",
+        "MCP",
+        "c13-003",
+        "worktree",
+        "checkpoint_resume",
+        "checkpoint_evaluation",
+        "doc_983ba4e2cbff4185873d525a69195fdf",
+    ):
         assert case_specific_token not in first.template
 
 
