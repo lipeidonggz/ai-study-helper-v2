@@ -3,7 +3,7 @@
 - 状态：已完成
 - 开始日期：2026-10-31
 - 关联设计：[11 语料锚定的主题覆盖检索](../../design/11-corpus-grounded-topic-coverage.md)
-- 前置切片：[065 语料锚定的主题覆盖检索](./065-corpus-grounded-topic-coverage.md)、`066 章节优先的主题覆盖检索`（位于独立研究 worktree）
+- 前置切片：[065 语料锚定的主题覆盖检索](./065-corpus-grounded-topic-coverage.md)、[066 章节优先的主题覆盖检索](./066-section-first-topic-coverage.md)
 - 对外文章：14《当 RAG 开始“找全”》（在独立文章分支引用本切片）
 - 人工验收：已完成
 
@@ -139,6 +139,9 @@
 - 命令：`backend\.venv\Scripts\python.exe -m pytest backend\tests --basetemp backend\.runtime\pytest-archive-065 -q`
 - 结果：退出码 0。
 - 直接使用系统临时目录时出现 `C:\Users\lida\AppData\Local\Temp\pytest-of-lida` 权限错误，属于既有环境问题。
+- 066 专项：`test_section_index.py`、`test_retrieval_read_layer.py`、`test_hybrid_search.py` 共 28 passed。
+- 066 静态检查：Ruff format／check 通过，Pyright 为 0 errors。
+- 066 完整后端回归：仅 `test_evaluation_api_reads_trace_artifacts` 因临时 artifact 文件路径消失失败；章节索引专项复跑通过。
 
 ### 运行证据
 

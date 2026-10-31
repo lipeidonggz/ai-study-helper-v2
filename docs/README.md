@@ -144,6 +144,7 @@
 - [2026-10-29 · 主题覆盖检索工具实验](development/experiments/2026-10-29-topic-coverage-tool.md)
 - [2026-10-30 · 语料锚定的主题覆盖面检索实验](development/experiments/2026-10-30-corpus-grounded-facet-retrieval.md)
 - [2026-10-31 · Facet contract、审计与稳定性实验](development/experiments/2026-10-31-facet-contract-audit-stability.md)
+- [2026-10-31 · 章节优先主题检索初步实验](development/experiments/2026-10-31-section-first-routing.md)
 - [032 · 判定总 Token 用量展示（待人工验收）](development/slices/032-judge-token-usage-visibility.md)
 - [033 · 异步 GitHub 交付与依赖门禁（已完成）](development/slices/033-async-github-delivery-gate.md)
 - [034 · c2-001 指标归属金标准修订（待确认）](development/slices/034-c2-metric-attribution.md)
@@ -178,7 +179,8 @@
 - [063 · c13-003 隔离知识语义覆盖（待确认）](development/slices/063-c13-003-semantic-coverage.md)
 - [064 · 主题覆盖检索（历史，已被 065 取代）](development/slices/064-topic-coverage-search.md)
 - [065 · 语料锚定的主题覆盖检索（已正式接入）](development/slices/065-corpus-grounded-topic-coverage.md)
-- [067 · 主题覆盖实验的研究归档与文章引用（进行中）](development/slices/067-research-archive-topic-coverage.md)
+- [066 · 章节优先的主题覆盖检索（草稿）](development/slices/066-section-first-topic-coverage.md)
+- [067 · 主题覆盖实验的研究归档与文章引用（已完成）](development/slices/067-research-archive-topic-coverage.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库
