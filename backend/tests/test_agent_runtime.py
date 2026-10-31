@@ -9,9 +9,14 @@ import httpx
 import pytest
 from langgraph.errors import GraphRecursionError
 
+import app.agent.tool_adapter as tool_adapter_module
 from app.agent.citations import (
     CITATION_ANNOTATION_BATCH_VERSION,
     citation_annotation_output_token_cap,
+)
+from app.agent.corpus_grounded_coverage import (
+    CORPUS_GROUNDED_STRATEGY_VERSION,
+    CorpusGroundedCoverageExecution,
 )
 from app.agent.runtime import (
     AgentRunConfig,
@@ -31,6 +36,7 @@ from app.providers.chat import (
     FakeChatProvider,
 )
 from app.providers.embeddings import FakeEmbeddingProvider
+from app.retrieval.models import SearchBlocksResult
 from app.retrieval.service import RetrievalReadService
 from app.tracing.catalog import TraceCatalog
 from app.tracing.store import TraceStore
@@ -235,6 +241,81 @@ def test_agent_runtime_executes_tool_and_finishes(tmp_path: Path) -> None:
     assert model_events[1].payload["usage_source"] == "provider"
     assert "harness_status" in chat_provider.requests[1][1].content
     assert "result_tokens" not in chat_provider.requests[1][1].content
+
+
+def test_search_topic_tool_accounts_for_internal_model_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    embedding_provider = _prepare_snapshot(tmp_path)
+
+    async def fake_execute_coverage(**kwargs: object) -> CorpusGroundedCoverageExecution:
+        assert kwargs["topic"] == "MCP 边界"
+        return CorpusGroundedCoverageExecution(
+            payload=SearchBlocksResult(blocks=[], empty_reason="no_match"),
+            diagnostics={
+                "strategy": CORPUS_GROUNDED_STRATEGY_VERSION,
+                "facet_count": 1,
+                "query_count": 0,
+                "candidate_count": 0,
+                "shortlist_count": 0,
+                "supported_count": 0,
+            },
+            model_calls=3,
+            input_tokens=120,
+            output_tokens=30,
+        )
+
+    monkeypatch.setattr(
+        tool_adapter_module,
+        "execute_corpus_grounded_coverage",
+        fake_execute_coverage,
+    )
+    chat_provider = FakeChatProvider(
+        [
+            _tool_call(
+                "search_topic",
+                {"topic": "MCP 边界"},
+            ),
+            _finish("主题覆盖检索完成。"),
+        ]
+    )
+    trace_store = TraceStore(tmp_path)
+    runtime = AgentRuntime(
+        tmp_path,
+        chat_provider=chat_provider,
+        embedding_provider=embedding_provider,
+        trace_store=trace_store,
+        trace_mode="full",
+    )
+
+    result = asyncio.run(runtime.run("总结 MCP 边界"))
+
+    assert result.status == "succeeded"
+    assert result.agent_turns == 2
+    assert result.tool_calls == 1
+    assert result.model_calls == 5
+    assert result.citation_annotation_model_calls == 0
+    coverage_event = next(
+        event
+        for event in result.events
+        if event.event_type == "tool_call" and event.payload["tool"] == "search_topic"
+    )
+    assert coverage_event.payload["model_calls"] == 3
+    assert coverage_event.payload["input_tokens"] == 120
+    assert coverage_event.payload["output_tokens"] == 30
+    assert trace_store.wait_for_idle(3)
+    trace_detail = TraceCatalog(tmp_path / "traces").load(result.trace_id)
+    trace_store.close()
+    tool_span = next(
+        span
+        for span in trace_detail.spans
+        if span.name == "tool.call" and span.attributes.get("tool.name") == "search_topic"
+    )
+    assert tool_span.attributes["app.tool_model_calls"] == 3
+    assert tool_span.attributes["app.tool_input_tokens"] == 120
+    assert tool_span.attributes["app.tool_output_tokens"] == 30
+    assert tool_span.attributes["app.diagnostics"]["strategy"] == (CORPUS_GROUNDED_STRATEGY_VERSION)
 
 
 def test_runtime_emits_structured_claim_annotation_without_editing_answer(
@@ -565,6 +646,7 @@ def test_agent_runtime_persists_parented_trace_with_tool_and_budget_data(
     root = next(span for span in detail.spans if span.name == "agent.run")
     turns = [span for span in detail.spans if span.name == "agent.turn"]
     assert all(turn.parent_span_id == root.span_id for turn in turns)
+    assert turns[-1].attributes["app.decision_summary"] == "当前证据已经足够回答。"
     tool_span = next(span for span in detail.spans if span.name == "tool.call")
     assert tool_span.parent_span_id in {turn.span_id for turn in turns}
     assert tool_span.attributes["tool.name"] == "search_blocks"
@@ -1199,7 +1281,7 @@ def test_protected_agent_api_runs_with_injected_providers(tmp_path: Path) -> Non
     assert result["answer"] == "API 运行成功"
     assert result["answer_completeness"] == "complete"
     assert result["limitations"] == []
-    assert result["prompt_bundle_version"] == "chat-v17"
+    assert result["prompt_bundle_version"] == "chat-v20"
     assert result["observation_token_counter_version"] == "chat-budget-conservative-v1"
     assert result["citation_annotations"]["status"] == "not_applicable"
     assert result["citation_annotation_model_calls"] == 0

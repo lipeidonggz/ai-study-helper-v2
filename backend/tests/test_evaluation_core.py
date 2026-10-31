@@ -88,6 +88,7 @@ class _FakeRuntime:
                 agent_turns=1,
                 tool_calls=0,
                 model_calls=1,
+                tool_model_calls=0,
                 input_tokens=10,
                 output_tokens=2,
                 sources=[],

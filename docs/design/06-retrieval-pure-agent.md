@@ -106,19 +106,40 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 | 已命中 block 补全全文 | 按 block_id 精确读取 | **block 精确读取** |
 | 跨源对照（6、8、9、11） | 分别取多篇的证据 | 排名检索＋范围限定 |
 | 要全／整节（7、13、15） | 把某个范围的全部块取出来 | 范围枚举 |
+| 跨文档主题覆盖（13） | 从多个语义面发现候选并合并证据 | 主题覆盖检索 |
 | 整体图景（8）／换形态（15） | 先看结构，再决定取哪几节 | 章节大纲 |
 | 消歧（16） | 知道库里有哪些候选，再问用户 | 文档清单＋澄清 |
 | 越界（17）／截断（18） | 不需要检索 | 不进工具，属策略与生成契约 |
 
-**六个工具**（每个都向模型声明输入与输出 schema，并附返回示例）
+**七个工具**（每个都向模型声明输入与输出 schema，并附返回示例）
 
-**工具只负责取全，Harness 负责计数与预算准入**：`list_blocks`／`get_blocks`／`scan_term` 始终返回当前范围的全部业务结果；Harness 生成最终 `tool_result` 后统一计算 `result_tokens`，并在把结果加入 History 前检查上下文与累计预算，超界时不再发起下一次模型调用。工具自身不计算 token，也不做预算判断。`search_blocks` 仍按相关度取 Top-5。
+**普通检索工具只负责固定范围的业务结果，Harness 负责计数与预算准入**：`list_blocks`／`get_blocks`／`scan_term` 始终返回当前范围的全部业务结果；Harness 生成最终 `tool_result` 后统一计算 `result_tokens`，并在把结果加入 History 前检查上下文与累计预算，超界时不再发起下一次模型调用。`search_blocks` 仍按相关度取 Top-5。`search_topic` 是有界的 L1 工具，内部一次规划、多查询执行、按 subtopic／facet 归因和 token-aware 裁剪均进入同一运行 trace 与成本统计。
 
 ### T1 list_documents
 
 **工具说明（给模型）**：列出知识库中的文档，可按来源、语言、标题片段筛选。当用户所指文档不明确，或需要先了解知识库有哪些文档时调用。来源支持用户常用别名，标题筛选只匹配规范标题；别名只用于定位，不改变文档的规范身份。
 
 **输入**：可选 `source?: string`／`lang?: "zh"｜"en"`／`title_contains?: string`<br> **调用示例**：`{"source":"OpenAI","lang":"en","title_contains":"Harness"}`<br> **输出**：`documents[]`（doc_id／title／source_label／aliases／lang／节数／块数）＋`total`<br> **返回示例**：`{"documents":[{"doc_id":"doc_o2","title":"Harness engineering","source_label":"OpenAI","aliases":["OpenAI Harness"],"lang":"en","sections":9,"blocks":24}],"total":1}`<br> **约束**：`source` 对规范 `source_label` 或别名做大小写不敏感匹配；`title_contains` 只匹配规范标题子串（大小写不敏感），不匹配正文；结果按 `source_label → title → doc_id` 升序，零结果不能推断"内容里没有"；**【质量属性·可靠性】**空库返回 `documents: []` 与 `total: 0`。
+
+### T7 search_topic
+
+**工具说明（给模型）**：输入主题词或主题短语，而不是完整用户问题。内部先还原用户表达的子主题，再在每个子主题中发现检索面，分别生成面向向量的自然语言查询和面向 BM25/FTS 的精确关键词查询；两路独立检索后按 `block_id` 去重，按检索面保留代表证据，并在 token 预算内返回完整证据块。用于问题未指定单一文档且需要发现、汇总或找全主题内容的场景。知识库可能中英混合；semantic 查询可利用跨语言语义，keyword 查询仍需覆盖文档语言中的直出术语。它提高相关证据召回率，但不保证数学意义上的穷尽；普通 `search_blocks` 的 Top-K 不能替代本工具。
+
+**输入**：`topic: string`。查询数、每路候选深度、模型可见证据 token 预算、目标／硬上限块数、并发和裁剪策略由工具内部版本化策略决定。<br> **输出**：`blocks[]`（公共块返回形态）＋`empty_reason`，与 `search_blocks` 相同。<br> **约束**：规划器只接收主题，不接受评测用例知识点；用户明确表达的子主题不得因证据重叠而合并；dense 和 BM25 分别只执行自己的查询集合，按 `block_id` 合并并保留 subtopic／facet 来源；最终选择先保每个 facet 的代表证据，再在约 20,000 evidence tokens、目标 40 块、硬上限 48 块内补齐。planner 或任一路检索失败时返回公共错误，不返回未声明的部分结果。内部模型调用与 token 计入当前 Agent 运行；版本、prompt hash、子主题与检索面、两路查询、候选来源、裁剪理由、估算 token 和 usage 只写入 trace。
+
+**主题高召回检索的职责边界**
+
+1. 调用方只提供语义主题；子主题还原、facet 发现、查询数量、dense／BM25 两路查询、候选深度、证据 token 预算、块数上限、并发和裁剪策略属于工具内部版本化策略。
+2. 工具承担按用户表达拆子主题、按检索模型拆分查询、两路检索、block 合并和 facet-aware 裁剪；主 Agent 不执行这些步骤。
+3. 两路候选来源只用于内部选择和 trace 诊断，不作为候选清单返回给主 Agent。
+4. 成功时返回与 `search_blocks` 相同的完整证据块与 `empty_reason`，主 Agent 可以直接回答和引用，不需要例行二次读取。
+5. 工具不承诺数学意义上的语义全覆盖；描述必须明确“高召回但非穷尽”，不得输出虚假的 `complete` 状态。
+6. planner 或任一路强制查询失败时返回公共错误，不把未声明的部分结果包装成成功。
+7. 查询文本、两路命中、候选来源、块数／token 裁剪和 token 用量只写入 trace／diagnostics。
+
+固定规划策略只做与 topic 直接相关的通用语义扩展：同义表达、上下位概念、相邻概念和不同措辞。产品文档范围为中文和英文，因此查询面必须同时包含中英文，并优先保留可能在原文直接出现的术语；但 planner 不得预设“状态、生命周期、工作区、权限”等答案维度，也不得把某个评测用例的预期要点写成查询清单。具体能召回什么必须由失败样本和 trace 证明，再通过候选深度、返回预算或上层任务分解评估，不能把答案知识写回 planner。
+
+查询格式与检索模型绑定：semantic 查询使用完整自然语言，供 dense 使用；keyword 查询使用高信息量词项，供 BM25/FTS 使用。两路不得把同一份长句原样复用于两种模型。候选按 `block_id` 去重并保留 subtopic／facet 支持；最终不使用全局 Top-K 或独立 LLM reranker，而是先覆盖各个检索面，再按最佳原始排名、检索通道支持、文档／章节新颖度和 token 预算补齐。
 
 ### T2 get_outline
 
@@ -170,6 +191,8 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 
 **初版没有独立的 evidence assembler。**Harness 将工具返回的完整 payload 原样转换为 `tool_result` 并追加 History，由模型在 `decision_summary` 中判断证据是否足够、哪些块支持结论。这里不额外做跨调用重排、合并或摘要；等失败样本证明上下文冗余成为主要问题时，再按 §10 的后备路径设计证据组装。
 
+唯一的例外是 `search_topic`：它把主题级多查询证据合并封装在一个工具内部，但仍只返回证据块，不生成答案；普通工具之间仍不自动合并。
+
 ### 覆盖检查
 
 | 用例 | 主要工具 |
@@ -180,7 +203,7 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 | 6 什么关系／9 冲突／11 哪个对 | search_blocks 分篇 ＋ list_blocks 补全 |
 | 7 有哪些 | list_blocks（按篇） |
 | 8 整体／15 换形态 | get_outline → list_blocks（按节） |
-| 13 还有什么 | list_documents ＋ search_blocks（全库） |
+| 13 还有什么 | search_topic，直接使用返回的高召回证据 |
 | 14 归属 | scan_term ＋ get_blocks／search_blocks |
 | 16 消歧 | list_documents ＋ search_blocks → 在最终回答里要求澄清（不是工具） |
 | 17 越界／18 截断 | 不用工具 |
@@ -240,7 +263,7 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 
 **重试规则**：`max_retries_per_operation = 1`。自动重试不增加逻辑上的 `tool_calls`，但每次实际尝试都要进 trace；不存在独立的“重试预算”，所有实际模型 token 仍受 `max_request_tokens` 限制，实际工具尝试仍受上下文预算限制。
 
-**边界**：不设置前置分类器；不在工具调用之外增加单独的生成阶段；循环本身不判断跨源覆盖、枚举完整性、来源归属等内容质量。这些判断属于模型在 `decision_summary` 中的任务决策，以及后续的确定性检查。
+**边界**：不设置前置分类器；不在工具调用之外增加单独的生成阶段；循环本身不判断跨源覆盖、枚举完整性、来源归属等内容质量。这些判断属于模型在工具调用或 `finish.decision_summary` 中的任务决策，以及后续的确定性检查。
 
 ### 8.2 执行契约：工具结果与结构化动作
 
@@ -292,7 +315,8 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 ```json
 {
   "type": "finish",
-  "answer": "最终答案"
+  "answer": "最终答案",
+  "decision_summary": "说明证据范围，以及为何可以正常结束或只能降级"
 }
 ```
 
@@ -305,7 +329,7 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 
 ### 8.3 初版系统提示词：ReAct ＋ 产品约束
 
-下面是模型可见的提示词骨架，采用结构化 ReAct 协议。外层引擎负责注入工具、校验 JSON、执行工具并追加 Runtime-only `tool_result`；收到 `finish` 后冻结正文并停止循环，再由独立 citation annotator 选择 `claim span → block_ids`。`response_protocol`、`tool_result_protocol`、`scope`、`evidence`、`coverage`、`citation`、`answer`、`termination` 各自只承担一类规则，工具自身的局部选择条件放在工具描述中。`chat-v7` 在 `evidence` 中进一步要求保留因果、条件、比较、取舍和方向关系的语义角色。完整发布文本以代码中的 `chat-v7` 为准，并受 [ADR 0011](../decisions/0011-structured-react-response-protocol.md) 与 [ADR 0012](../decisions/0012-harness-owned-claim-citation-annotation.md) 约束。
+下面是模型可见的提示词骨架，采用结构化 ReAct 协议。外层引擎负责注入工具、校验 JSON、执行工具并追加 Runtime-only `tool_result`；收到 `finish` 后冻结正文并停止循环，再由独立 citation annotator 选择 `claim span → block_ids`。`response_protocol`、`tool_result_protocol`、`scope`、`evidence`、`coverage`、`citation`、`answer`、`termination` 各自只承担一类规则，工具自身的局部选择条件放在工具描述中。完整发布文本以代码中的 `chat-v20` 为准，并受 [ADR 0011](../decisions/0011-structured-react-response-protocol.md) 与 [ADR 0012](../decisions/0012-harness-owned-claim-citation-annotation.md) 约束。
 
 `{collection_status}` 由 Harness 从请求开始时固定的 collection 快照注入，模型不能修改。其结构为 `{"snapshot_id":"...","completeness":"complete|partial","failed_documents":[{"doc_id":"...","title":"...","reason":"..."}]}`；`complete` 时列表为空，`partial` 时必须列出未成功入库的文档，供模型执行遗漏透明。
 
@@ -434,7 +458,7 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 
 | 质量属性 | 当前设计承接 | 设计覆盖 | 验证状态 | 待处理 |
 | --- | --- | --- | --- | --- |
-| **Q1 正确性** | Agentic 检索、五工具、证据规则、块级引用 | ✅ 闭合 | 未测 | 用 18 条用例和 N＝10／K＝9 验证内容正确性。 |
+| **Q1 正确性** | Agentic 检索、七工具、证据规则、块级引用 | ✅ 闭合 | 未测 | 用 18 条用例和 N＝10／K＝9 验证内容正确性。 |
 | **Q2 可溯源** | `block_id`／`doc_id`／`section_path`＋文档标题／来源显示名解析接口＋Harness 校验的 `span_id → block_ids[]` annotation | ✅ 闭合 | 未测 | 检索侧保证块可解析、原文可重建；UI 按 annotation offset 展示可读来源；引用块是否存在、是否支持该 claim 由判官使用同一结构化 annotation 核验。 |
 | **Q3 完整性／遗漏透明** | 请求固定 collection 快照；partial 状态显式注入提示词；coverage 提示词；工具返回范围内全量业务结果，Harness 统一计算 `result_tokens` 并在加入上下文前做唯一一次预算准入 | ✅ 闭合 | 未测 | 在用户预算内必须一次取全；范围过大时返回错误并建议缩小范围，不能返回半套结果。用 c7／c13／c15 验证。 |
 | **Q4 诚实性** | 文档事实必须有块、模型补充不得冒充原文；引用由 Harness 后置标注且只接受本次真实证据 | ✅ 闭合 | 未测 | 用“无证据仍声称来源”“伪造 block ID”“同一段双 claim”和“标注 pending”做反例回归；模型自报正文引用不能作为通过依据。 |
@@ -527,7 +551,7 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 | **`llm.call`** | 实际尝试序号；provider／model／模型快照或版本；温度等采样参数；输入、输出、缓存 token；`finish_reason`；耗时；完整渲染提示词和模型原始输出的 artifact 引用（`metadata` 模式只记 hash） | 区分是提示词、模型、截断、协议解析还是预算导致的失败；支撑成本与复现 |
 | **`citation.annotation`** | provider／model、prompt 版本与 hash、答案 span 数、证据块数、实际尝试次数、输入／输出 token 和 annotation 状态；完整 annotator prompt／raw output 的 artifact 引用（`metadata` 模式只记 hash） | 解释引用为什么 pending、是否发生重试，以及后置标注的真实成本 |
 | **`tool.call`** | 工具名；规范化参数；实际尝试序号；Harness 状态；`payload` artifact 引用；返回数／`total`／`count`／Harness 计算的 `result_tokens`；耗时（`metadata` 模式对参数和 payload 只记 hash／计数） | 判断是选错工具、参数不对、结果为空、结果过大还是工具执行失败 |
-| **工具诊断属性** | `search_blocks` 记录 `search_mode`／`top_k`／`empty_reason`、query embedding 的 provider／model／request ID／token usage，以及每个返回结果的 `block_id`／`rank`／`score`；`list_blocks` 记录章节参数、own／subtree 模式和 `total`；`get_blocks` 记录请求与返回的 block_id；`scan_term` 记录范围与 `count`；`result_tokens` 由 Harness 统一记录；所有工具记录公共 `error.code` | 不仅知道返回了什么，还能解释“为什么是这些块、为什么是这个顺序、为什么为空” |
+| **工具诊断属性** | `search_blocks` 记录 `search_mode`／`top_k`／`empty_reason`、query embedding 的 provider／model／request ID／token usage，以及每个返回结果的 `block_id`／`rank`／`score`；`search_topic` 额外汇总 planner version 与 prompt hash、strategy version、subtopics／facets、两路查询与逐路结果、embedding token、subtopic／facet 候选分布、final selection reason、evidence token 估算与候选截断；`list_blocks` 记录章节参数、own／subtree 模式和 `total`；`get_blocks` 记录请求与返回的 block_id；`scan_term` 记录范围与 `count`；`result_tokens` 由 Harness 统一记录；所有工具记录公共 `error.code` | 不仅知道返回了什么，还能解释“为什么是这些块、为什么是这个顺序、为什么为空” |
 | **`budget.check` 事件** | 作为 `agent.turn`／`tool.call` 上的 span event 记录：`phase=pre_turn\|post_tool\|finalization`、`limit_kind=context\|request`、`limit_tokens`、`observed_tokens`、`remaining_tokens`、`decision=admit\|reject\|terminate`、关联的轮次和工具调用 | 预算失败时能直接定位是哪一步、按什么额度和实际数量被拒绝，不只留下最终错误码 |
 | **`artifact`** | `artifact_id`（内容 hash）／类型／MIME／字节数／可选压缩方式／内容或外部引用；只在 `full` 模式生成 | 保存完整用户问题、渲染提示词、结构化模型输出、工具 payload、最终回答和 citation annotation；span 只挂引用，不重复塞正文 |
 

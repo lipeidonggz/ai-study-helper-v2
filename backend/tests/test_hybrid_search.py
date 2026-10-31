@@ -115,6 +115,48 @@ def test_search_blocks_is_stable_and_applies_document_scope_before_fusion(
     assert {block.doc_id for block in first.blocks} == {beta.doc_id}
 
 
+def test_dense_route_skips_keyword_candidates(tmp_path: Path) -> None:
+    path = tmp_path / "dense.html"
+    path.write_bytes(_html("Dense document", "Dense 路线正文。"))
+    _ingest(tmp_path, [path])
+    reader = RetrievalReadService(tmp_path).bind_current()
+    provider = FakeEmbeddingProvider()
+
+    execution = asyncio.run(
+        reader.execute_search_blocks(
+            "MCP",
+            provider=provider,
+            mode="dense",
+        )
+    )
+
+    assert execution.result.blocks
+    assert execution.dense_block_ids
+    assert execution.keyword_block_ids == ()
+    assert provider.query_calls == ["MCP"]
+
+
+def test_keyword_route_skips_query_embedding(tmp_path: Path) -> None:
+    path = tmp_path / "keyword.html"
+    path.write_bytes(_html("Keyword document", "MCP 关键词检索正文。"))
+    _ingest(tmp_path, [path])
+    reader = RetrievalReadService(tmp_path).bind_current()
+    provider = FakeEmbeddingProvider()
+
+    execution = asyncio.run(
+        reader.execute_search_blocks(
+            "MCP",
+            provider=provider,
+            mode="keyword",
+        )
+    )
+
+    assert execution.result.blocks
+    assert execution.dense_block_ids == ()
+    assert execution.keyword_block_ids
+    assert provider.query_calls == []
+
+
 def test_invalid_scope_and_empty_query_fail_before_query_embedding(
     tmp_path: Path,
 ) -> None:

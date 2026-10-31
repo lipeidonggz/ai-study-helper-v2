@@ -24,6 +24,7 @@
 | [08](design/08-evaluation-console-design.md) | 评测台、诊断与回归 | 已审核 · 实现基线 |
 | [09](design/09-technology-selection.md) | 技术选型与总体架构 | v0.4 · 实现基线 |
 | [10](design/10-document-detail-design.md) | 文档详情页信息架构与数据边界 | 已审核 · 首版实现基线 |
+| [11](design/11-corpus-grounded-topic-coverage.md) | 语料锚定的主题覆盖检索 | 实现设计草案 · 待审核 |
 
 01–09 已于 2026-10-20 审核，并作为当前实现基线；03 已于 2026-10-29 完成 c6、c8、c11、c13、c14 和 c15 判据修订并更新为 v0.10，09 已依据 ADR 0004 更新为 v0.4。后续修改必须保留变更原因，同时更新本索引。
 
@@ -139,6 +140,10 @@
 - [2026-10-29 · active Judge v3 全量迁移](development/experiments/2026-10-29-judge-v3-active-migration.md)
 - [2026-10-29 · cf-001 新数据基线](development/experiments/2026-10-29-cf001-fresh-baseline.md)
 - [2026-10-29 · cf-002 新数据基线](development/experiments/2026-10-29-cf002-fresh-baseline.md)
+- [2026-10-29 · c13-003 隔离知识语义覆盖实验](development/experiments/2026-10-29-c13-003-semantic-coverage.md)
+- [2026-10-29 · 主题覆盖检索工具实验](development/experiments/2026-10-29-topic-coverage-tool.md)
+- [2026-10-30 · 语料锚定的主题覆盖面检索实验](development/experiments/2026-10-30-corpus-grounded-facet-retrieval.md)
+- [2026-10-31 · Facet contract、审计与稳定性实验](development/experiments/2026-10-31-facet-contract-audit-stability.md)
 - [032 · 判定总 Token 用量展示（待人工验收）](development/slices/032-judge-token-usage-visibility.md)
 - [033 · 异步 GitHub 交付与依赖门禁（已完成）](development/slices/033-async-github-delivery-gate.md)
 - [034 · c2-001 指标归属金标准修订（待确认）](development/slices/034-c2-metric-attribution.md)
@@ -170,6 +175,10 @@
 - [060 · 语义覆盖与输出结构分离（已完成）](development/slices/060-answer-coverage-and-structure.md)
 - [061 · cf-001 透明目标选择（已完成）](development/slices/061-cf001-transparent-target-selection.md)
 - [062 · retired case revision 的历史判定读取（已完成）](development/slices/062-retired-case-revision-history.md)
+- [063 · c13-003 隔离知识语义覆盖（待确认）](development/slices/063-c13-003-semantic-coverage.md)
+- [064 · 主题覆盖检索（历史，已被 065 取代）](development/slices/064-topic-coverage-search.md)
+- [065 · 语料锚定的主题覆盖检索（已正式接入）](development/slices/065-corpus-grounded-topic-coverage.md)
+- [067 · 主题覆盖实验的研究归档与文章引用（进行中）](development/slices/067-research-archive-topic-coverage.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 
 ## 旧仓库

@@ -113,6 +113,94 @@ function toolCallSummary(
   }
 }
 
+/** 把内部 span 名称转换为面向排查的中文标题。 */
+function spanDisplayLabel(span: TraceSpan): string {
+  if (span.name === "retrieval.coverage_query") {
+    return "主题查询";
+  }
+  if (span.name === "llm.call") {
+    const purpose = span.attributes["app.call_purpose"];
+    if (purpose === "topic_coverage_explanation") {
+      return "主题语义解释";
+    }
+    if (purpose === "topic_coverage_planning") {
+      return "主题覆盖规划";
+    }
+    if (purpose === "topic_coverage_audit") {
+      return "覆盖缺项审计";
+    }
+    if (purpose === "topic_coverage_reranking") {
+      return "候选语义重排";
+    }
+  }
+  return span.name;
+}
+
+/** 从主题查询 span 中提取检索通道和查询正文。 */
+function retrievalQuerySummary(
+  span: TraceSpan,
+): {
+  mode: string;
+  label: string;
+  query: string;
+  purpose: string;
+  context: string;
+} | null {
+  if (span.name !== "retrieval.coverage_query") {
+    return null;
+  }
+  const mode = String(span.attributes["app.search_mode"] ?? "unknown");
+  const query = String(span.attributes["app.query"] ?? "");
+  const purpose = String(span.attributes["app.query_purpose"] ?? "");
+  const subtopics = Array.isArray(span.attributes["app.subtopics"])
+    ? span.attributes["app.subtopics"].map(String)
+    : [];
+  const facets = Array.isArray(span.attributes["app.facets"])
+    ? span.attributes["app.facets"].map(String)
+    : [];
+  const modeLabel =
+    mode === "dense"
+      ? "向量检索"
+      : mode === "keyword"
+        ? "关键词检索"
+        : "混合检索";
+  return {
+    mode,
+    label: modeLabel,
+    query,
+    purpose,
+    context: facets.length
+      ? facets.join("、")
+      : subtopics.length
+        ? subtopics.join("、")
+        : "",
+  };
+}
+
+/** 汇总主题检索工具的语义路、关键词路和最终候选规模。 */
+function topicCoverageDiagnostic(span: TraceSpan): string {
+  if (
+    span.kind !== "TOOL" ||
+    span.name !== "tool.call" ||
+    span.attributes["tool.name"] !== "search_topic"
+  ) {
+    return "";
+  }
+  const diagnostics = span.attributes["app.diagnostics"];
+  if (!diagnostics || typeof diagnostics !== "object") {
+    return "";
+  }
+  const values = diagnostics as Record<string, unknown>;
+  const facetCount = Number(values.facet_count ?? 0);
+  const queryCount = Number(values.query_count ?? 0);
+  const seedCount = Number(values.seed_result_count ?? 0);
+  const candidateCount = Number(values.candidate_count ?? 0);
+  const shortlistCount = Number(values.shortlist_count ?? 0);
+  const supportedCount = Number(values.supported_count ?? 0);
+  const resultTokens = Number(span.attributes["app.result_tokens"] ?? 0);
+  return `seed ${seedCount} · 证据面 ${facetCount} · 查询 ${queryCount} · 候选 ${candidateCount} · 短名单 ${shortlistCount} · 返回 ${supportedCount} · 结果 ${resultTokens} tokens`;
+}
+
 const artifactById = computed(
   () =>
     new Map(
@@ -340,7 +428,33 @@ onBeforeUnmount(() => {
             <span class="trace-span-kind">
               {{ traceSpanKindLabel(row.span.kind) }}
             </span>
-            <strong>{{ row.span.name }}</strong>
+            <strong>{{ spanDisplayLabel(row.span) }}</strong>
+            <span
+              v-if="retrievalQuerySummary(row.span)"
+              class="trace-query-summary"
+            >
+              <span
+                class="trace-query-mode"
+                :class="`trace-query-mode-${retrievalQuerySummary(row.span)?.mode}`"
+              >
+                {{ retrievalQuerySummary(row.span)?.label }}
+              </span>
+              <span class="trace-query-text">
+                {{ retrievalQuerySummary(row.span)?.query }}
+              </span>
+              <span
+                v-if="retrievalQuerySummary(row.span)?.purpose"
+                class="trace-query-purpose"
+              >
+                {{ retrievalQuerySummary(row.span)?.purpose }}
+              </span>
+              <span
+                v-if="retrievalQuerySummary(row.span)?.context"
+                class="trace-query-context"
+              >
+                {{ retrievalQuerySummary(row.span)?.context }}
+              </span>
+            </span>
             <span
               v-if="toolCallSummary(row.span)"
               class="trace-tool-call-summary"
@@ -353,6 +467,9 @@ onBeforeUnmount(() => {
           <small>
             {{ formatTraceTime(row.span.started_at) }} ·
             耗时 {{ spanDuration(row.span) }}
+            <template v-if="topicCoverageDiagnostic(row.span)">
+              · {{ topicCoverageDiagnostic(row.span) }}
+            </template>
           </small>
         </button>
         <span
@@ -689,6 +806,63 @@ onBeforeUnmount(() => {
   color: #536b5b;
   font-family: Consolas, "Courier New", monospace;
   font-size: 0.69rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-query-summary {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.trace-query-mode {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 2px 6px;
+  font-size: 0.62rem;
+  font-weight: 700;
+}
+
+.trace-query-mode-dense {
+  color: #245f88;
+  background: #e1eef8;
+}
+
+.trace-query-mode-keyword {
+  color: #805415;
+  background: #fff0ce;
+}
+
+.trace-query-mode-unknown {
+  color: #5f6761;
+  background: #ecefeb;
+}
+
+.trace-query-text {
+  min-width: 0;
+  overflow: hidden;
+  color: #52665a;
+  font-size: 0.7rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-query-purpose {
+  min-width: 0;
+  overflow: hidden;
+  color: #7a6c56;
+  font-size: 0.66rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-query-context {
+  min-width: 0;
+  overflow: hidden;
+  color: #607a8f;
+  font-size: 0.66rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

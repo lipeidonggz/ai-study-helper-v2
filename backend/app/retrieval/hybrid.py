@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import lancedb
 
@@ -27,6 +27,8 @@ DEFAULT_HYBRID_RETRIEVAL_PROFILE = HybridRetrievalProfile(
     rrf_k=60,
     top_k=5,
 )
+
+RetrievalSearchMode = Literal["hybrid", "dense", "keyword"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,12 +57,13 @@ class HybridIndexCandidates:
 def search_snapshot_index(
     snapshot_root: Path,
     *,
-    query_vector: list[float],
+    query_vector: list[float] | None,
     query: str,
     doc_ids: tuple[str, ...],
     profile: HybridRetrievalProfile = DEFAULT_HYBRID_RETRIEVAL_PROFILE,
+    mode: RetrievalSearchMode = "hybrid",
 ) -> HybridIndexCandidates:
-    """在同一 LanceDB 快照上执行 dense 与 FTS 两路候选召回。"""
+    """在同一 LanceDB 快照上执行指定模式的候选召回。"""
 
     index_root = snapshot_root / "index" / "lance"
     if not index_root.is_dir():
@@ -71,33 +74,44 @@ def search_snapshot_index(
     where_clause = _doc_scope_filter(doc_ids)
     try:
         table = lancedb.connect(str(index_root)).open_table(BLOCKS_TABLE_NAME)
-        dense_query = (
-            table.search(
-                query_vector,
-                vector_column_name="vector",
-                query_type="vector",
-            )
-            .select(["block_id", "doc_id", "block_index", "_distance"])
-            .limit(profile.candidate_depth)
-        )
-        if where_clause is not None:
-            dense_query = dense_query.where(where_clause, prefilter=True)
-        dense_rows = tuple(dense_query.to_list())
-
-        keyword_terms = build_keyword_terms(query)
-        if keyword_terms:
-            keyword_query = (
-                table.search(
-                    keyword_terms,
-                    query_type="fts",
-                    fts_columns=FTS_FIELD_NAME,
+        if mode in {"hybrid", "dense"}:
+            if query_vector is None:
+                raise RetrievalFailure(
+                    "tool_internal_error",
+                    "dense retrieval requires a query vector",
                 )
-                .select(["block_id", "doc_id", "block_index", "_score"])
+            dense_query = (
+                table.search(
+                    query_vector,
+                    vector_column_name="vector",
+                    query_type="vector",
+                )
+                .select(["block_id", "doc_id", "block_index", "_distance"])
                 .limit(profile.candidate_depth)
             )
             if where_clause is not None:
-                keyword_query = keyword_query.where(where_clause, prefilter=True)
-            keyword_rows = tuple(keyword_query.to_list())
+                dense_query = dense_query.where(where_clause, prefilter=True)
+            dense_rows = tuple(dense_query.to_list())
+        else:
+            dense_rows = ()
+
+        if mode in {"hybrid", "keyword"}:
+            keyword_terms = build_keyword_terms(query)
+            if keyword_terms:
+                keyword_query = (
+                    table.search(
+                        keyword_terms,
+                        query_type="fts",
+                        fts_columns=FTS_FIELD_NAME,
+                    )
+                    .select(["block_id", "doc_id", "block_index", "_score"])
+                    .limit(profile.candidate_depth)
+                )
+                if where_clause is not None:
+                    keyword_query = keyword_query.where(where_clause, prefilter=True)
+                keyword_rows = tuple(keyword_query.to_list())
+            else:
+                keyword_rows = ()
         else:
             keyword_rows = ()
     except RetrievalFailure:
@@ -108,11 +122,7 @@ def search_snapshot_index(
             f"collection index query failed: {type(error).__name__}",
         ) from error
 
-    fused = reciprocal_rank_fusion(
-        dense_rows,
-        keyword_rows,
-        rrf_k=profile.rrf_k,
-    )
+    fused = reciprocal_rank_fusion(dense_rows, keyword_rows, rrf_k=profile.rrf_k)
     return HybridIndexCandidates(
         dense_rows=dense_rows,
         keyword_rows=keyword_rows,

@@ -253,7 +253,7 @@ Windows x64 官方 wheel 可离线打包；单进程稳定读写；产品与评�
 
 #### 第一轮判断：单 Agent、单循环时，自研更简单
 
-06 定义了唯一的 Thought／Action 协议、五个工具、Observation、History、预算和停止语义。如果系统长期只有一个 Agent，路径只有“调模型 → 工具 → 再调模型 → Finish”，引入完整 Agent 框架会增加 prompt、memory、retry、tool calling 和 tracing 的另一套控制权，容易形成双重事实源。因此初稿当时选择自研小循环，核心复杂度集中在领域契约，而不是执行图。
+06 定义了唯一的 Thought／Action 协议、七个工具、Observation、History、预算和停止语义。如果系统长期只有一个 Agent，路径只有“调模型 → 工具 → 再调模型 → Finish”，引入完整 Agent 框架会增加 prompt、memory、retry、tool calling 和 tracing 的另一套控制权，容易形成双重事实源。因此初稿当时选择自研小循环，核心复杂度集中在领域契约，而不是执行图。
 
 那个判断的隐含前提是：**单轮、单 Agent、没有复杂分支和长任务恢复**。它不是“永远不用框架”的结论。
 
@@ -263,7 +263,7 @@ Windows x64 官方 wheel 可离线打包；单进程稳定读写；产品与评�
 
 | 新增需求 | 自研 Harness | LangGraph |
 | --- | --- | --- |
-| 单轮单循环、五个工具 | 代码量最小，契约完全可控 | 能力有余，引入额外依赖 |
+| 单轮单循环、七个工具 | 代码量最小，契约完全可控 | 能力有余，引入额外依赖 |
 | 条件路由、循环、回退 | 需要自己定义状态、边和终止条件 | 显式状态图与条件边 |
 | 多 Agent 交接与子图 | 容易演化成自制框架 | 节点、子图和共享状态是核心能力 |
 | 长任务 checkpoint、暂停恢复 | 要自己设计持久化与版本兼容 | checkpointer 与中断恢复直接覆盖 |
@@ -277,7 +277,7 @@ Windows x64 官方 wheel 可离线打包；单进程稳定读写；产品与评�
 - **LangGraph 管什么：**节点、状态图、条件边、子图、图内循环、checkpoint、暂停恢复、节点级流式事件和未来的人工介入。
 - **我们管什么：**工具真实实现、Action／Observation 领域协议、上下文准入、token 预算、模型错误语义、collection 快照、引用校验、ConversationStore、MemoryPolicy 和 trace 落盘。
 - **首版怎么用：**即使是单轮，也可以由一个小图承载；图必须先简单、可读。多轮和多 Agent 到来时增加节点与边，而不是重写整个运行框架。
-- **06 是否作废：**不作废。Thought／Action、五个工具、预算和停止语义仍是图节点内部及跨节点必须遵守的领域契约；LangGraph 只负责推进状态。
+- **06 是否作废：**不作废。Thought／Action、七个工具、预算和停止语义仍是图节点内部及跨节点必须遵守的领域契约；LangGraph 只负责推进状态。
 
 **第一版不直接上“自主 Agent 群聊”。**多 Agent 必须按职责、证据和收益拆：例如 Router、Retrieval、Evidence Check、Synthesis、Citation Check。每个节点都要记录路径、预算和 handoff 原因；如果单 Agent 已能完成且质量相同，就不应先拆成多 Agent。
 

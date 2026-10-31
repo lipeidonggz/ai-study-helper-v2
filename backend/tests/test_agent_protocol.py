@@ -149,7 +149,7 @@ def test_release_prompt_bundle_has_stable_version_and_hash() -> None:
     first = release_prompt_bundle()
     second = release_prompt_bundle()
 
-    assert first.version == "chat-v17"
+    assert first.version == "chat-v20"
     assert first.template_hash == second.template_hash
     assert len(first.template_hash) == 64
     assert "{{RESPONSE_POLICY}}" in first.template
@@ -191,7 +191,7 @@ def test_finalization_prompt_requires_structured_finish() -> None:
 def test_outline_contract_distinguishes_default_root_from_single_section() -> None:
     outline = next(item for item in tool_descriptors() if item.name == "get_outline")
 
-    assert TOOL_CONTRACT_VERSION == "retrieval-tools-v5"
+    assert TOOL_CONTRACT_VERSION == "retrieval-tools-v9"
     assert "path=[]" in outline.description
     assert "解析 fallback" in outline.description
     assert "只有一个章节" in outline.description
@@ -202,6 +202,7 @@ def test_tool_descriptors_render_input_and_output_schemas() -> None:
 
     assert {item.name for item in descriptors} == {
         "list_documents",
+        "search_topic",
         "get_outline",
         "search_blocks",
         "list_blocks",
@@ -217,6 +218,15 @@ def test_tool_descriptors_render_input_and_output_schemas() -> None:
     assert rendered.count("输出 schema:") == len(descriptors)
     assert '"error"' in rendered
     assert '"section_context"' in rendered
+    coverage = next(item for item in descriptors if item.name == "search_topic")
+    assert "输入是主题词或主题短语，不是完整用户问题" in coverage.description
+    assert "完整 seed block" in coverage.description
+    assert "只对主题覆盖负责" in coverage.description
+    assert "语义查询和关键词查询" in coverage.description
+    assert "返回全部有相关证据支持的完整 block" in coverage.description
+    assert "不保证数学意义上的穷尽" in coverage.description
+    assert coverage.input_schema["required"] == ["topic"]
+    assert set(coverage.input_schema["properties"]) == {"topic"}
 
 
 def test_list_blocks_contract_requires_explicit_descendant_scope() -> None:
@@ -233,3 +243,6 @@ def test_list_blocks_contract_requires_explicit_descendant_scope() -> None:
     assert "不得只写其中一个最显眼的要素" in release_prompt_bundle().template
     assert "<output_structure>" in release_prompt_bundle().template
     assert "威胁模型" not in release_prompt_bundle().template
+    assert "其 blocks 是本次" in release_prompt_bundle().template
+    assert "完整证据池" in release_prompt_bundle().template
+    assert "单篇补读只能补充" in release_prompt_bundle().template

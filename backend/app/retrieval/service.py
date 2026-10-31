@@ -31,6 +31,7 @@ from app.retrieval.hybrid import (
     DEFAULT_HYBRID_RETRIEVAL_PROFILE,
     FusedCandidate,
     HybridRetrievalProfile,
+    RetrievalSearchMode,
     search_snapshot_index,
 )
 from app.retrieval.models import (
@@ -433,27 +434,11 @@ class RetrievalSnapshotReader:
         provider: EmbeddingProvider,
         doc_ids: list[str] | None = None,
         profile: HybridRetrievalProfile = DEFAULT_HYBRID_RETRIEVAL_PROFILE,
+        mode: RetrievalSearchMode = "hybrid",
     ) -> HybridSearchExecution:
-        """执行混合检索，并返回仅供后续 trace 使用的内部排名信息。"""
+        """执行指定模式的检索，并返回仅供后续 trace 使用的内部排名信息。"""
 
         normalized_query = _required_non_empty(query, "query")
-        versions = self._manifest.versions
-        if versions is None:
-            raise RetrievalFailure(
-                "collection_unavailable",
-                "active collection has no embedding profile",
-            )
-        expected_profile = versions.embedding_profile
-        if (
-            provider.profile.provider != expected_profile.provider
-            or provider.profile.model_id != expected_profile.model_id
-            or provider.profile.dimension != expected_profile.dimension
-        ):
-            raise RetrievalFailure(
-                "collection_unavailable",
-                "query embedding provider does not match the active collection",
-            )
-
         selected_ids = self._search_scope(doc_ids)
         if not self._manifest.documents:
             empty = SearchBlocksResult(blocks=[], empty_reason="collection_empty")
@@ -478,8 +463,31 @@ class RetrievalSnapshotReader:
                 fused_candidates=(),
             )
 
-        query_result = await _embed_query_with_retry(provider, normalized_query)
-        _validate_query_vector(query_result.vector, expected_profile.dimension)
+        query_vector = None
+        query_request_id = ""
+        query_input_tokens = 0
+        if mode in {"hybrid", "dense"}:
+            versions = self._manifest.versions
+            if versions is None:
+                raise RetrievalFailure(
+                    "collection_unavailable",
+                    "active collection has no embedding profile",
+                )
+            expected_profile = versions.embedding_profile
+            if (
+                provider.profile.provider != expected_profile.provider
+                or provider.profile.model_id != expected_profile.model_id
+                or provider.profile.dimension != expected_profile.dimension
+            ):
+                raise RetrievalFailure(
+                    "collection_unavailable",
+                    "query embedding provider does not match the active collection",
+                )
+            query_result = await _embed_query_with_retry(provider, normalized_query)
+            _validate_query_vector(query_result.vector, expected_profile.dimension)
+            query_vector = query_result.vector
+            query_request_id = query_result.request_id
+            query_input_tokens = query_result.input_tokens
         expected_index_ref = f"collections/{self.snapshot_id}/index/lance"
         if self._manifest.index_ref != expected_index_ref:
             raise RetrievalFailure(
@@ -488,17 +496,18 @@ class RetrievalSnapshotReader:
             )
         candidates = search_snapshot_index(
             self._snapshot_root,
-            query_vector=query_result.vector,
+            query_vector=query_vector,
             query=normalized_query,
             doc_ids=selected_ids,
             profile=profile,
+            mode=mode,
         )
         if not candidates.fused:
             return HybridSearchExecution(
                 result=SearchBlocksResult(blocks=[], empty_reason="no_match"),
                 profile=profile,
-                query_request_id=query_result.request_id,
-                query_input_tokens=query_result.input_tokens,
+                query_request_id=query_request_id,
+                query_input_tokens=query_input_tokens,
                 dense_block_ids=tuple(str(row["block_id"]) for row in candidates.dense_rows),
                 keyword_block_ids=tuple(str(row["block_id"]) for row in candidates.keyword_rows),
                 fused_candidates=(),
@@ -539,8 +548,8 @@ class RetrievalSnapshotReader:
         return HybridSearchExecution(
             result=SearchBlocksResult(blocks=blocks),
             profile=profile,
-            query_request_id=query_result.request_id,
-            query_input_tokens=query_result.input_tokens,
+            query_request_id=query_request_id,
+            query_input_tokens=query_input_tokens,
             dense_block_ids=tuple(str(row["block_id"]) for row in candidates.dense_rows),
             keyword_block_ids=tuple(str(row["block_id"]) for row in candidates.keyword_rows),
             fused_candidates=candidates.fused,

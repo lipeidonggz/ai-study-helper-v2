@@ -9,10 +9,16 @@ from pydantic import (
     ConfigDict,
     Field,
     ValidationError,
+    field_validator,
     model_validator,
 )
 
+from app.agent.corpus_grounded_coverage import (
+    TopicCoverageFailure,
+    execute_corpus_grounded_coverage,
+)
 from app.ingestion.models import DocumentLanguage
+from app.providers.chat import ChatProvider
 from app.providers.embeddings import EmbeddingProvider
 from app.retrieval.errors import RetrievalFailure
 from app.retrieval.hybrid import DEFAULT_HYBRID_RETRIEVAL_PROFILE, HybridRetrievalProfile
@@ -28,10 +34,12 @@ from app.retrieval.models import (
     SearchBlocksResult,
 )
 from app.retrieval.service import RetrievalSnapshotReader
+from app.tracing.store import TraceSession
 
-TOOL_CONTRACT_VERSION = "retrieval-tools-v5"
+TOOL_CONTRACT_VERSION = "retrieval-tools-v9"
 TOOL_WHITELIST = (
     "list_documents",
+    "search_topic",
     "get_outline",
     "search_blocks",
     "list_blocks",
@@ -77,6 +85,9 @@ class ToolExecution:
 
     payload: dict[str, Any]
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    model_calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 class ToolUnavailableError(Exception):
@@ -106,6 +117,22 @@ class SearchBlocksArgs(_ToolArgs):
 
     query: str
     doc_ids: list[str] | None = None
+
+
+class SearchTopicArgs(_ToolArgs):
+    """`search_topic` 参数。"""
+
+    topic: str = Field(min_length=1)
+
+    @field_validator("topic")
+    @classmethod
+    def validate_topic(cls, value: str) -> str:
+        """拒绝只有空白字符的主题。"""
+
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("topic must not be empty")
+        return normalized
 
 
 class ListBlocksArgs(_ToolArgs):
@@ -141,7 +168,7 @@ class ScanTermArgs(_ToolArgs):
 
 
 def tool_descriptors() -> list[ToolDescriptor]:
-    """返回当前版本冻结的六个工具描述。"""
+    """返回当前版本冻结的七个工具描述。"""
 
     return [
         ToolDescriptor(
@@ -166,6 +193,29 @@ def tool_descriptors() -> list[ToolDescriptor]:
                 "additionalProperties": False,
             },
             output_schema=_output_schema(ListDocumentsResult),
+        ),
+        ToolDescriptor(
+            name="search_topic",
+            description=(
+                "对一个主题执行高召回覆盖检索：先检索真实语料，再结合完整 seed "
+                "block 生成语义覆盖面、语义查询和关键词查询；合并并判断候选后"
+                "返回全部有相关证据支持的完整 block。"
+                "输入是主题词或主题短语，不是完整用户问题。"
+                "该工具只对主题覆盖负责，不根据当前答案形态裁剪结果；结果如何"
+                "筛选和综合由主 Agent 负责。当用户未指定单一文档，且需要发现、"
+                "汇总或找全一个主题在知识库中的分散内容时优先调用。该工具提高"
+                "相关证据召回率，但不保证数学意义上的穷尽，也不应承诺知识库不存在"
+                "其它内容。"
+            ),
+            input_schema={
+                "type": "object",
+                "required": ["topic"],
+                "properties": {
+                    "topic": {"type": "string", "minLength": 1},
+                },
+                "additionalProperties": False,
+            },
+            output_schema=_output_schema(SearchBlocksResult),
         ),
         ToolDescriptor(
             name="get_outline",
@@ -289,17 +339,19 @@ def tool_descriptors() -> list[ToolDescriptor]:
 
 
 class RetrievalToolAdapter:
-    """把模型 Action 参数映射到固定快照的六个检索能力。"""
+    """把模型 Action 参数映射到固定快照的七个检索能力。"""
 
     def __init__(
         self,
         reader: RetrievalSnapshotReader,
         embedding_provider: EmbeddingProvider,
         *,
+        chat_provider: ChatProvider | None = None,
         search_profile: HybridRetrievalProfile = DEFAULT_HYBRID_RETRIEVAL_PROFILE,
     ) -> None:
         self._reader = reader
         self._embedding_provider = embedding_provider
+        self._chat_provider = chat_provider
         self._search_profile = search_profile
         self._descriptors = {descriptor.name: descriptor for descriptor in tool_descriptors()}
 
@@ -309,7 +361,14 @@ class RetrievalToolAdapter:
 
         return list(self._descriptors.values())
 
-    async def execute(self, tool_name: str, arguments: dict[str, Any]) -> ToolExecution:
+    async def execute(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        trace_session: TraceSession | None = None,
+        parent_span_id: str | None = None,
+    ) -> ToolExecution:
         """校验参数并执行一个工具；业务失败作为公共 error payload 返回。"""
 
         if tool_name not in self._descriptors:
@@ -325,6 +384,40 @@ class RetrievalToolAdapter:
                 return ToolExecution(
                     payload=_validated_payload(result),
                     diagnostics={"result_count": result.total},
+                )
+            if tool_name == "search_topic":
+                parsed = SearchTopicArgs.model_validate(arguments)
+                if self._chat_provider is None:
+                    return ToolExecution(
+                        payload=_public_error(
+                            "coverage_planner_unavailable",
+                            "topic coverage search requires a chat provider",
+                        )
+                    )
+                try:
+                    execution = await execute_corpus_grounded_coverage(
+                        topic=parsed.topic,
+                        reader=self._reader,
+                        embedding_provider=self._embedding_provider,
+                        chat_provider=self._chat_provider,
+                        search_profile=self._search_profile,
+                        trace_session=trace_session,
+                        parent_span_id=parent_span_id,
+                    )
+                except TopicCoverageFailure as error:
+                    return ToolExecution(
+                        payload=_public_error(error.code, error.message),
+                        diagnostics=error.diagnostics,
+                        model_calls=error.model_calls,
+                        input_tokens=error.input_tokens,
+                        output_tokens=error.output_tokens,
+                    )
+                return ToolExecution(
+                    payload=_validated_payload(execution.payload),
+                    diagnostics=execution.diagnostics,
+                    model_calls=execution.model_calls,
+                    input_tokens=execution.input_tokens,
+                    output_tokens=execution.output_tokens,
                 )
             if tool_name == "get_outline":
                 parsed = GetOutlineArgs.model_validate(arguments)

@@ -7,7 +7,7 @@ from typing import Any
 
 from app.agent.tool_adapter import ToolDescriptor
 
-PROMPT_BUNDLE_VERSION = "chat-v17"
+PROMPT_BUNDLE_VERSION = "chat-v20"
 
 ACTION_RESPONSE_POLICY = """<response_protocol>
 每次响应必须且只能输出一个 JSON 对象，在“工具调用”和“结束”两种 schema 中二选一。
@@ -115,6 +115,10 @@ SYSTEM_PROMPT_TEMPLATE = """<role>
    search_blocks 已经返回完整正文，不需要再次补全同一 block。
 9. list_blocks 不传 section_paths 表示读取整篇；传入章节时必须显式选择
    include_descendants=true（本节及后代）或 include_descendants=false（仅本节直属块）。
+10. search_topic 已由工具完成多查询展开、跨文档合并和文档去偏；其 blocks 是本次
+    主题检索的完整证据池。回答应综合这个证据池，不应因其中某篇最显著就忽略其它块。
+    除用户明确要求补全某篇／某节原文，或需要核验一个具体缺口外，不要求对候选文档
+    逐篇复读；后续单篇读取只能补充证据，不能替代已经返回的跨文档证据。
 </evidence>
 
 <knowledge_scope>
@@ -164,8 +168,11 @@ SYSTEM_PROMPT_TEMPLATE = """<role>
 </output_structure>
 
 <coverage>
-1. 用户要求“有哪些”“全部”“整节”“所有要点”时，先明确范围，再进行完整枚举；Top-k 结果不能冒充全集。
-2. 需要比较多个来源时，逐篇取得每个来源的证据；一次全库检索不能代替逐源覆盖检查。
+1. 用户要求“有哪些”“全部”“整节”“所有要点”时，先判断范围是单篇文档，还是
+   未指定单篇的跨文档主题。单篇范围必须完整枚举；跨文档主题应使用 search_topic
+   获取高召回证据池，普通 Top-k 结果不能冒充全集。
+2. 用户明确指定多个来源并要求逐源比较时，逐篇取得每个指定来源的证据。
+   search_topic 返回的跨文档证据仍是主证据池，单篇补读只能补充，不能挤掉其它证据。
 3. 范围未取全、结果无法进入上下文或某篇文档无法访问时，必须说明缺了什么。
 4. collection_status.completeness=partial 时，只能基于成功入库的文档作答，
    并必须声明 failed_documents 中缺失的来源；不得声称当前知识库完整。

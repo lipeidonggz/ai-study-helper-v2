@@ -60,6 +60,7 @@ _TRUNCATION_NOTICE_MARKERS = (
 )
 TOOL_ACTIVITY_LABELS = {
     "list_documents": "正在查看文档列表",
+    "search_topic": "正在构建主题高召回证据",
     "get_outline": "正在查看文档结构",
     "search_blocks": "正在检索相关段落",
     "list_blocks": "正在读取文档内容",
@@ -122,6 +123,7 @@ class AgentRunResult:
     agent_turns: int
     tool_calls: int
     model_calls: int
+    tool_model_calls: int
     input_tokens: int
     output_tokens: int
     sources: list[dict[str, Any]]
@@ -144,6 +146,7 @@ class _AgentGraphState(TypedDict, total=False):
     agent_turns: int
     tool_calls: int
     model_calls: int
+    tool_model_calls: int
     input_tokens: int
     output_tokens: int
     tools_enabled: bool
@@ -271,6 +274,7 @@ class AgentRuntime:
                     adapter = RetrievalToolAdapter(
                         reader,
                         self._embedding_provider,
+                        chat_provider=self._chat_provider,
                         search_profile=self._retrieval_profile,
                     )
                     execution = _AgentGraphExecution(
@@ -386,6 +390,7 @@ class AgentRuntime:
             agent_turns=0,
             tool_calls=0,
             model_calls=0,
+            tool_model_calls=0,
             input_tokens=0,
             output_tokens=0,
             sources=[],
@@ -413,6 +418,7 @@ class AgentRuntime:
                     0,
                     result.model_calls
                     - result.agent_turns
+                    - result.tool_model_calls
                     - result.citation_annotation_model_calls,
                 ),
                 input_tokens=result.input_tokens,
@@ -518,6 +524,7 @@ class _AgentGraphExecution:
             "agent_turns": 0,
             "tool_calls": 0,
             "model_calls": 0,
+            "tool_model_calls": 0,
             "input_tokens": 0,
             "output_tokens": 0,
             "tools_enabled": True,
@@ -562,6 +569,7 @@ class _AgentGraphExecution:
             agent_turns=final.get("agent_turns", 0),
             tool_calls=final.get("tool_calls", 0),
             model_calls=final.get("model_calls", 0),
+            tool_model_calls=final.get("tool_model_calls", 0),
             input_tokens=final.get("input_tokens", 0),
             output_tokens=final.get("output_tokens", 0),
             sources=final.get("sources", []),
@@ -1549,6 +1557,7 @@ class _AgentGraphExecution:
                 attributes={
                     "app.termination_reason": "finish",
                     "app.answer_completeness": ("partial" if limitations else "complete"),
+                    "app.decision_summary": action.decision_summary,
                 },
             )
             return {
@@ -1680,7 +1689,12 @@ class _AgentGraphExecution:
             ),
         )
         try:
-            execution = await self._adapter.execute(action.tool_name, action.arguments)
+            execution = await self._adapter.execute(
+                action.tool_name,
+                action.arguments,
+                trace_session=self._trace_session,
+                parent_span_id=(tool_span.span_id if tool_span is not None else None),
+            )
         except ToolUnavailableError:
             if tool_span is not None and self._trace_session is not None:
                 self._trace_session.end_span(
@@ -1724,6 +1738,16 @@ class _AgentGraphExecution:
                 "current_turn_span": None,
             }
 
+        state = cast(
+            _AgentGraphState,
+            {
+                **state,
+                "model_calls": state.get("model_calls", 0) + execution.model_calls,
+                "tool_model_calls": (state.get("tool_model_calls", 0) + execution.model_calls),
+                "input_tokens": state.get("input_tokens", 0) + execution.input_tokens,
+                "output_tokens": state.get("output_tokens", 0) + execution.output_tokens,
+            },
+        )
         if self._cancellation.is_cancelled:
             if tool_span is not None and self._trace_session is not None:
                 self._trace_session.end_span(
@@ -1749,6 +1773,9 @@ class _AgentGraphExecution:
                 {
                     "app.payload_artifact": payload_artifact.model_dump(mode="json"),
                     "app.source_count": len(source_refs),
+                    "app.tool_model_calls": execution.model_calls,
+                    "app.tool_input_tokens": execution.input_tokens,
+                    "app.tool_output_tokens": execution.output_tokens,
                 }
             )
             if self._trace_session.mode == "full":
@@ -1811,6 +1838,9 @@ class _AgentGraphExecution:
                     "result_tokens": result_tokens,
                     "diagnostics": execution.diagnostics,
                     "admitted": prospective <= self._config.max_context_tokens,
+                    "model_calls": execution.model_calls,
+                    "input_tokens": execution.input_tokens,
+                    "output_tokens": execution.output_tokens,
                 },
             ),
         )
@@ -1854,6 +1884,10 @@ class _AgentGraphExecution:
                 "limitations": limitations,
                 "sources": state.get("sources", []),
                 "evidence_blocks": state.get("evidence_blocks", []),
+                "model_calls": state.get("model_calls", 0),
+                "tool_model_calls": state.get("tool_model_calls", 0),
+                "input_tokens": state.get("input_tokens", 0),
+                "output_tokens": state.get("output_tokens", 0),
                 "current_turn_span": None,
             }
         history.append(observation_text)
@@ -1871,6 +1905,10 @@ class _AgentGraphExecution:
             "limitations": limitations,
             "sources": merged_sources,
             "evidence_blocks": merged_evidence,
+            "model_calls": state.get("model_calls", 0),
+            "tool_model_calls": state.get("tool_model_calls", 0),
+            "input_tokens": state.get("input_tokens", 0),
+            "output_tokens": state.get("output_tokens", 0),
             "current_turn_span": None,
         }
 
