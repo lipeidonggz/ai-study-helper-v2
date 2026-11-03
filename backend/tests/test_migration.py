@@ -40,6 +40,10 @@ def test_migration_creates_backup_before_upgrading_old_schema(tmp_path: Path) ->
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
     assert "documents" in tables
+    assert "extraction_profiles" in tables
+    assert "profile_preview_runs" in tables
+    assert "profile_comparisons" in tables
+    assert "evidence_translations" in tables
     upgraded.engine.dispose()
 
 

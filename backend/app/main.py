@@ -49,6 +49,12 @@ from app.ingestion.models import (
 )
 from app.ingestion.service import IngestionService
 from app.ingestion.source import UrlFetcher
+from app.profile_extraction.api import create_profile_extraction_router
+from app.profile_extraction.checklist_service import ChecklistService
+from app.profile_extraction.comparison_service import ComparisonService
+from app.profile_extraction.errors import ProfileExtractionError
+from app.profile_extraction.preview_service import ProfilePreviewService
+from app.profile_extraction.profile_service import ProfileService
 from app.providers.chat import ChatProvider, DeepSeekChatProvider
 from app.providers.embeddings import DashScopeEmbeddingProvider, EmbeddingProvider
 from app.settings.models import (
@@ -188,6 +194,49 @@ def create_app(
     wiki_build_service = (
         WikiBuildService(resolved_data_root) if resolved_data_root is not None else None
     )
+    profile_database = (
+        StorageDatabase(resolved_data_root) if resolved_data_root is not None else None
+    )
+    profile_service = (
+        ProfileService(
+            resolved_data_root,
+            resolved_credentials,
+            chat_provider_factory=chat_provider_factory,
+            database=profile_database,
+        )
+        if resolved_data_root is not None and profile_database is not None
+        else None
+    )
+    preview_service = (
+        ProfilePreviewService(
+            resolved_data_root,
+            profile_service,
+            resolved_credentials,
+            chat_provider_factory=chat_provider_factory,
+            database=profile_database,
+        )
+        if (
+            resolved_data_root is not None
+            and profile_database is not None
+            and profile_service is not None
+        )
+        else None
+    )
+    checklist_service = (
+        ChecklistService(
+            resolved_data_root,
+            resolved_credentials,
+            chat_provider_factory=chat_provider_factory,
+            database=profile_database,
+        )
+        if resolved_data_root is not None and profile_database is not None
+        else None
+    )
+    comparison_service = (
+        ComparisonService(resolved_data_root, database=profile_database)
+        if resolved_data_root is not None and profile_database is not None
+        else None
+    )
     agent_stream_service = AgentRunStreamService()
     trace_store = TraceStore(resolved_data_root) if resolved_data_root is not None else None
     trace_catalog = (
@@ -229,11 +278,15 @@ def create_app(
             await task_service.start()
         trace_cleanup_task = asyncio.create_task(trace_cleanup_loop())
         try:
+            if preview_service is not None:
+                await preview_service.start()
             yield
         finally:
             trace_cleanup_task.cancel()
             await asyncio.gather(trace_cleanup_task, return_exceptions=True)
             await agent_stream_service.shutdown()
+            if preview_service is not None:
+                await preview_service.stop()
             if trace_store is not None:
                 trace_store.close()
             if task_service is not None:
@@ -252,7 +305,7 @@ def create_app(
         CORSMiddleware,
         allow_origins=ALLOWED_ORIGINS,
         allow_credentials=False,
-        allow_methods=["GET", "POST", "PUT"],
+        allow_methods=["GET", "POST", "PUT", "DELETE"],
         allow_headers=["content-type", "x-launch-token", "last-event-id"],
     )
 
@@ -301,6 +354,24 @@ def create_app(
             http_status = 409
         return JSONResponse(
             status_code=http_status,
+            content={
+                "error": {
+                    "code": failure.code,
+                    "message": failure.message,
+                    "retryable": failure.retryable,
+                }
+            },
+        )
+
+    @app.exception_handler(ProfileExtractionError)
+    async def profile_extraction_failure_handler(
+        _request: Request,
+        failure: ProfileExtractionError,
+    ) -> JSONResponse:
+        """把 Profile 抽取领域错误转换为稳定 API 错误。"""
+
+        return JSONResponse(
+            status_code=failure.http_status,
             content={
                 "error": {
                     "code": failure.code,
@@ -1071,6 +1142,22 @@ def create_app(
                 503,
             )
         return task_service.cancel(task_id)
+
+    if (
+        profile_service is not None
+        and preview_service is not None
+        and checklist_service is not None
+        and comparison_service is not None
+    ):
+        app.include_router(
+            create_profile_extraction_router(
+                profiles=profile_service,
+                previews=preview_service,
+                checklists=checklist_service,
+                comparisons=comparison_service,
+            ),
+            dependencies=protected,
+        )
 
     return app
 

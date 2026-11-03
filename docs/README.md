@@ -9,6 +9,10 @@
 - 阶段：实现阶段，027 claim-aware 引用标注已完成，028 评测失败分类拆分已实现。
 - 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付、检索与 Agent 运行链、流式问答、本地 trace 诊断和逐 criterion 评测判定已实现。
 - LLM Wiki 初版：069–074 已完成 snapshot topic map、身份账本、topic build/search、topic 叙述页、增量更新和 Agent 三工具接入；真实 c13 的主题 rediscovery 成立，主 Agent 的开放找全效果继续由 BL-0012 跟踪。
+- Profile 抽取第一阶段已实现 Profile 管理、Preview Run、文档清单和 Profile 比较，并补充
+  总量优先的成本反馈、运行中动效、带持久缓存的英文证据翻译和按原文顺序的候选覆盖视图；
+  076–080 已完成批次验收，反向解释和 B 级决策均已确认。
+  旧 11 号实现不再作为新方向基线。
 - 当前工作：全部 active Judge criteria 已迁移到 v4；c14 为 9/10，c15 达到 9/10；cf-001 收敛为“目标范围可见”并以 10/10 通过；cf-002 新数据 10/10 通过，稳定同时说明能力边界和文档指代不明。c13 原题恢复与千篇规模检索链路登记为 [BL-0012](development/backlog.md)；全量用例回归待统一执行。
 
 ## 设计基线
@@ -25,7 +29,8 @@
 | [08](design/08-evaluation-console-design.md) | 评测台、诊断与回归 | 已审核 · 实现基线 |
 | [09](design/09-technology-selection.md) | 技术选型与总体架构 | v0.4 · 实现基线 |
 | [10](design/10-document-detail-design.md) | 文档详情页信息架构与数据边界 | 已审核 · 首版实现基线 |
-| [11](design/11-llm-wiki-compilation.md) | LLM Wiki 全库编译、主题台账、页面与回源 | 069–074 初版实现基线已确认 |
+| [11](design/11-llm-wiki-compilation.md) | LLM Wiki 全库编译、主题台账、页面与回源 | 历史设计与实现记录；新方向以 12 号为准 |
+| [12](design/12-profile-driven-wiki-extraction.md) | Profile 驱动的候选抽取、条目页与受控导航链接 | 第一阶段已实现并完成批次验收 |
 
 01–09 已于 2026-10-20 审核，并作为当前实现基线；03 已于 2026-10-29 完成 c6、c8、c11、c13、c14 和 c15 判据修订并更新为 v0.10，09 已依据 ADR 0004 更新为 v0.4。后续修改必须保留变更原因，同时更新本索引。
 
@@ -181,7 +186,13 @@
 - [072 · Wiki Narrative Pages（已完成）](development/slices/072-wiki-narrative-pages.md)
 - [073 · Wiki Incremental Build（已完成）](development/slices/073-wiki-incremental-build.md)
 - [074 · Wiki Agent Tools（已完成；覆盖效果继续 BL-0012）](development/slices/074-wiki-agent-tools.md)
+- [076 · Profile 管理与选择（已完成）](development/slices/076-profile-management.md)
+- [077 · Profile Preview Run（已完成）](development/slices/077-profile-preview-runs.md)
+- [078 · 文档清单与 Profile 比较（已完成）](development/slices/078-profile-comparison.md)
+- [079 · 试抽取反馈与证据翻译（已完成）](development/slices/079-preview-feedback-and-evidence-translation.md)
+- [080 · 按原文顺序检查候选覆盖（已完成）](development/slices/080-source-order-coverage-view.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
+- [076–080 · Profile 抽取功能批次验收（已完成）](development/manual-tests/076-078-profile-extraction-workflow.md)
 
 ## 旧仓库
 

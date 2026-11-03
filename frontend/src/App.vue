@@ -12,6 +12,7 @@ import {
 } from "vue";
 
 import { API_TIMEOUT_MS, fetchWithTimeout } from "./api";
+import ProfileWorkbench from "./ProfileWorkbench.vue";
 import {
   normalizeChatSourceKey,
   renderChatMarkdown,
@@ -43,6 +44,7 @@ type SourceKind = "file" | "url";
 type AppSection =
   | "chat"
   | "knowledge"
+  | "profiles"
   | "ingest"
   | "history"
   | "settings"
@@ -565,6 +567,7 @@ let activeCitationElement: HTMLElement | null = null;
 function readSectionFromHash(): AppSection {
   const value = window.location.hash.replace(/^#/, "").split("/")[0];
   return value === "knowledge" ||
+    value === "profiles" ||
     value === "ingest" ||
     value === "history" ||
     value === "settings" ||
@@ -3049,11 +3052,23 @@ onBeforeUnmount(() => {
       </button>
       <button
         type="button"
+        :class="{ active: activeSection === 'profiles' }"
+        :aria-current="activeSection === 'profiles' ? 'page' : undefined"
+        @click="selectSection('profiles')"
+      >
+        <span class="nav-index">03</span>
+        <span>
+          <strong>Profile 抽取</strong>
+          <small>自定义、预览与比较</small>
+        </span>
+      </button>
+      <button
+        type="button"
         :class="{ active: activeSection === 'ingest' }"
         :aria-current="activeSection === 'ingest' ? 'page' : undefined"
         @click="selectSection('ingest')"
       >
-        <span class="nav-index">03</span>
+        <span class="nav-index">04</span>
         <span>
           <strong>入库</strong>
           <small>{{ taskQueueSummary }}</small>
@@ -3065,7 +3080,7 @@ onBeforeUnmount(() => {
         :aria-current="activeSection === 'history' ? 'page' : undefined"
         @click="selectSection('history')"
       >
-        <span class="nav-index">04</span>
+        <span class="nav-index">05</span>
         <span>
           <strong>操作记录</strong>
           <small>{{ taskHistory.length }} 条记录</small>
@@ -3077,7 +3092,7 @@ onBeforeUnmount(() => {
         :aria-current="activeSection === 'settings' ? 'page' : undefined"
         @click="selectSection('settings')"
       >
-        <span class="nav-index">05</span>
+        <span class="nav-index">06</span>
         <span>
           <strong>设置</strong>
           <small>
@@ -3096,7 +3111,7 @@ onBeforeUnmount(() => {
         :aria-current="activeSection === 'evaluation' ? 'page' : undefined"
         @click="selectSection('evaluation')"
       >
-        <span class="nav-index">06</span>
+        <span class="nav-index">07</span>
         <span>
           <strong>评测</strong>
           <small>开发构建专用</small>
@@ -3107,6 +3122,12 @@ onBeforeUnmount(() => {
     <component
       :is="EvaluationConsole"
       v-if="evalConsoleEnabled && activeSection === 'evaluation'"
+    />
+
+    <ProfileWorkbench
+      v-if="activeSection === 'profiles' && connection"
+      :base-url="connection.baseUrl"
+      :token="connection.token"
     />
 
     <section v-if="activeSection === 'chat'" class="chat-layout">
