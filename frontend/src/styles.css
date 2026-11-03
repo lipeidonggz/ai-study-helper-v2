@@ -237,7 +237,7 @@ input {
 
 .main-nav {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
   margin-top: 20px;
   overflow: hidden;
   border: 1px solid rgba(37, 71, 50, 0.16);
@@ -245,10 +245,6 @@ input {
   background: rgba(255, 255, 255, 0.68);
   box-shadow: 0 16px 42px rgba(45, 69, 52, 0.07);
   backdrop-filter: blur(18px);
-}
-
-.main-nav.with-eval {
-  grid-template-columns: repeat(6, minmax(0, 1fr));
 }
 
 .main-nav button {
