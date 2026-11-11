@@ -53,6 +53,7 @@ from app.tracing.models import TraceMode, TraceStatus
 from app.tracing.store import TraceSession, TraceSpanHandle, TraceStore, new_trace_id
 from app.wiki.build_service import WikiBuildService
 from app.wiki.errors import WikiCompilationError
+from app.wiki.profile_knowledge_map import SearchWikiTopicV2Service
 from app.wiki.tool_adapter import WikiToolAdapter
 
 AGENT_LOOP_VERSION = "react-structured-v4"
@@ -73,6 +74,7 @@ TOOL_ACTIVITY_LABELS = {
     "search_wiki_topics": "正在查看 Wiki 主题入口",
     "read_wiki_page": "正在读取 Wiki 页面",
     "get_topic_evidence": "正在读取 Wiki 主题证据",
+    "search_wiki_topic_v2": "正在检索知识地图主题证据",
 }
 
 
@@ -288,20 +290,33 @@ class AgentRuntime:
                     wiki_status = "disabled"
                     wiki_build_id: str | None = None
                     if self._enable_wiki_tools:
+                        knowledge_map_id = SearchWikiTopicV2Service(
+                            self._data_root
+                        ).active_map_id_for_selected_profile(reader.snapshot_id)
+                        wiki_build_ready = False
                         try:
                             wiki_build = WikiBuildService(self._data_root).active_for_snapshot(
                                 reader.snapshot_id
                             )
                         except WikiCompilationError:
-                            wiki_status = "not_ready_for_snapshot"
+                            wiki_status = (
+                                "ready"
+                                if knowledge_map_id is not None
+                                else "not_ready_for_snapshot"
+                            )
                         else:
+                            wiki_build_ready = True
                             wiki_status = "ready"
                             wiki_build_id = wiki_build.build_id
+                        if wiki_build_ready or knowledge_map_id is not None:
                             tool_adapters.append(
                                 WikiToolAdapter(
                                     self._data_root,
                                     snapshot_id=reader.snapshot_id,
                                     embedding_provider=self._embedding_provider,
+                                    chat_provider=self._chat_provider,
+                                    knowledge_map_id=knowledge_map_id,
+                                    enable_legacy_tools=wiki_build_ready,
                                 )
                             )
                     adapter = CompositeToolAdapter(tool_adapters)

@@ -39,11 +39,36 @@ def test_migration_creates_backup_before_upgrading_old_schema(tmp_path: Path) ->
             row[0]
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
+        candidate_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(preview_candidates)")
+        }
+        run_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(profile_preview_runs)")
+        }
     assert "documents" in tables
     assert "extraction_profiles" in tables
     assert "profile_preview_runs" in tables
     assert "profile_comparisons" in tables
     assert "evidence_translations" in tables
+    assert "selection_reasons_json" in candidate_columns
+    assert "semantic_audit_status" in run_columns
+    assert "semantic_audit_prompt_version" in run_columns
+    assert "name_scope_audit_prompt_version" in run_columns
+    assert "name_meaning_audit_prompt_version" in run_columns
+    assert "document_anchor_prompt_version" in run_columns
+    assert "document_anchor_policy_version" in run_columns
+    assert "document_anchor_json" in run_columns
+    assert "semantic_audit_json" in run_columns
+    assert "name_anchor_source_block_ids_json" in candidate_columns
+    assert "name_anchor_reason" in candidate_columns
+    assert "provisional_name" in candidate_columns
+    assert "title_kind" in candidate_columns
+    assert "title_standalone_clear" in candidate_columns
+    assert "missing_anchor_types_json" in candidate_columns
+    assert "name_changed" in candidate_columns
+    assert "summaries_json" in candidate_columns
+    assert "summary" not in candidate_columns
+    assert "summary_variants_json" not in candidate_columns
     upgraded.engine.dispose()
 
 

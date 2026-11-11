@@ -1,0 +1,321 @@
+{
+  "case_revision_id": null,
+  "source_case_revision_id": "cr_c13_003_fff9fbc82a83",
+  "target_case_revision_number": 6,
+  "target_case_revision_status": "draft",
+  "snapshot_id": "s_6b787258ba7d700c",
+  "topic": "AI Agent 隔离与控制边界",
+  "single_document": {
+    "doc_id": "doc_fd4dec9976e041308e2b39ed797c75d1",
+    "required_group_ids": [
+      "filesystem_and_workspace_scope",
+      "credentials_and_identity",
+      "tool_and_action_capability",
+      "external_content_trust",
+      "human_oversight",
+      "config_tool_source_trust"
+    ],
+    "groups": {
+      "filesystem_and_workspace_scope": {
+        "label": "文件与工作区可达边界",
+        "evidence_block_ids": [
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00004",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00007",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00008",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00012",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00013",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00014"
+        ]
+      },
+      "credentials_and_identity": {
+        "label": "凭证与身份边界",
+        "evidence_block_ids": [
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00004",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00011",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00012",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00021"
+        ]
+      },
+      "tool_and_action_capability": {
+        "label": "工具与行动能力边界",
+        "evidence_block_ids": [
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00005",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00008",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00014"
+        ]
+      },
+      "external_content_trust": {
+        "label": "外部内容与工具结果信任边界",
+        "evidence_block_ids": [
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00003",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00005",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00011",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00015",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00019",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00020"
+        ]
+      },
+      "human_oversight": {
+        "label": "人工监督与中断边界",
+        "evidence_block_ids": [
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00002",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00008",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00012",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00023"
+        ]
+      },
+      "config_tool_source_trust": {
+        "label": "配置、hook 与 MCP 来源信任边界",
+        "evidence_block_ids": [
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00010",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00014",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00019"
+        ]
+      }
+    },
+    "known_relevant_block_ids": [
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00001",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00002",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00003",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00004",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00005",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00006",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00007",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00008",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00010",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00011",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00012",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00013",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00014",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00015",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00016",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00017",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00018",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00019",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00020",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00021",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00022",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00023"
+    ]
+  },
+  "cross_document": {
+    "required_core_group_ids": [
+      "filesystem_and_workspace_scope",
+      "credentials_and_identity",
+      "tool_and_action_capability",
+      "external_content_trust",
+      "parallel_work_state",
+      "context_and_memory",
+      "subagent_delegation"
+    ],
+    "extension_group_ids": [
+      "config_tool_source_trust",
+      "human_oversight",
+      "resource_and_time",
+      "audit_and_observability"
+    ],
+    "minimum_extension_groups": 2,
+    "known_relevant_block_ids": [
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00001",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00002",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00003",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00004",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00005",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00006",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00007",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00008",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00010",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00012",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00013",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00014",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00015",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00016",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00021",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00022",
+      "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00023",
+      "doc_23f78d4aa7c1444ab4d4a48c96bf6736#v0001#c1#b00004",
+      "doc_23f78d4aa7c1444ab4d4a48c96bf6736#v0001#c1#b00005",
+      "doc_23f78d4aa7c1444ab4d4a48c96bf6736#v0001#c1#b00021",
+      "doc_23f78d4aa7c1444ab4d4a48c96bf6736#v0001#c1#b00022",
+      "doc_23f78d4aa7c1444ab4d4a48c96bf6736#v0001#c1#b00032",
+      "doc_791cd26200c247ac92e2dfeece9ff11d#v0001#c1#b00013",
+      "doc_4953bd8d2e2d433bb2a523cc28636841#v0001#c1#b00007",
+      "doc_4953bd8d2e2d433bb2a523cc28636841#v0001#c1#b00009",
+      "doc_4953bd8d2e2d433bb2a523cc28636841#v0001#c1#b00029",
+      "doc_4953bd8d2e2d433bb2a523cc28636841#v0001#c1#b00032",
+      "doc_3683c99bf98342cf958ba8b9384f2008#v0001#c1#b00004",
+      "doc_3683c99bf98342cf958ba8b9384f2008#v0001#c1#b00012",
+      "doc_3683c99bf98342cf958ba8b9384f2008#v0001#c1#b00013",
+      "doc_7f36f426b84f40eb9439acaad4949e32#v0001#c1#b00012",
+      "doc_7f36f426b84f40eb9439acaad4949e32#v0001#c1#b00016",
+      "doc_f8694a12cc744187ae86b4efb7b284c2#v0001#c1#b00010",
+      "doc_983ba4e2cbff4185873d525a69195fdf#v0001#c1#b00015",
+      "doc_a0ffdc255fe64a00b41f69a95dfbbf1b#v0001#c1#b00015"
+    ],
+    "groups": {
+      "filesystem_and_workspace_scope": {
+        "label": "文件与工作区可达边界",
+        "evidence_block_ids": [
+          "doc_f8694a12cc744187ae86b4efb7b284c2#v0001#c1#b00003",
+          "doc_f8694a12cc744187ae86b4efb7b284c2#v0001#c1#b00010",
+          "doc_983ba4e2cbff4185873d525a69195fdf#v0001#c1#b00015",
+          "doc_23f78d4aa7c1444ab4d4a48c96bf6736#v0001#c1#b00007",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00004",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00007",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00008",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00012",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00013",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00014"
+        ]
+      },
+      "credentials_and_identity": {
+        "label": "凭证与身份边界",
+        "evidence_block_ids": [
+          "doc_983ba4e2cbff4185873d525a69195fdf#v0001#c1#b00004",
+          "doc_983ba4e2cbff4185873d525a69195fdf#v0001#c1#b00018",
+          "doc_983ba4e2cbff4185873d525a69195fdf#v0001#c1#b00023",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00004",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00011",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00012",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00021"
+        ]
+      },
+      "tool_and_action_capability": {
+        "label": "工具与行动能力边界",
+        "evidence_block_ids": [
+          "doc_f8694a12cc744187ae86b4efb7b284c2#v0001#c1#b00006",
+          "doc_f8694a12cc744187ae86b4efb7b284c2#v0001#c1#b00010",
+          "doc_983ba4e2cbff4185873d525a69195fdf#v0001#c1#b00015",
+          "doc_23f78d4aa7c1444ab4d4a48c96bf6736#v0001#c1#b00007",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00005",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00008",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00014"
+        ]
+      },
+      "external_content_trust": {
+        "label": "外部内容与工具结果信任边界",
+        "evidence_block_ids": [
+          "doc_983ba4e2cbff4185873d525a69195fdf#v0001#c1#b00018",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00003",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00005",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00011",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00015",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00019",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00020"
+        ]
+      },
+      "parallel_work_state": {
+        "label": "并行工作与持久状态控制边界",
+        "evidence_requirements": [
+          {
+            "requirement_id": "workspace_isolation",
+            "label": "并行工作现场隔离",
+            "evidence_block_ids": [
+              "doc_983ba4e2cbff4185873d525a69195fdf#v0001#c1#b00025"
+            ]
+          },
+          {
+            "requirement_id": "persistent_state_recovery",
+            "label": "持久状态保存与恢复",
+            "evidence_block_ids": [
+              "doc_7f36f426b84f40eb9439acaad4949e32#v0001#c1#b00016",
+              "doc_6c0a83dc425349d6ac08a20fba5ab94f#v0001#c1#b00013"
+            ]
+          }
+        ],
+        "evidence_block_ids": [
+          "doc_983ba4e2cbff4185873d525a69195fdf#v0001#c1#b00025",
+          "doc_7f36f426b84f40eb9439acaad4949e32#v0001#c1#b00016",
+          "doc_6c0a83dc425349d6ac08a20fba5ab94f#v0001#c1#b00013"
+        ]
+      },
+      "context_and_memory": {
+        "label": "上下文与记忆生命周期边界",
+        "evidence_block_ids": [
+          "doc_983ba4e2cbff4185873d525a69195fdf#v0001#c1#b00022",
+          "doc_983ba4e2cbff4185873d525a69195fdf#v0001#c1#b00033",
+          "doc_a0ffdc255fe64a00b41f69a95dfbbf1b#v0001#c1#b00003",
+          "doc_a0ffdc255fe64a00b41f69a95dfbbf1b#v0001#c1#b00004",
+          "doc_a0ffdc255fe64a00b41f69a95dfbbf1b#v0001#c1#b00005",
+          "doc_a0ffdc255fe64a00b41f69a95dfbbf1b#v0001#c1#b00009",
+          "doc_a0ffdc255fe64a00b41f69a95dfbbf1b#v0001#c1#b00010",
+          "doc_a0ffdc255fe64a00b41f69a95dfbbf1b#v0001#c1#b00012",
+          "doc_a0ffdc255fe64a00b41f69a95dfbbf1b#v0001#c1#b00013",
+          "doc_a0ffdc255fe64a00b41f69a95dfbbf1b#v0001#c1#b00014",
+          "doc_a0ffdc255fe64a00b41f69a95dfbbf1b#v0001#c1#b00016",
+          "doc_7f36f426b84f40eb9439acaad4949e32#v0001#c1#b00023",
+          "doc_23f78d4aa7c1444ab4d4a48c96bf6736#v0001#c1#b00004",
+          "doc_23f78d4aa7c1444ab4d4a48c96bf6736#v0001#c1#b00010",
+          "doc_23f78d4aa7c1444ab4d4a48c96bf6736#v0001#c1#b00012",
+          "doc_23f78d4aa7c1444ab4d4a48c96bf6736#v0001#c1#b00031",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00021",
+          "doc_a0ffdc255fe64a00b41f69a95dfbbf1b#v0001#c1#b00015"
+        ]
+      },
+      "subagent_delegation": {
+        "label": "子 Agent 委派边界",
+        "evidence_block_ids": [
+          "doc_983ba4e2cbff4185873d525a69195fdf#v0001#c1#b00023",
+          "doc_983ba4e2cbff4185873d525a69195fdf#v0001#c1#b00032",
+          "doc_a0ffdc255fe64a00b41f69a95dfbbf1b#v0001#c1#b00015",
+          "doc_7f36f426b84f40eb9439acaad4949e32#v0001#c1#b00006",
+          "doc_7f36f426b84f40eb9439acaad4949e32#v0001#c1#b00007",
+          "doc_7f36f426b84f40eb9439acaad4949e32#v0001#c1#b00008",
+          "doc_7f36f426b84f40eb9439acaad4949e32#v0001#c1#b00010",
+          "doc_7f36f426b84f40eb9439acaad4949e32#v0001#c1#b00018",
+          "doc_23f78d4aa7c1444ab4d4a48c96bf6736#v0001#c1#b00005",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00021",
+          "doc_a0ffdc255fe64a00b41f69a95dfbbf1b#v0001#c1#b00015"
+        ]
+      },
+      "config_tool_source_trust": {
+        "label": "配置、hook、插件与 MCP 来源信任边界",
+        "evidence_block_ids": [
+          "doc_983ba4e2cbff4185873d525a69195fdf#v0001#c1#b00034",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00010",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00014",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00019"
+        ]
+      },
+      "human_oversight": {
+        "label": "人工监督、中断与回滚边界",
+        "evidence_block_ids": [
+          "doc_983ba4e2cbff4185873d525a69195fdf#v0001#c1#b00021",
+          "doc_23f78d4aa7c1444ab4d4a48c96bf6736#v0001#c1#b00032",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00002",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00008",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00012",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00023"
+        ]
+      },
+      "resource_and_time": {
+        "label": "资源、预算与时间边界",
+        "evidence_block_ids": [
+          "doc_7f36f426b84f40eb9439acaad4949e32#v0001#c1#b00004",
+          "doc_7f36f426b84f40eb9439acaad4949e32#v0001#c1#b00005",
+          "doc_7f36f426b84f40eb9439acaad4949e32#v0001#c1#b00010",
+          "doc_a0ffdc255fe64a00b41f69a95dfbbf1b#v0001#c1#b00005",
+          "doc_a0ffdc255fe64a00b41f69a95dfbbf1b#v0001#c1#b00012"
+        ]
+      },
+      "audit_and_observability": {
+        "label": "审计与可观测边界",
+        "evidence_block_ids": [
+          "doc_360a240d79e04c7397bdd2ebea093b03#v0001#c1#b00005",
+          "doc_360a240d79e04c7397bdd2ebea093b03#v0001#c1#b00006",
+          "doc_7f36f426b84f40eb9439acaad4949e32#v0001#c1#b00013",
+          "doc_7f36f426b84f40eb9439acaad4949e32#v0001#c1#b00014",
+          "doc_7f36f426b84f40eb9439acaad4949e32#v0001#c1#b00015",
+          "doc_7f36f426b84f40eb9439acaad4949e32#v0001#c1#b00017",
+          "doc_7f36f426b84f40eb9439acaad4949e32#v0001#c1#b00022",
+          "doc_23f78d4aa7c1444ab4d4a48c96bf6736#v0001#c1#b00020",
+          "doc_23f78d4aa7c1444ab4d4a48c96bf6736#v0001#c1#b00021",
+          "doc_23f78d4aa7c1444ab4d4a48c96bf6736#v0001#c1#b00022",
+          "doc_23f78d4aa7c1444ab4d4a48c96bf6736#v0001#c1#b00023",
+          "doc_23f78d4aa7c1444ab4d4a48c96bf6736#v0001#c1#b00032",
+          "doc_fd4dec9976e041308e2b39ed797c75d1#v0001#c1#b00017"
+        ]
+      }
+    }
+  }
+}

@@ -82,6 +82,34 @@ class _ComparisonProvider:
         self.requests.append(tuple(messages))
         payload = json.loads(messages[-1].content)
         system = messages[0].content
+        if "文档级标题消歧器" in system:
+            content = json.dumps(
+                {
+                    "items": [
+                        {
+                            "candidate_ref": candidate["candidate_ref"],
+                            "provisional_name": candidate["provisional_name"],
+                            "title_kind": "proper_name",
+                            "standalone_clear": True,
+                            "missing_anchor_types": [],
+                            "final_name": candidate["provisional_name"],
+                            "aliases": candidate["aliases"],
+                            "anchor_source_block_ids": candidate["source_block_ids"][:1],
+                            "reason": "测试文档上下文提供了名称锚点。",
+                        }
+                        for candidate in payload["candidates"]
+                    ]
+                },
+                ensure_ascii=False,
+            )
+            return ChatCompletionResult(
+                content=content,
+                request_id=f"comparison-anchor-{len(self.requests)}",
+                actual_model_id=self.profile.model_id,
+                finish_reason="stop",
+                input_tokens=10,
+                output_tokens=5,
+            )
         names = ["Shared", "Only A"] if "Profile A" in system else ["Shared", "Only B"]
         block_ids = [block["block_id"] for block in payload["evidence_blocks"]]
         name_offsets = {"Shared": 0, "Only A": 1, "Only B": 2}
@@ -91,7 +119,8 @@ class _ComparisonProvider:
                     {
                         "name": name,
                         "aliases": [],
-                        "summary": f"{name} 的独立说明。",
+                        "summaries": [f"{name} 的独立说明。"],
+                        "selection_reason": f"正文对 {name} 提供了独立说明。",
                         "source_block_ids": [block_ids[name_offsets[name] % len(block_ids)]],
                     }
                     for name in names

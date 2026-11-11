@@ -93,6 +93,20 @@ class ProfilePreviewRunRow(Base):
     execution_policy_json: Mapped[str] = mapped_column(Text, nullable=False)
     preview_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    semantic_audit_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    semantic_audit_prompt_version: Mapped[str | None] = mapped_column(String(64))
+    name_scope_audit_prompt_version: Mapped[str | None] = mapped_column(String(64))
+    name_meaning_audit_prompt_version: Mapped[str | None] = mapped_column(String(64))
+    document_anchor_prompt_version: Mapped[str | None] = mapped_column(String(64))
+    document_anchor_policy_version: Mapped[str | None] = mapped_column(String(64))
+    document_anchor_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    semantic_audit_status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="disabled",
+    )
+    semantic_audit_error: Mapped[str | None] = mapped_column(Text)
+    semantic_audit_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     usage_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     diagnostics_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     error_code: Mapped[str | None] = mapped_column(String(64))
@@ -132,9 +146,24 @@ class PreviewCandidateRow(Base):
     ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     normalized_name: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    provisional_name: Mapped[str | None] = mapped_column(Text)
+    title_kind: Mapped[str | None] = mapped_column(String(32))
+    title_standalone_clear: Mapped[bool | None] = mapped_column(Boolean)
+    missing_anchor_types_json: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="[]",
+    )
+    name_changed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     aliases_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
-    summary: Mapped[str] = mapped_column(Text, nullable=False)
-    summary_variants_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    summaries_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    selection_reasons_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    name_anchor_source_block_ids_json: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="[]",
+    )
+    name_anchor_reason: Mapped[str | None] = mapped_column(Text)
     source_block_ids_json: Mapped[str] = mapped_column(Text, nullable=False)
     evidence_blocks_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     channel_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")

@@ -11,6 +11,7 @@ from app.agent.tool_adapter import (
     ToolUnavailableError,
     _output_schema,
 )
+from app.providers.chat import ChatProvider
 from app.providers.embeddings import EmbeddingProvider
 from app.retrieval.models import RetrievalErrorPayload, RetrievalToolErrorPayload
 from app.wiki.build_models import (
@@ -21,8 +22,13 @@ from app.wiki.build_models import (
 from app.wiki.build_service import WikiBuildService
 from app.wiki.errors import WikiCompilationError
 from app.wiki.narrative_service import WikiNarrativeService
+from app.wiki.profile_knowledge_map import (
+    ProfileKnowledgeMapError,
+    SearchWikiTopicV2Service,
+)
+from app.wiki.profile_knowledge_map_models import SearchWikiTopicV2Result
 
-WIKI_TOOL_CONTRACT_VERSION = "wiki-tools-v1"
+WIKI_TOOL_CONTRACT_VERSION = "wiki-tools-v2"
 
 
 class _WikiToolArgs(BaseModel):
@@ -48,8 +54,14 @@ class GetTopicEvidenceArgs(_WikiToolArgs):
     topic_ids: list[str] = Field(min_length=1)
 
 
+class SearchWikiTopicV2Args(_WikiToolArgs):
+    """`search_wiki_topic_v2` 参数。"""
+
+    topic: str = Field(min_length=1)
+
+
 def wiki_tool_descriptors() -> list[ToolDescriptor]:
-    """返回与具体用例无关的三个 Wiki 工具描述。"""
+    """返回与具体用例无关的 Wiki 工具描述。"""
 
     return [
         ToolDescriptor(
@@ -113,11 +125,26 @@ def wiki_tool_descriptors() -> list[ToolDescriptor]:
             },
             output_schema=_output_schema(WikiTopicEvidenceResult),
         ),
+        ToolDescriptor(
+            name="search_wiki_topic_v2",
+            description=(
+                "在 Profile-driven Wiki 知识地图中按 topic 检索证据。"
+                "输入应是主题短语而不是完整问题；只返回当前 snapshot 的完整原始 evidence blocks，"
+                "不返回 topic 目录、summary 或最终答案。"
+            ),
+            input_schema={
+                "type": "object",
+                "required": ["topic"],
+                "properties": {"topic": {"type": "string"}},
+                "additionalProperties": False,
+            },
+            output_schema=_output_schema(SearchWikiTopicV2Result),
+        ),
     ]
 
 
 class WikiToolAdapter:
-    """把一个 active Wiki build 暴露为三个只读 Agent 工具。"""
+    """把 active Wiki build 和 Profile-driven 知识地图暴露为只读 Agent 工具。"""
 
     def __init__(
         self,
@@ -125,12 +152,27 @@ class WikiToolAdapter:
         *,
         snapshot_id: str,
         embedding_provider: EmbeddingProvider,
+        chat_provider: ChatProvider,
+        knowledge_map_id: str | None = None,
+        enable_legacy_tools: bool = False,
     ) -> None:
         self._builds = WikiBuildService(data_root)
         self._narratives = WikiNarrativeService(data_root)
         self._snapshot_id = snapshot_id
         self._embedding_provider = embedding_provider
-        self._descriptors = {descriptor.name: descriptor for descriptor in wiki_tool_descriptors()}
+        self._chat_provider = chat_provider
+        self._topic_v2 = SearchWikiTopicV2Service(data_root)
+        self._knowledge_map_id = knowledge_map_id
+        available_names: set[str] = set()
+        if enable_legacy_tools:
+            available_names.update({"search_wiki_topics", "read_wiki_page", "get_topic_evidence"})
+        if knowledge_map_id is not None:
+            available_names.add("search_wiki_topic_v2")
+        self._descriptors = {
+            descriptor.name: descriptor
+            for descriptor in wiki_tool_descriptors()
+            if descriptor.name in available_names
+        }
 
     @property
     def descriptors(self) -> list[ToolDescriptor]:
@@ -199,6 +241,29 @@ class WikiToolAdapter:
                         ],
                     },
                 )
+            if tool_name == "search_wiki_topic_v2":
+                parsed = SearchWikiTopicV2Args.model_validate(arguments)
+                if self._knowledge_map_id is None:
+                    return ToolExecution(
+                        payload=_public_error(
+                            "wiki_topic_v2_not_ready",
+                            "no Profile-driven knowledge map is ready for the snapshot",
+                        )
+                    )
+                execution = await self._topic_v2.search(
+                    snapshot_id=self._snapshot_id,
+                    map_id=self._knowledge_map_id,
+                    topic=parsed.topic,
+                    embedding_provider=self._embedding_provider,
+                    provider=self._chat_provider,
+                )
+                return ToolExecution(
+                    payload=execution.result.model_dump(mode="json"),
+                    diagnostics={
+                        "map_id": self._knowledge_map_id,
+                        **execution.model_dump(mode="json", exclude={"result"}),
+                    },
+                )
         except ValidationError as error:
             return ToolExecution(payload=_public_error("invalid_argument", str(error)))
         except WikiCompilationError as error:
@@ -208,6 +273,11 @@ class WikiToolAdapter:
                     error.message,
                     retryable=error.retryable,
                 )
+            )
+        except ProfileKnowledgeMapError as error:
+            return ToolExecution(
+                payload=_public_error(error.code, error.message),
+                diagnostics=error.diagnostics,
             )
         except Exception as error:
             return ToolExecution(

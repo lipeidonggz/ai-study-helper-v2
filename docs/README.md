@@ -13,6 +13,17 @@
   总量优先的成本反馈、运行中动效、带持久缓存的英文证据翻译和按原文顺序的候选覆盖视图；
   076–080 已完成批次验收，反向解释和 B 级决策均已确认。
   旧 11 号实现不再作为新方向基线。
+- Profile-Driven LLM Wiki 的总体设计入口已收敛到 13 号文档；11 号保留为历史设计与失败
+  依据，12 号保留为过去的 Profile 抽取设计记录；13 号已自包含吸收其中仍有效的内容。
+  083 保留单篇到 15 篇的闭环验收，084
+  记录规模化就绪 P0 的持久化 Topic／Group 向量、active map 和自适应证据选择。13 号
+  §3.8、§6.7、§7.6、§7.7、§8.7 已记录下一版“检索契约反推编译产物”原则、Topic／Group
+  全局收敛、Profile Aspect Schema、Catalog-first Aspect 编译以及 Aspect-aware 检索。
+  086 已验证 merge-only 消除 Group 膨胀，但三次重复编译仍有 Group 边界漂移并导致一次地图
+  c13 回退；当前阻断待设计审核。13 号第 7 节已改写为“Candidate→Topic→Group 增量 Ledger”
+  目标设计，旧一次性 v4 流程移入历史附录 C。087–089 已实现 Topic／Group Ledger 计划与
+  executor 主路径、候选同级 `summaries[]`、7.6 WorkSet Topic 身份解析、判断审计和 typed
+  Topic operation；真实新 Extraction Run 与 c13 复核仍待应用所有者重启后执行。
 - 当前工作：全部 active Judge criteria 已迁移到 v4；c14 为 9/10，c15 达到 9/10；cf-001 收敛为“目标范围可见”并以 10/10 通过；cf-002 新数据 10/10 通过，稳定同时说明能力边界和文档指代不明。c13 原题恢复与千篇规模检索链路登记为 [BL-0012](development/backlog.md)；全量用例回归待统一执行。
 
 ## 设计基线
@@ -30,7 +41,9 @@
 | [09](design/09-technology-selection.md) | 技术选型与总体架构 | v0.4 · 实现基线 |
 | [10](design/10-document-detail-design.md) | 文档详情页信息架构与数据边界 | 已审核 · 首版实现基线 |
 | [11](design/11-llm-wiki-compilation.md) | LLM Wiki 全库编译、主题台账、页面与回源 | 历史设计与实现记录；新方向以 12 号为准 |
-| [12](design/12-profile-driven-wiki-extraction.md) | Profile 驱动的候选抽取、条目页与受控导航链接 | 第一阶段已实现并完成批次验收 |
+| [12](design/12-profile-driven-wiki-extraction.md) | Profile 驱动的候选抽取、条目页与受控导航链接 | 历史设计记录；有效内容已吸收到自包含的 13 号设计 |
+| [13](design/13-profile-driven-wiki-evidence-retrieval.md) | Profile-Driven LLM Wiki 开放主题证据检索总体设计 | 增量 Ledger 第 7 节目标设计 · v6 WorkSet 实现；历史 v4 见附录 B |
+| [14](design/14-dual-entry-concept-function-knowledge-index.md) | 双入口概念—功能知识索引与开放视角证据检索 | 候选设计 · 待审核，不替换 13 号基线 |
 
 01–09 已于 2026-10-20 审核，并作为当前实现基线；03 已于 2026-10-29 完成 c6、c8、c11、c13、c14 和 c15 判据修订并更新为 v0.10，09 已依据 ADR 0004 更新为 v0.4。后续修改必须保留变更原因，同时更新本索引。
 
@@ -44,6 +57,7 @@
 | [`decisions/`](decisions/) | 技术取舍与 ADR | `NNNN-短描述.md` |
 | `development/slices/` | 垂直切片的实现记录 | `NNN-短描述.md` |
 | `development/experiments/` | 性能、质量和兼容性实验 | `YYYY-MM-DD-短描述.md` |
+| `development/design-thinking.md` | 尚未定稿但值得跨切片保留的设计思考与假设 | 固定文件，条目使用 `T-NNN` |
 | `publishing/` | 面向外部读者的文章草稿 | `NN-短描述.md` |
 | `operations/` | 安装、排障、备份与升级说明 | 按使用场景命名 |
 
@@ -52,6 +66,8 @@
 当前已记录：
 
 - [实现待办](development/backlog.md)
+- [设计思考记录](development/design-thinking.md)
+- [Function-Relation-First LLM Wiki 讨论稿](development/function-relation-first-llm-wiki.md)
 - [对外文章草稿](publishing/README.md)
 - [对外文章写作规范](publishing/writing-guide.md)
 - [异步 GitHub 交付与依赖门禁](operations/async-github-delivery.md)
@@ -191,6 +207,15 @@
 - [078 · 文档清单与 Profile 比较（已完成）](development/slices/078-profile-comparison.md)
 - [079 · 试抽取反馈与证据翻译（已完成）](development/slices/079-preview-feedback-and-evidence-translation.md)
 - [080 · 按原文顺序检查候选覆盖（已完成）](development/slices/080-source-order-coverage-view.md)
+- [081 · 文档级候选标题消歧（已完成）](development/slices/081-document-level-candidate-anchor.md)
+- [082 · 逐通道候选累积与增量补充（已完成）](development/slices/082-sequential-channel-candidate-accumulation.md)
+- [083 · search_wiki_topic_v2 单文档到 15 篇的证据检索验收（实现完成，待确认）](development/slices/083-c13-minimal-wiki-closed-loop.md)
+- [084 · Profile Wiki 地图规模化就绪改造（P0 实现完成，待确认与 50 篇验证）](development/slices/084-scale-ready-profile-wiki-map.md)
+- [085 · Aspect-aware 全局 Wiki 地图与证据选择（契约实现完成，c13 噪声稳定性未通过）](development/slices/085-aspect-aware-global-wiki-map.md)
+- [086 · Group 生成与收敛稳定性（A4／A6 阻断，待设计审核）](development/slices/086-group-convergence-stability.md)
+- [087 · 增量 Knowledge Map Ledger 内核与 Delta 计划（planner 实现完成，执行器待实现）](development/slices/087-incremental-map-ledger-core.md)
+- [088 · 增量 Knowledge Map Executor（MVP 可检索路径完成，v5 固定地图 routing 稳定性未通过）](development/slices/088-incremental-map-executor.md)
+- [089 · 候选同级摘要契约与 Topic Ledger WorkSet（代码完成，真实新 Run 待执行）](development/slices/089-flat-candidate-summaries.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 - [076–080 · Profile 抽取功能批次验收（已完成）](development/manual-tests/076-078-profile-extraction-workflow.md)
 

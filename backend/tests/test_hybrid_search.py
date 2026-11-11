@@ -95,6 +95,32 @@ def test_search_blocks_uses_query_embedding_fts_and_returns_top_five(
     assert all("score" not in block for block in payload["blocks"])
 
 
+def test_read_block_vectors_uses_persisted_index_without_embedding_calls(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "vectors.html"
+    path.write_bytes(_html("Vector document", "持久化向量读取测试。"))
+    _ingest(tmp_path, [path])
+    reader = RetrievalReadService(tmp_path).bind_current()
+    provider = FakeEmbeddingProvider()
+    document = reader.list_documents().documents[0]
+    block_ids = [block.block_id for block in reader.list_blocks(document.doc_id).blocks]
+    document_calls = len(provider.calls)
+    query_calls = len(provider.query_calls)
+
+    vectors = reader.read_block_vectors(block_ids, provider=provider)
+
+    assert set(vectors) == set(block_ids)
+    assert all(len(vector) == provider.profile.dimension for vector in vectors.values())
+    assert len(provider.calls) == document_calls
+    assert len(provider.query_calls) == query_calls
+
+    with pytest.raises(RetrievalFailure, match="missing"):
+        reader.read_block_vectors(["doc_missing#v0001#c1#b00001"], provider=provider)
+    with pytest.raises(RetrievalFailure, match="does not match"):
+        reader.read_block_vectors(block_ids, provider=FakeEmbeddingProvider(dimension=8))
+
+
 def test_search_blocks_is_stable_and_applies_document_scope_before_fusion(
     tmp_path: Path,
 ) -> None:

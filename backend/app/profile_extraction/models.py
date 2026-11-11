@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.profile_extraction.util import normalize_name
 
 ProfileStatus = Literal["draft", "frozen", "conflicted"]
 PreviewRunStatus = Literal[
@@ -15,6 +17,43 @@ PreviewRunStatus = Literal[
 ]
 ChecklistPriority = Literal["must", "should", "nice_to_have", "noise"]
 ComparisonOutcome = Literal["a_better", "b_better", "equivalent", "both_insufficient"]
+CandidateAuditVerdict = Literal["clean", "suspicious", "uncertain"]
+CandidateAuditStatus = Literal["not_requested", "clean", "suspicious", "uncertain"]
+CandidateNameScopeVerdict = Literal["clear", "ambiguous", "uncertain"]
+CandidateNameMeaningVerdict = Literal["aligned", "misaligned", "uncertain"]
+CandidateTitleKind = Literal[
+    "proper_name",
+    "acronym",
+    "common_concept",
+    "relation",
+    "principle",
+    "method",
+    "other",
+]
+CandidateTitleAnchorType = Literal["actor", "system", "product", "scope"]
+DocumentAnchorStatus = Literal[
+    "not_needed",
+    "completed",
+    "over_budget",
+    "candidate_limit_exceeded",
+    "truncated_output",
+    "invalid_json",
+    "invalid_schema",
+    "failed",
+]
+CandidateSemanticAuditStatus = Literal[
+    "disabled",
+    "pending",
+    "running",
+    "completed",
+    "partial",
+    "failed",
+    "interrupted",
+]
+OMISSION_RETRY_FIELD_ALIASES = AliasChoices(
+    "omission_retry_enabled",
+    "coverage_audit_enabled",
+)
 
 
 class ExtractionChannel(BaseModel):
@@ -29,7 +68,10 @@ class ExtractionChannel(BaseModel):
     include_criteria: list[str] = Field(default_factory=list, max_length=20)
     exclude_criteria: list[str] = Field(default_factory=list, max_length=20)
     granularity_rule: str = Field(default="", max_length=1_000)
-    coverage_audit_enabled: bool = False
+    omission_retry_enabled: bool = Field(
+        default=False,
+        validation_alias=OMISSION_RETRY_FIELD_ALIASES,
+    )
 
 
 class ProfileLanguagePolicy(BaseModel):
@@ -160,7 +202,10 @@ class SuggestedChannelAttributes(BaseModel):
     include_criteria: list[str] = Field(default_factory=list, max_length=20)
     exclude_criteria: list[str] = Field(default_factory=list, max_length=20)
     granularity_rule: str = Field(min_length=1, max_length=1_000)
-    coverage_audit_enabled: bool = False
+    omission_retry_enabled: bool = Field(
+        default=False,
+        validation_alias=OMISSION_RETRY_FIELD_ALIASES,
+    )
 
 
 class ChannelAttributeSuggestionResponse(SuggestedChannelAttributes):
@@ -180,7 +225,10 @@ class SuggestedChannel(BaseModel):
     include_criteria: list[str] = Field(default_factory=list, max_length=20)
     exclude_criteria: list[str] = Field(default_factory=list, max_length=20)
     granularity_rule: str = Field(min_length=1, max_length=1_000)
-    coverage_audit_enabled: bool = False
+    omission_retry_enabled: bool = Field(
+        default=False,
+        validation_alias=OMISSION_RETRY_FIELD_ALIASES,
+    )
 
 
 class SuggestedStrategyPayload(BaseModel):
@@ -200,6 +248,25 @@ class StrategySuggestionResponse(BaseModel):
     request_id: str
 
 
+def _normalize_summary_values(values: list[str]) -> list[str]:
+    """Remove empty and normalized-duplicate summaries while preserving order."""
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = " ".join(value.split())
+        if not text:
+            continue
+        key = normalize_name(text)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(text)
+    if not normalized:
+        raise ValueError("candidate must contain at least one non-empty summary")
+    return normalized
+
+
 class CandidateDraft(BaseModel):
     """模型返回并由当前 snapshot evidence 校验的候选。"""
 
@@ -207,8 +274,20 @@ class CandidateDraft(BaseModel):
 
     name: str = Field(min_length=1)
     aliases: list[str] = Field(default_factory=list)
-    summary: str = Field(min_length=1)
+    summaries: list[str] = Field(min_length=1)
+    selection_reason: str = Field(default="", max_length=1_000)
     source_block_ids: list[str] = Field(min_length=1)
+    existing_candidate_ref: str | None = Field(
+        default=None,
+        pattern=r"^ca_[0-9a-f]{16}$",
+    )
+
+    @field_validator("summaries")
+    @classmethod
+    def normalize_summaries(cls, values: list[str]) -> list[str]:
+        """Require a non-empty, normalized-deduplicated sibling summary set."""
+
+        return _normalize_summary_values(values)
 
 
 class CandidateExtractionResponse(BaseModel):
@@ -219,6 +298,177 @@ class CandidateExtractionResponse(BaseModel):
     candidates: list[CandidateDraft]
 
 
+class ExistingCandidateContext(BaseModel):
+    """后续通道可见的已积累候选账本条目。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_ref: str = Field(pattern=r"^ca_[0-9a-f]{16}$")
+    name: str = Field(min_length=1)
+    aliases: list[str] = Field(default_factory=list)
+    summaries: list[str] = Field(default_factory=list)
+    source_block_ids: list[str] = Field(default_factory=list)
+    channel_ids: list[str] = Field(default_factory=list)
+
+
+class CandidateNameScopeAuditDecision(BaseModel):
+    """一个主标题在当前知识库命名空间中的独立可定位性结论。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_ref: str = Field(pattern=r"^ca_[0-9a-f]{16}$")
+    verdict: CandidateNameScopeVerdict
+    scope_anchor: str | None = Field(default=None, max_length=200)
+    suggested_name: str | None = Field(default=None, max_length=300)
+    reason: str = Field(min_length=1, max_length=1_000)
+
+    @model_validator(mode="after")
+    def validate_suggested_name(self) -> CandidateNameScopeAuditDecision:
+        """要求问题结论提供建议名称，并禁止 clear 携带建议。"""
+
+        if self.verdict == "ambiguous" and not self.suggested_name:
+            raise ValueError("ambiguous name audit requires suggested_name")
+        if self.verdict != "ambiguous" and self.suggested_name is not None:
+            raise ValueError("only ambiguous name audit can include suggested_name")
+        return self
+
+
+class CandidateNameScopeAuditPayload(BaseModel):
+    """一次知识库级标题审查必须覆盖全部输入主标题。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[CandidateNameScopeAuditDecision]
+
+
+class CandidateNameMeaningAuditDecision(BaseModel):
+    """一个主标题及其别名是否锚定本地 summary 中心对象的结论。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_ref: str = Field(pattern=r"^ca_[0-9a-f]{16}$")
+    verdict: CandidateNameMeaningVerdict
+    suggested_name: str | None = Field(default=None, max_length=300)
+    reason: str = Field(min_length=1, max_length=1_000)
+
+    @model_validator(mode="after")
+    def validate_suggested_name(self) -> CandidateNameMeaningAuditDecision:
+        """要求含义不一致时提供建议名称，并禁止一致结论携带建议。"""
+
+        if self.verdict == "misaligned" and not self.suggested_name:
+            raise ValueError("misaligned name meaning audit requires suggested_name")
+        if self.verdict != "misaligned" and self.suggested_name is not None:
+            raise ValueError("only misaligned name meaning audit can include suggested_name")
+        return self
+
+
+class CandidateNameMeaningAuditPayload(BaseModel):
+    """一次知识库级名称含义审查必须覆盖全部输入候选。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[CandidateNameMeaningAuditDecision]
+
+
+class CandidateDocumentAnchorDecision(BaseModel):
+    """整篇文档上下文对候选标题执行消歧后的结构化结果。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_ref: str = Field(pattern=r"^ca_[0-9a-f]{16}$")
+    provisional_name: str = Field(min_length=1, max_length=300)
+    title_kind: CandidateTitleKind
+    standalone_clear: bool
+    missing_anchor_types: list[CandidateTitleAnchorType] = Field(
+        default_factory=list,
+        max_length=4,
+    )
+    final_name: str = Field(min_length=1, max_length=300)
+    aliases: list[str] = Field(default_factory=list, max_length=20)
+    anchor_source_block_ids: list[str] = Field(min_length=1, max_length=10)
+    reason: str = Field(min_length=1, max_length=1_000)
+
+    @model_validator(mode="after")
+    def validate_disambiguation_decision(self) -> CandidateDocumentAnchorDecision:
+        """禁止“不清楚但名称不变”和“已经清楚却仍需改名”的矛盾输出。"""
+
+        provisional_normalized = " ".join(self.provisional_name.casefold().split())
+        final_normalized = " ".join(self.final_name.casefold().split())
+        if self.standalone_clear:
+            if final_normalized != provisional_normalized:
+                raise ValueError("clear provisional title cannot be renamed")
+            if self.missing_anchor_types:
+                raise ValueError("clear provisional title cannot require anchors")
+        else:
+            if final_normalized == provisional_normalized:
+                raise ValueError("unclear provisional title must be renamed")
+            if not self.missing_anchor_types:
+                raise ValueError("unclear provisional title must identify missing anchor types")
+        return self
+
+
+class CandidateDocumentAnchorPayload(BaseModel):
+    """一次文档级标题消歧必须覆盖请求中的全部候选。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[CandidateDocumentAnchorDecision]
+
+
+class CandidateAuditIssue(BaseModel):
+    """LLM 候选审查允许返回的受控问题类型。"""
+
+    code: Literal[
+        "member_or_component_as_alias",
+        "alias_not_same_object",
+        "unsupported_summary",
+        "not_independent_object",
+        "granularity_mismatch",
+        "reason_not_grounded",
+        "other",
+    ]
+    message: str = Field(min_length=1, max_length=1_000)
+    alias: str | None = Field(default=None, max_length=200)
+
+
+class CandidateSemanticAuditDecision(BaseModel):
+    """LLM 对一个窗口候选给出的审查结论。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_ref: str = Field(pattern=r"^ca_[0-9a-f]{16}$")
+    verdict: CandidateAuditVerdict
+    issues: list[CandidateAuditIssue] = Field(default_factory=list)
+    reason: str = Field(min_length=1, max_length=1_000)
+    evidence_block_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_clean_has_no_issues(self) -> CandidateSemanticAuditDecision:
+        """防止 clean 结论同时携带问题项。"""
+
+        if self.verdict == "clean" and self.issues:
+            raise ValueError("clean candidate audit decision cannot include issues")
+        return self
+
+
+class CandidateSemanticAuditPayload(BaseModel):
+    """一次批量候选审查必须覆盖请求中的全部候选。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[CandidateSemanticAuditDecision]
+
+
+class CandidateAuditFinding(BaseModel):
+    """供候选界面展示的确定性或 LLM 审查疑点。"""
+
+    code: str
+    message: str
+    alias: str | None = None
+    conflicting_candidate_id: str | None = None
+    evidence_block_ids: list[str] = Field(default_factory=list)
+
+
 class PreviewRunRequest(BaseModel):
     """启动或显式复用一次 Profile Preview。"""
 
@@ -226,6 +476,7 @@ class PreviewRunRequest(BaseModel):
     snapshot_id: str | None = None
     document_ids: list[str] = Field(min_length=1)
     execution_mode: Literal["reuse_if_exact", "force_new"] = "reuse_if_exact"
+    semantic_audit_enabled: bool = False
 
 
 class PreviewRunPlanRequest(BaseModel):
@@ -235,6 +486,7 @@ class PreviewRunPlanRequest(BaseModel):
     snapshot_id: str | None = None
     document_ids: list[str] = Field(min_length=1)
     execution_mode: Literal["reuse_if_exact", "force_new"] = "reuse_if_exact"
+    semantic_audit_enabled: bool = False
 
 
 class PreviewRunPlan(BaseModel):
@@ -246,12 +498,39 @@ class PreviewRunPlan(BaseModel):
     document_ids: list[str]
     block_count: int = Field(ge=0)
     window_count: int = Field(ge=0)
+    estimated_extraction_calls: int = Field(ge=0)
+    estimated_document_anchor_calls: int = Field(ge=0)
+    estimated_document_anchor_input_tokens: int = Field(ge=0)
+    estimated_document_anchor_output_tokens: int = Field(ge=0)
+    estimated_semantic_audit_calls: int = Field(ge=0)
+    estimated_name_scope_audit_calls: int = Field(ge=0)
+    estimated_name_meaning_audit_calls: int = Field(ge=0)
     estimated_model_calls: int = Field(ge=0)
     estimated_input_tokens: int = Field(ge=0)
     estimated_output_tokens: int = Field(ge=0)
     estimated_total_tokens: int = Field(ge=0)
+    document_anchor_soft_input_tokens: int = Field(ge=1)
+    document_anchor_hard_input_tokens: int = Field(ge=1)
+    document_anchor_max_candidates: int = Field(ge=1)
     reusable_run_id: str | None = None
     provider_ready: bool
+
+
+class CandidateSelectionReason(BaseModel):
+    """一个通道窗口对候选为何满足当前规则的简短、可追溯说明。"""
+
+    channel_id: str
+    operation: Literal["discovery", "omission_retry"]
+    window_index: int = Field(ge=0)
+    reason: str = Field(min_length=1, max_length=1_000)
+    source_block_ids: list[str] = Field(min_length=1)
+
+    @field_validator("operation", mode="before")
+    @classmethod
+    def normalize_legacy_operation(cls, value: object) -> object:
+        """把历史持久化值转换为当前的补抽阶段名称。"""
+
+        return "omission_retry" if value == "coverage_audit" else value
 
 
 class PreviewCandidate(BaseModel):
@@ -263,13 +542,56 @@ class PreviewCandidate(BaseModel):
     ordinal: int = Field(ge=0)
     name: str
     normalized_name: str
+    provisional_name: str | None = None
+    title_kind: CandidateTitleKind | None = None
+    title_standalone_clear: bool | None = None
+    missing_anchor_types: list[CandidateTitleAnchorType] = Field(default_factory=list)
+    name_changed: bool = False
     aliases: list[str]
-    summary: str
-    summary_variants: list[str]
+    summaries: list[str]
+    selection_reasons: list[CandidateSelectionReason]
+    name_anchor_source_block_ids: list[str] = Field(default_factory=list)
+    name_anchor_reason: str | None = None
+    audit_status: CandidateAuditStatus = "not_requested"
+    audit_reason: str | None = None
+    audit_findings: list[CandidateAuditFinding] = Field(default_factory=list)
     source_block_ids: list[str]
     evidence_blocks: list[dict[str, object]]
     channel_ids: list[str]
     content_hash: str
+
+    @field_validator("summaries")
+    @classmethod
+    def normalize_summaries(cls, values: list[str]) -> list[str]:
+        """Require a non-empty, normalized-deduplicated sibling summary set."""
+
+        return _normalize_summary_values(values)
+
+
+class PreviewChannelDefinition(BaseModel):
+    """Run 创建时冻结、用于解释候选来源的通道判断标准。"""
+
+    name: str
+    activation: str
+    include_criteria: list[str]
+    exclude_criteria: list[str]
+
+
+class PreviewDocumentAnchorResult(BaseModel):
+    """一个文档的标题消歧预算、覆盖和失败状态。"""
+
+    status: DocumentAnchorStatus
+    candidate_count: int = Field(ge=0)
+    estimated_input_tokens: int = Field(ge=0)
+    output_token_budget: int = Field(ge=0)
+    soft_input_tokens: int = Field(ge=1)
+    hard_input_tokens: int = Field(ge=1)
+    error: str | None = None
+    request_id: str | None = None
+    actual_input_tokens: int = Field(default=0, ge=0)
+    actual_output_tokens: int = Field(default=0, ge=0)
+    finish_reason: str | None = None
+    returned_chars: int = Field(default=0, ge=0)
 
 
 class PreviewRunSummary(BaseModel):
@@ -281,6 +603,17 @@ class PreviewRunSummary(BaseModel):
     profile_id: str
     profile_hash: str
     profile_name: str
+    channel_names: dict[str, str] = Field(default_factory=dict)
+    channel_definitions: dict[str, PreviewChannelDefinition] = Field(default_factory=dict)
+    semantic_audit_enabled: bool = False
+    semantic_audit_prompt_version: str | None = None
+    name_scope_audit_prompt_version: str | None = None
+    name_meaning_audit_prompt_version: str | None = None
+    document_anchor_prompt_version: str | None = None
+    document_anchor_policy_version: str | None = None
+    document_anchor_results: dict[str, PreviewDocumentAnchorResult] = Field(default_factory=dict)
+    semantic_audit_status: CandidateSemanticAuditStatus = "disabled"
+    semantic_audit_error: str | None = None
     document_scope: list[str]
     status: PreviewRunStatus
     preview_fingerprint: str

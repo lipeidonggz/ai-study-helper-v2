@@ -11,6 +11,8 @@ import {
   ProfileExtractionClient,
   newChannelId,
   newChecklistItemId,
+  type CandidateAuditFinding,
+  type CandidateSelectionReason,
   type ChannelAttributeSuggestion,
   type ChecklistPriority,
   type CollectionDocument,
@@ -23,6 +25,7 @@ import {
   type ExtractionProfile,
   type ExtractionProfileConfig,
   type PreviewCandidate,
+  type PreviewChannelDefinition,
   type PreviewRunDetail,
   type PreviewRunPlan,
   type PreviewRunStatus,
@@ -90,6 +93,7 @@ const previewProfileId = ref("");
 const previewDocumentIds = ref<string[]>([]);
 const previewPlan = ref<PreviewRunPlan | null>(null);
 const forceNewPreview = ref(false);
+const semanticAuditEnabled = ref(false);
 const previewRuns = ref<PreviewRunSummary[]>([]);
 const showPreviewHistory = ref(true);
 const previewHistoryQuery = ref("");
@@ -100,6 +104,7 @@ const selectedPreviewCandidateId = ref("");
 const previewCandidateQuery = ref("");
 const previewCandidateDocId = ref("");
 const previewCandidateChannelId = ref("");
+const previewCandidateAuditFilter = ref<"all" | "issues" | "unreviewed">("all");
 const previewResultView = ref<"candidates" | "source-order">("candidates");
 const sourceOrderDocId = ref("");
 const sourceOrderBlocks = ref<DocumentDetailBlock[]>([]);
@@ -110,7 +115,7 @@ const sourceCandidateDetailId = ref("");
 const activePreviewTranslations = reactive<Record<string, string>>({});
 const evidenceTranslationBusy = ref(false);
 const evidenceTranslationNotice = ref("");
-const previewCandidatePriority = ref<ChecklistPriority>("should");
+const candidateChecklistPriorities = reactive<Record<string, ChecklistPriority>>({});
 const pollHandle = ref<number | null>(null);
 
 const checklists = ref<DocumentChecklist[]>([]);
@@ -182,24 +187,35 @@ const previewCandidateChannels = computed(() => {
     name: channelNameForId(channelId),
   }));
 });
-const filteredPreviewCandidates = computed(() => {
+
+/** 判断候选是否满足两个结果视图共用的搜索、文档、通道和审查条件。 */
+function candidateMatchesPreviewFilters(
+  candidate: PreviewCandidate,
+  documentId: string,
+): boolean {
   const query = previewCandidateQuery.value.trim().toLocaleLowerCase();
-  return activePreviewCandidates.value.filter((candidate) => {
-    const searchText = [
-      candidate.name,
-      candidate.summary,
-      ...candidate.aliases,
-    ]
-      .join(" ")
-      .toLocaleLowerCase();
-    return (
-      (!query || searchText.includes(query)) &&
-      (!previewCandidateDocId.value ||
-        candidate.doc_id === previewCandidateDocId.value) &&
-      (!previewCandidateChannelId.value ||
-        candidate.channel_ids.includes(previewCandidateChannelId.value))
-    );
-  });
+  const searchText = [candidate.name, ...candidate.summaries, ...candidate.aliases]
+    .join(" ")
+    .toLocaleLowerCase();
+  const matchesAudit =
+    previewCandidateAuditFilter.value === "all" ||
+    (previewCandidateAuditFilter.value === "issues" &&
+      ["suspicious", "uncertain"].includes(candidate.audit_status)) ||
+    (previewCandidateAuditFilter.value === "unreviewed" &&
+      candidate.audit_status === "not_requested");
+  return (
+    (!query || searchText.includes(query)) &&
+    (!documentId || candidate.doc_id === documentId) &&
+    (!previewCandidateChannelId.value ||
+      candidate.channel_ids.includes(previewCandidateChannelId.value)) &&
+    matchesAudit
+  );
+}
+
+const filteredPreviewCandidates = computed(() => {
+  return activePreviewCandidates.value.filter((candidate) =>
+    candidateMatchesPreviewFilters(candidate, previewCandidateDocId.value),
+  );
 });
 const filteredPreviewCandidateGroups = computed(() =>
   previewCandidateDocuments.value
@@ -220,9 +236,14 @@ const selectedPreviewCandidate = computed(() => {
     null
   );
 });
+const sourceOrderFilteredCandidates = computed(() =>
+  activePreviewCandidates.value.filter((candidate) =>
+    candidateMatchesPreviewFilters(candidate, sourceOrderDocId.value),
+  ),
+);
 const sourceOrderCandidateMap = computed(() => {
   const blocks = new Map<string, PreviewCandidate[]>();
-  for (const candidate of activePreviewCandidates.value) {
+  for (const candidate of sourceOrderFilteredCandidates.value) {
     for (const blockId of candidate.source_block_ids) {
       const linked = blocks.get(blockId) ?? [];
       linked.push(candidate);
@@ -268,6 +289,90 @@ const sourceCandidateDetail = computed(
     activePreviewCandidates.value.find(
       (candidate) => candidate.candidate_id === sourceCandidateDetailId.value,
     ) ?? null,
+);
+const previewCandidateChecklistMatches = computed(() => {
+  const matches = new Map<
+    string,
+    {
+      checklistId: string;
+      checklistStatus: DocumentChecklist["status"];
+      item: DocumentChecklistItem;
+    }
+  >();
+  const preview = activePreview.value;
+  if (!preview) {
+    return matches;
+  }
+  const scopedChecklists = checklists.value
+    .filter((checklist) => checklist.snapshot_id === preview.snapshot_id)
+    .sort(
+      (left, right) =>
+        Number(right.status === "draft") - Number(left.status === "draft"),
+    );
+  for (const candidate of activePreviewCandidates.value) {
+    const candidateVariants = new Set(
+      [candidate.name, ...candidate.aliases].map(normalizeChecklistName),
+    );
+    const candidateEvidence = new Set(candidate.source_block_ids);
+    for (const checklist of scopedChecklists) {
+      if (
+        checklist.doc_id !== candidate.doc_id ||
+        checklist.doc_version !== candidate.doc_version
+      ) {
+        continue;
+      }
+      const item = checklist.items.find((candidateItem) => {
+        const itemVariants = new Set(
+          [candidateItem.name, ...candidateItem.aliases].map(normalizeChecklistName),
+        );
+        const hasSameName = [...candidateVariants].some((value) =>
+          itemVariants.has(value),
+        );
+        const hasSharedEvidence = candidateItem.source_block_ids.some((blockId) =>
+          candidateEvidence.has(blockId),
+        );
+        return hasSameName && hasSharedEvidence;
+      });
+      if (item) {
+        matches.set(candidate.candidate_id, {
+          checklistId: checklist.checklist_id,
+          checklistStatus: checklist.status,
+          item,
+        });
+        break;
+      }
+    }
+  }
+  return matches;
+});
+const previewCandidateCheckedCount = computed(
+  () =>
+    activePreviewCandidates.value.filter((candidate) =>
+      previewCandidateChecklistMatches.value.has(candidate.candidate_id),
+    ).length,
+);
+const previewCandidateAuditIssueCount = computed(
+  () =>
+    activePreviewCandidates.value.filter((candidate) =>
+      ["suspicious", "uncertain"].includes(candidate.audit_status),
+    ).length,
+);
+const droppedPreviewAliasCount = computed(
+  () =>
+    activePreview.value?.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "candidate_alias_dropped",
+    ).length ?? 0,
+);
+const missingPreviewReasonCount = computed(
+  () =>
+    activePreview.value?.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "candidate_reason_missing",
+    ).length ?? 0,
+);
+const documentAnchorIssueResults = computed(() =>
+  Object.entries(activePreview.value?.document_anchor_results ?? {}).filter(
+    ([, result]) => !["completed", "not_needed"].includes(result.status),
+  ),
 );
 const englishPreviewEvidence = computed(() => {
   const blocks = new Map<string, PreviewEvidenceBlock>();
@@ -345,16 +450,42 @@ function profileNameForRun(run: PreviewRunSummary): string {
   return run.profile_name || profileName(run.profile_id);
 }
 
-/** 解析试抽取来源通道名称；历史配置缺失时回退到通道 ID。 */
+/** 从 Run 快照解析通道定义；旧数据缺失时回退到当前 Profile。 */
+function channelDefinitionForId(channelId: string): PreviewChannelDefinition | null {
+  const frozenDefinition = activePreview.value?.channel_definitions?.[channelId];
+  if (frozenDefinition) {
+    return frozenDefinition;
+  }
+  const profileChannel = profiles.value
+    .find((candidate) => candidate.profile_id === activePreview.value?.profile_id)
+    ?.config.extraction_channels.find((channel) => channel.channel_id === channelId);
+  return profileChannel
+    ? {
+        name: profileChannel.name || "未命名通道",
+        activation: profileChannel.activation,
+        include_criteria: profileChannel.include_criteria,
+        exclude_criteria: profileChannel.exclude_criteria,
+      }
+    : null;
+}
+
+/** 返回一个候选实际命中的通道及其判断标准。 */
+function candidateChannelDefinitions(
+  candidate: PreviewCandidate,
+): Array<{ channelId: string; definition: PreviewChannelDefinition }> {
+  return candidate.channel_ids.flatMap((channelId) => {
+    const definition = channelDefinitionForId(channelId);
+    return definition ? [{ channelId, definition }] : [];
+  });
+}
+
+/** 优先从 Run 的配置快照解析通道名称，历史快照缺失时再查当前 Profile。 */
 function channelNameForId(channelId: string): string {
-  const profile = profiles.value.find(
-    (candidate) => candidate.profile_id === activePreview.value?.profile_id,
-  );
-  return (
-    profile?.config.extraction_channels.find(
-      (channel) => channel.channel_id === channelId,
-    )?.name ?? channelId
-  );
+  const definition = channelDefinitionForId(channelId);
+  if (definition) {
+    return definition.name;
+  }
+  return "未命名通道";
 }
 
 /** 选中候选详情，同时保持左侧列表的当前浏览位置。 */
@@ -367,6 +498,49 @@ function resetPreviewCandidateFilters(): void {
   previewCandidateQuery.value = "";
   previewCandidateDocId.value = "";
   previewCandidateChannelId.value = "";
+  previewCandidateAuditFilter.value = "all";
+  for (const candidateId of Object.keys(candidateChecklistPriorities)) {
+    delete candidateChecklistPriorities[candidateId];
+  }
+}
+
+/** 使用与候选精确去重一致的规范化规则比较基准项名称和别名。 */
+function normalizeChecklistName(value: string): string {
+  return value.normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/** 返回候选已命中的现有质量校验基准项；未命中时返回 null。 */
+function previewCandidateChecklistMatch(candidate: PreviewCandidate): {
+  checklistId: string;
+  checklistStatus: DocumentChecklist["status"];
+  item: DocumentChecklistItem;
+} | null {
+  return previewCandidateChecklistMatches.value.get(candidate.candidate_id) ?? null;
+}
+
+/** 判断候选是否已经以相同名称和证据进入现有质量校验基准。 */
+function isPreviewCandidateInChecklist(candidate: PreviewCandidate): boolean {
+  return previewCandidateChecklistMatch(candidate) !== null;
+}
+
+/** 优先展示基准中已经保存的优先级，否则展示尚未提交的候选级选择。 */
+function previewCandidatePriority(candidate: PreviewCandidate): ChecklistPriority {
+  return (
+    previewCandidateChecklistMatch(candidate)?.item.priority ??
+    candidateChecklistPriority(candidate.candidate_id)
+  );
+}
+
+/** 返回候选加入质量校验基准时暂选的优先级；未选择时沿用 should。 */
+function candidateChecklistPriority(candidateId: string): ChecklistPriority {
+  return candidateChecklistPriorities[candidateId] ?? "should";
+}
+
+/** 只更新当前候选的临时加入优先级，不影响其他候选。 */
+function setCandidateChecklistPriority(candidateId: string, event: Event): void {
+  candidateChecklistPriorities[candidateId] = (
+    event.target as HTMLSelectElement
+  ).value as ChecklistPriority;
 }
 
 /** 切换试抽取记录时清空原文顺序视图，避免混用上一记录的文档 blocks。 */
@@ -499,6 +673,79 @@ function comparisonStatusLabel(status: ProfileComparison["status"]): string {
   return status === "concluded" ? "已得出结论" : "待确认";
 }
 
+/** 把候选审查状态转换成用户可读文本。 */
+function candidateAuditStatusLabel(
+  status: PreviewCandidate["audit_status"],
+): string {
+  return {
+    not_requested: "未审查",
+    clean: "未发现疑点",
+    suspicious: "有疑点",
+    uncertain: "无法判断",
+  }[status];
+}
+
+/** 把候选标题类型转换成审核界面标签。 */
+function candidateTitleKindLabel(
+  titleKind: PreviewCandidate["title_kind"],
+): string {
+  if (!titleKind) {
+    return "未判断";
+  }
+  return {
+    proper_name: "稳定专名",
+    acronym: "缩写",
+    common_concept: "普通概念",
+    relation: "关系",
+    principle: "原则",
+    method: "方法",
+    other: "其他",
+  }[titleKind];
+}
+
+/** 把标题消歧缺少的锚点类型转换成中文。 */
+function titleAnchorTypeLabel(
+  type: PreviewCandidate["missing_anchor_types"][number],
+): string {
+  return {
+    actor: "Actor",
+    system: "系统",
+    product: "产品",
+    scope: "作用范围",
+  }[type];
+}
+
+/** 把 Run 级 LLM 审查状态转换成用户可读文本。 */
+function semanticAuditStatusLabel(
+  status: PreviewRunSummary["semantic_audit_status"],
+): string {
+  return {
+    disabled: "未开启",
+    pending: "等待审查",
+    running: "正在审查",
+    completed: "审查完成",
+    partial: "部分审查失败",
+    failed: "审查失败",
+    interrupted: "审查中断",
+  }[status];
+}
+
+/** 把文档级标题消歧状态转换成用户可读文本。 */
+function documentAnchorStatusLabel(
+  status: PreviewRunSummary["document_anchor_results"][string]["status"],
+): string {
+  return {
+    not_needed: "无需锚定",
+    completed: "已完成",
+    over_budget: "超出输入预算",
+    candidate_limit_exceeded: "候选数超限",
+    truncated_output: "输出被截断",
+    invalid_json: "返回非法 JSON",
+    invalid_schema: "返回结构不符合契约",
+    failed: "失败",
+  }[status];
+}
+
 /** 把比较项在单侧的匹配状态转换成用户可读文本。 */
 function comparisonItemStatusLabel(
   status: "matched" | "missing" | "uncertain_match",
@@ -518,6 +765,61 @@ function checklistPriorityLabel(priority: ChecklistPriority): string {
     nice_to_have: "最好有",
     noise: "噪声",
   }[priority];
+}
+
+/** 把候选理由的来源阶段转换成用户可读文本。 */
+function selectionReasonOperationLabel(
+  operation: CandidateSelectionReason["operation"],
+): string {
+  return operation === "omission_retry" ? "遗漏补抽" : "首次发现";
+}
+
+/** 兼容加入抽取理由字段之前保存的历史候选。 */
+function candidateSelectionReasons(candidate: PreviewCandidate): CandidateSelectionReason[] {
+  return candidate.selection_reasons ?? [];
+}
+
+/** 查找某个别名对应的确定性别名冲突。 */
+function candidateAliasConflict(
+  candidate: PreviewCandidate,
+  alias: string,
+): CandidateAuditFinding | null {
+  return (
+    candidate.audit_findings?.find(
+      (finding) =>
+        finding.code === "alias_matches_separate_candidate" &&
+        finding.alias === alias,
+    ) ?? null
+  );
+}
+
+/** 加入质量校验基准时排除已被确定性审查否决的 alias。 */
+function candidateEffectiveAliases(candidate: PreviewCandidate): string[] {
+  return candidate.aliases.filter((alias) => candidateAliasConflict(candidate, alias) === null);
+}
+
+/** 把候选审查问题代码转换成审核界面标签。 */
+function candidateAuditFindingLabel(code: string): string {
+  return {
+    alias_matches_separate_candidate: "别名身份冲突",
+    member_or_component_as_alias: "成员误作别名",
+    alias_not_same_object: "别名并非同一对象",
+    unsupported_summary: "归纳缺少证据支持",
+    name_ambiguous_in_knowledge_base: "只看标题时存在歧义",
+    name_scope_uncertain: "标题区分度无法判断",
+    name_scope_audit_missing: "标题区分度审查未完成",
+    name_meaning_misaligned: "标题与摘要含义不一致",
+    name_summary_misaligned: "名称与摘要含义不一致",
+    name_meaning_uncertain: "标题与摘要是否同指无法判断",
+    name_meaning_audit_missing: "名称含义审查未完成",
+    not_independent_object: "缺少独立知识价值",
+    granularity_mismatch: "粒度不符合 Profile",
+    reason_not_grounded: "抽取理由缺少依据",
+    semantic_audit_suspicious: "审查发现疑点",
+    semantic_audit_uncertain: "审查无法判断",
+    content_audit_missing: "内容审查未完成",
+    other: "其他疑点",
+  }[code] ?? code;
 }
 
 /** 把比较结论代码转换成用户可读文本。 */
@@ -592,7 +894,7 @@ function blankConfig(): ExtractionProfileConfig {
         include_criteria: ["存在稳定名称", "正文提供独立事实"],
         exclude_criteria: ["只有标题、导航或顺带提及"],
         granularity_rule: "一个可独立学习和检索的对象对应一个候选。",
-        coverage_audit_enabled: false,
+        omission_retry_enabled: false,
       },
     ],
     exclude_criteria: [],
@@ -781,7 +1083,7 @@ function addChannel(): void {
     include_criteria: [],
     exclude_criteria: [],
     granularity_rule: "",
-    coverage_audit_enabled: false,
+    omission_retry_enabled: false,
   });
 }
 
@@ -1001,7 +1303,7 @@ function applyChannelAttributeSuggestion(channel: ExtractionChannel): void {
   channel.include_criteria = [...suggestion.include_criteria];
   channel.exclude_criteria = [...suggestion.exclude_criteria];
   channel.granularity_rule = suggestion.granularity_rule;
-  channel.coverage_audit_enabled = suggestion.coverage_audit_enabled;
+  channel.omission_retry_enabled = suggestion.omission_retry_enabled;
   delete channelAttributeSuggestions[channel.channel_id];
   setFeedback("通道属性建议已应用到当前草稿，请保存。");
 }
@@ -1038,6 +1340,7 @@ async function calculatePreviewPlan(): Promise<void> {
       previewProfileId.value,
       snapshotId.value,
       previewDocumentIds.value,
+      semanticAuditEnabled.value,
     );
     setFeedback("试抽取成本估算已生成。");
   } catch (caught) {
@@ -1063,6 +1366,7 @@ async function startPreview(): Promise<void> {
   const currentSnapshotId = snapshotId.value;
   const documentIds = [...previewDocumentIds.value];
   const forceNew = forceNewPreview.value;
+  const useSemanticAudit = semanticAuditEnabled.value;
   requestConfirmation({
     title: "开始 Profile 试抽取？",
     message: "系统将调用模型处理所选文档。试抽取不会生成 Wiki 页面或修改 Profile。",
@@ -1072,6 +1376,12 @@ async function startPreview(): Promise<void> {
       `Blocks：${plan.block_count}`,
       `窗口：${plan.window_count}`,
       `预计模型调用：${plan.estimated_model_calls}`,
+      `其中文档级标题消歧：${plan.estimated_document_anchor_calls} 次调用`,
+      `标题消歧预计输入：${formatNumber(plan.estimated_document_anchor_input_tokens)} tokens`,
+      `标题消歧预计输出：${formatNumber(plan.estimated_document_anchor_output_tokens)} tokens`,
+      `其中 LLM 审查合计：${plan.estimated_semantic_audit_calls} 次调用`,
+      `其中标题区分度审查：${plan.estimated_name_scope_audit_calls} 次调用`,
+      `其中名称含义审查：${plan.estimated_name_meaning_audit_calls} 次调用`,
       `预计输入 token：${formatNumber(plan.estimated_input_tokens)}`,
       `预计输出 token：${formatNumber(plan.estimated_output_tokens)}`,
       reuseText,
@@ -1085,6 +1395,7 @@ async function startPreview(): Promise<void> {
           currentSnapshotId,
           documentIds,
           forceNew,
+          useSemanticAudit,
         );
         activePreview.value = run;
         activePreviewCandidates.value = run.candidates;
@@ -1259,9 +1570,13 @@ function stopPolling(): void {
   }
 }
 
-/** 把一个 Preview 候选加入对应文档的清单草稿。 */
+/** 按候选自己的临时优先级，把一个 Preview 候选加入对应文档的清单草稿。 */
 async function appendCandidateToChecklist(candidate: PreviewCandidate): Promise<boolean> {
   if (!activePreview.value) {
+    return false;
+  }
+  if (isPreviewCandidateInChecklist(candidate)) {
+    setFeedback("", "该候选已经在当前文档的质量校验基准中。");
     return false;
   }
   busy.value = true;
@@ -1283,8 +1598,8 @@ async function appendCandidateToChecklist(candidate: PreviewCandidate): Promise<
     const item: DocumentChecklistItem = {
       item_id: newChecklistItemId(),
       name: candidate.name,
-      aliases: [...candidate.aliases],
-      priority: previewCandidatePriority.value,
+      aliases: candidateEffectiveAliases(candidate),
+      priority: candidateChecklistPriority(candidate.candidate_id),
       source_block_ids: [...candidate.source_block_ids],
       origin: "from_preview",
       origin_profile_id: activePreview.value.profile_id,
@@ -2124,7 +2439,7 @@ onBeforeUnmount(() => {
                 <dt>遗漏补抽</dt>
                 <dd>
                   {{
-                    channelAttributeSuggestions[channel.channel_id].coverage_audit_enabled
+                    channelAttributeSuggestions[channel.channel_id].omission_retry_enabled
                       ? "开启"
                       : "关闭"
                   }}
@@ -2196,7 +2511,7 @@ onBeforeUnmount(() => {
             </label>
             <label class="inline-check">
               <input
-                v-model="channel.coverage_audit_enabled"
+                v-model="channel.omission_retry_enabled"
                 type="checkbox"
                 :disabled="editingReadOnly"
               />
@@ -2358,6 +2673,15 @@ onBeforeUnmount(() => {
           <input v-model="forceNewPreview" type="checkbox" />
           <span>即使配置相同也强制创建新的试抽取记录</span>
         </label>
+        <label class="inline-check semantic-audit-option">
+          <input
+            v-model="semanticAuditEnabled"
+            type="checkbox"
+            @change="previewPlan = null"
+          />
+          <span>同时执行 LLM 候选审查</span>
+          <small>检查候选、归纳、别名和抽取理由是否存在疑点</small>
+        </label>
         <div class="profile-actions">
           <button type="button" :disabled="busy" @click="calculatePreviewPlan">
             估算 token 用量
@@ -2380,7 +2704,29 @@ onBeforeUnmount(() => {
           <div class="plan-details">
             <span>输入 {{ formatNumber(previewPlan.estimated_input_tokens) }}</span>
             <span>输出 {{ formatNumber(previewPlan.estimated_output_tokens) }}</span>
-            <span>{{ previewPlan.estimated_model_calls }} 次模型调用</span>
+            <span>
+              {{ previewPlan.estimated_model_calls }} 次模型调用（抽取
+              {{ previewPlan.estimated_extraction_calls }}）
+            </span>
+            <span>
+              文档级标题消歧 {{ previewPlan.estimated_document_anchor_calls }} 次 ·
+              输入约 {{ formatNumber(previewPlan.estimated_document_anchor_input_tokens) }} ·
+              输出约 {{ formatNumber(previewPlan.estimated_document_anchor_output_tokens) }}
+            </span>
+            <span>
+              标题消歧预算：正常 ≤ {{ formatNumber(previewPlan.document_anchor_soft_input_tokens) }} ·
+              硬上限 {{ formatNumber(previewPlan.document_anchor_hard_input_tokens) }} ·
+              最多 {{ previewPlan.document_anchor_max_candidates }} 个候选
+            </span>
+            <span>
+              LLM 审查合计 {{ previewPlan.estimated_semantic_audit_calls }} 次
+            </span>
+            <span>
+              标题区分度审查 {{ previewPlan.estimated_name_scope_audit_calls }} 次
+            </span>
+            <span>
+              名称含义审查 {{ previewPlan.estimated_name_meaning_audit_calls }} 次
+            </span>
             <span>{{ previewPlan.document_ids.length }} 篇文档 · {{ previewPlan.block_count }} blocks · {{ previewPlan.window_count }} 窗口</span>
           </div>
           <span v-if="previewPlan.reusable_run_id" class="plan-reuse">
@@ -2467,14 +2813,18 @@ onBeforeUnmount(() => {
                   {{
                     activePreview.status === "queued"
                       ? "已进入队列，等待开始"
-                      : "正在试抽取"
+                      : activePreview.semantic_audit_status === "running"
+                        ? "正在抽取并执行候选审查"
+                        : "正在试抽取"
                   }}
                 </strong>
                 <p>
                   {{
                     activePreview.status === "queued"
                       ? "前一个任务结束后会自动开始，请保持应用打开。"
-                      : "模型正在逐篇、逐通道发现候选；完成后结果会自动出现。"
+                      : activePreview.semantic_audit_status === "running"
+                        ? "系统正在逐篇抽取，并检查内容证据、标题区分度和标题与摘要是否同指。"
+                        : "模型正在逐篇、逐通道发现候选；完成后结果会自动出现。"
                   }}
                 </p>
               </div>
@@ -2522,11 +2872,11 @@ onBeforeUnmount(() => {
               "
               class="candidate-browser-toolbar"
             >
-              <label>
+              <label class="candidate-search-field">
                 <span>搜索候选</span>
                 <input v-model="previewCandidateQuery" placeholder="名称、摘要或别名" />
               </label>
-              <label>
+              <label class="candidate-document-field">
                 <span>文档</span>
                 <select v-model="previewCandidateDocId">
                   <option value="">全部文档</option>
@@ -2537,7 +2887,7 @@ onBeforeUnmount(() => {
                   >{{ document.title }}</option>
                 </select>
               </label>
-              <label>
+              <label class="candidate-channel-field">
                 <span>来源通道</span>
                 <select v-model="previewCandidateChannelId">
                   <option value="">全部通道</option>
@@ -2548,20 +2898,28 @@ onBeforeUnmount(() => {
                   >{{ channel.name }}</option>
                 </select>
               </label>
-              <label>
-                <span>加入基准时的优先级</span>
-                <select v-model="previewCandidatePriority">
-                  <option value="must">必须（Must）</option>
-                  <option value="should">应该（Should）</option>
-                  <option value="nice_to_have">最好有</option>
-                  <option value="noise">噪声</option>
+              <label class="candidate-audit-field">
+                <span>审查状态</span>
+                <select v-model="previewCandidateAuditFilter">
+                  <option value="all">全部候选</option>
+                  <option value="issues">仅有疑点</option>
+                  <option value="unreviewed">未执行 LLM 审查</option>
                 </select>
               </label>
               <div class="candidate-toolbar-actions">
-                <span>
-                  {{ filteredPreviewCandidates.length }} / {{ activePreviewCandidates.length }}
-                  个候选
-                </span>
+                <div class="candidate-result-count">
+                  <strong>{{ filteredPreviewCandidates.length }}</strong>
+                  <span>/ {{ activePreviewCandidates.length }} 个候选</span>
+                  <span class="candidate-checked-count">
+                    已加入 {{ previewCandidateCheckedCount }}
+                  </span>
+                  <span
+                    v-if="previewCandidateAuditIssueCount"
+                    class="candidate-audit-issue-count"
+                  >
+                    疑点 {{ previewCandidateAuditIssueCount }}
+                  </span>
+                </div>
                 <button
                   v-if="englishPreviewEvidence.length"
                   type="button"
@@ -2584,6 +2942,52 @@ onBeforeUnmount(() => {
               class="translation-notice"
             >
               {{ evidenceTranslationNotice }}
+            </p>
+            <p
+              v-if="droppedPreviewAliasCount"
+              class="preview-diagnostic-notice"
+              role="status"
+            >
+              模型返回的 {{ droppedPreviewAliasCount }} 个别名未出现在对应证据中，已自动忽略；
+              候选和原文证据不受影响。
+            </p>
+            <p
+              v-if="missingPreviewReasonCount"
+              class="preview-diagnostic-notice"
+              role="status"
+            >
+              有 {{ missingPreviewReasonCount }} 个候选没有返回抽取理由，请结合通道规则和证据
+              人工审核。
+            </p>
+            <p
+              v-if="documentAnchorIssueResults.length"
+              class="preview-diagnostic-notice"
+              role="status"
+            >
+              文档级标题消歧未完成：{{ documentAnchorIssueResults.length }} 篇。
+              {{
+                documentAnchorIssueResults
+                  .slice(0, 3)
+                  .map(
+                    ([docId, result]) =>
+                      `${documentTitle(docId)}（${documentAnchorStatusLabel(result.status)}）`,
+                  )
+                  .join("；")
+              }}。
+              {{ documentAnchorIssueResults[0]?.[1].error || "未提供错误详情" }}。
+              候选仍可继续审核，但名称可能仍依赖局部窗口上下文。
+            </p>
+            <p
+              v-if="
+                activePreview.semantic_audit_enabled &&
+                ['partial', 'failed', 'interrupted'].includes(activePreview.semantic_audit_status)
+              "
+              class="preview-diagnostic-notice"
+              role="status"
+            >
+              LLM 候选审查状态：{{ semanticAuditStatusLabel(activePreview.semantic_audit_status) }}。
+              {{ activePreview.semantic_audit_error || "未提供错误详情" }}。
+              已抽取的候选仍可继续审核。
             </p>
 
             <div
@@ -2608,12 +3012,36 @@ onBeforeUnmount(() => {
                     v-for="candidate in group.candidates"
                     :key="candidate.candidate_id"
                     type="button"
-                    :class="{ active: selectedPreviewCandidate?.candidate_id === candidate.candidate_id }"
+                    :class="{
+                      active: selectedPreviewCandidate?.candidate_id === candidate.candidate_id,
+                      'is-in-checklist': isPreviewCandidateInChecklist(candidate),
+                    }"
                     @click="selectPreviewCandidate(candidate.candidate_id)"
                   >
                     <strong>{{ candidate.name }}</strong>
-                    <small>{{ candidate.summary }}</small>
-                    <span>{{ candidate.source_block_ids.length }} 个证据块</span>
+                    <span class="candidate-navigation-channels">
+                      {{ candidate.channel_ids.map(channelNameForId).join(" · ") }}
+                    </span>
+                    <small>{{ candidate.summaries.join("；") }}</small>
+                    <span class="candidate-navigation-meta">
+                      <span>{{ candidate.source_block_ids.length }} 个证据块</span>
+                      <span
+                        v-if="isPreviewCandidateInChecklist(candidate)"
+                        class="candidate-baseline-chip"
+                      >
+                        ✓ 已加入 · {{ checklistPriorityLabel(previewCandidatePriority(candidate)) }}
+                      </span>
+                      <span
+                        v-if="
+                          candidate.audit_status !== 'not_requested' ||
+                          activePreview.semantic_audit_enabled
+                        "
+                        class="candidate-audit-chip"
+                        :class="`audit-${candidate.audit_status}`"
+                      >
+                        {{ candidateAuditStatusLabel(candidate.audit_status) }}
+                      </span>
+                    </span>
                   </button>
                 </article>
               </aside>
@@ -2621,40 +3049,262 @@ onBeforeUnmount(() => {
               <article
                 v-if="selectedPreviewCandidate"
                 class="candidate-inspector"
+                :class="{
+                  'is-in-checklist': isPreviewCandidateInChecklist(selectedPreviewCandidate),
+                }"
               >
                 <header>
                   <div>
                     <p class="eyebrow">CANDIDATE</p>
                     <h4>{{ selectedPreviewCandidate.name }}</h4>
-                    <span>{{ documentTitle(selectedPreviewCandidate.doc_id) }}</span>
+                    <div class="candidate-title-meta">
+                      <span>{{ documentTitle(selectedPreviewCandidate.doc_id) }}</span>
+                      <span
+                        v-if="selectedPreviewCandidate.title_standalone_clear !== null"
+                        class="candidate-disambiguation-chip"
+                        :class="{
+                          changed: selectedPreviewCandidate.name_changed,
+                          clear: !selectedPreviewCandidate.name_changed,
+                        }"
+                      >
+                        {{
+                          selectedPreviewCandidate.name_changed
+                            ? "标题已消歧"
+                            : "标题无需消歧"
+                        }}
+                      </span>
+                      <span
+                        v-if="isPreviewCandidateInChecklist(selectedPreviewCandidate)"
+                        class="candidate-baseline-badge"
+                      >
+                        已在质量校验基准 · 以
+                        {{ checklistPriorityLabel(previewCandidatePriority(selectedPreviewCandidate)) }}
+                      </span>
+                    </div>
                   </div>
-                  <button
-                    type="button"
-                    class="primary-action"
-                    :disabled="busy"
-                    @click="appendCandidateToChecklist(selectedPreviewCandidate)"
-                  >加入质量校验基准</button>
+                  <div class="candidate-add-action">
+                    <label>
+                      <span>以</span>
+                      <select
+                        aria-label="加入质量校验基准时的优先级"
+                        :disabled="isPreviewCandidateInChecklist(selectedPreviewCandidate)"
+                        :value="previewCandidatePriority(selectedPreviewCandidate)"
+                        @change="
+                          setCandidateChecklistPriority(
+                            selectedPreviewCandidate.candidate_id,
+                            $event,
+                          )
+                        "
+                      >
+                        <option value="must">必须（Must）</option>
+                        <option value="should">应该（Should）</option>
+                        <option value="nice_to_have">最好有</option>
+                        <option value="noise">噪声</option>
+                      </select>
+                    </label>
+                    <button
+                      type="button"
+                      class="primary-action"
+                      :class="{ 'is-complete': isPreviewCandidateInChecklist(selectedPreviewCandidate) }"
+                      :disabled="busy || isPreviewCandidateInChecklist(selectedPreviewCandidate)"
+                      @click="appendCandidateToChecklist(selectedPreviewCandidate)"
+                    >
+                      {{
+                        isPreviewCandidateInChecklist(selectedPreviewCandidate)
+                          ? "已在质量校验基准"
+                          : "加入质量校验基准"
+                      }}
+                    </button>
+                  </div>
                 </header>
                 <div class="candidate-meta">
-                  <span
-                    v-for="channelId in selectedPreviewCandidate.channel_ids"
-                    :key="channelId"
-                  >{{ channelNameForId(channelId) }}</span>
                   <span>{{ selectedPreviewCandidate.source_block_ids.length }} 个证据块</span>
                 </div>
+                <section
+                  v-if="candidateChannelDefinitions(selectedPreviewCandidate).length"
+                  class="candidate-channel-definitions"
+                >
+                  <div class="candidate-group-heading">
+                    <strong>来源通道与判断标准</strong>
+                    <span>{{ candidateChannelDefinitions(selectedPreviewCandidate).length }}</span>
+                  </div>
+                  <div class="candidate-channel-definition-list">
+                    <article
+                      v-for="channel in candidateChannelDefinitions(selectedPreviewCandidate)"
+                      :key="channel.channelId"
+                    >
+                      <strong>{{ channel.definition.name }}</strong>
+                      <dl>
+                        <div>
+                          <dt>语义触发条件</dt>
+                          <dd>{{ channel.definition.activation || "未填写" }}</dd>
+                        </div>
+                        <div>
+                          <dt>包含条件</dt>
+                          <dd>
+                            <span
+                              v-for="criterion in channel.definition.include_criteria"
+                              :key="criterion"
+                              class="criterion-chip"
+                            >{{ criterion }}</span>
+                            <span
+                              v-if="!channel.definition.include_criteria.length"
+                              class="criterion-empty"
+                            >未填写</span>
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>排除条件</dt>
+                          <dd>
+                            <span
+                              v-for="criterion in channel.definition.exclude_criteria"
+                              :key="criterion"
+                              class="criterion-chip excluded"
+                            >{{ criterion }}</span>
+                            <span
+                              v-if="!channel.definition.exclude_criteria.length"
+                              class="criterion-empty"
+                            >未填写</span>
+                          </dd>
+                        </div>
+                      </dl>
+                    </article>
+                  </div>
+                </section>
+                <section class="candidate-reason-section">
+                  <div class="candidate-group-heading">
+                    <strong>抽取理由</strong>
+                    <span>{{ candidateSelectionReasons(selectedPreviewCandidate).length }}</span>
+                  </div>
+                  <div
+                    v-if="candidateSelectionReasons(selectedPreviewCandidate).length"
+                    class="candidate-reason-list"
+                  >
+                    <article
+                      v-for="reason in candidateSelectionReasons(selectedPreviewCandidate)"
+                      :key="`${reason.channel_id}-${reason.operation}-${reason.window_index}-${reason.reason}`"
+                    >
+                      <div>
+                        <span>{{ channelNameForId(reason.channel_id) }}</span>
+                        <small>
+                          {{ selectionReasonOperationLabel(reason.operation) }} ·
+                          窗口 {{ reason.window_index + 1 }} ·
+                          {{ reason.source_block_ids.length }} 个证据块
+                        </small>
+                      </div>
+                      <p>{{ reason.reason }}</p>
+                    </article>
+                  </div>
+                  <p v-else class="candidate-reason-missing">
+                    模型未提供抽取理由，请结合通道规则和原文证据人工判断。
+                  </p>
+                </section>
+                <section
+                  v-if="
+                    selectedPreviewCandidate.name_anchor_reason ||
+                    selectedPreviewCandidate.name_anchor_source_block_ids.length
+                  "
+                  class="candidate-reason-section"
+                >
+                  <div class="candidate-group-heading">
+                    <strong>标题消歧</strong>
+                    <span>
+                      {{ candidateTitleKindLabel(selectedPreviewCandidate.title_kind) }}
+                    </span>
+                  </div>
+                  <p v-if="selectedPreviewCandidate.name_changed">
+                    原名称：{{ selectedPreviewCandidate.provisional_name }}
+                  </p>
+                  <p v-if="selectedPreviewCandidate.missing_anchor_types.length">
+                    缺失锚点：
+                    {{
+                      selectedPreviewCandidate.missing_anchor_types
+                        .map(titleAnchorTypeLabel)
+                        .join("、")
+                    }}
+                  </p>
+                  <p v-if="selectedPreviewCandidate.name_anchor_reason">
+                    {{ selectedPreviewCandidate.name_anchor_reason }}
+                  </p>
+                  <details v-if="selectedPreviewCandidate.name_anchor_source_block_ids.length">
+                    <summary>查看锚点来源</summary>
+                    <p
+                      v-for="blockId in selectedPreviewCandidate.name_anchor_source_block_ids"
+                      :key="blockId"
+                    >
+                      {{ blockId }}
+                    </p>
+                  </details>
+                </section>
+                <section
+                  v-if="
+                    activePreview.semantic_audit_enabled ||
+                    selectedPreviewCandidate.audit_findings.length
+                  "
+                  class="candidate-audit-section"
+                  :class="`audit-${selectedPreviewCandidate.audit_status}`"
+                >
+                  <div class="candidate-group-heading">
+                    <strong>候选审查</strong>
+                    <span>{{ candidateAuditStatusLabel(selectedPreviewCandidate.audit_status) }}</span>
+                  </div>
+                  <p
+                    v-if="selectedPreviewCandidate.audit_reason"
+                    class="candidate-audit-reason"
+                  >
+                    {{ selectedPreviewCandidate.audit_reason }}
+                  </p>
+                  <ul v-if="selectedPreviewCandidate.audit_findings.length">
+                    <li
+                      v-for="finding in selectedPreviewCandidate.audit_findings"
+                      :key="`${finding.code}-${finding.alias || ''}-${finding.message}`"
+                    >
+                      <strong>{{ candidateAuditFindingLabel(finding.code) }}</strong>
+                      <span>{{ finding.message }}</span>
+                    </li>
+                  </ul>
+                  <p
+                    v-else-if="selectedPreviewCandidate.audit_status === 'clean'"
+                    class="candidate-audit-clean"
+                  >
+                    LLM 审查未发现明确疑点，不代表候选已被证明为绝对正确。
+                  </p>
+                  <p
+                    v-else-if="selectedPreviewCandidate.audit_status === 'not_requested'"
+                    class="candidate-audit-unreviewed"
+                  >
+                    本次未完成 LLM 候选审查。
+                  </p>
+                </section>
                 <section class="candidate-alias-section">
                   <strong>别名</strong>
                   <div v-if="selectedPreviewCandidate.aliases.length" class="candidate-alias-list">
                     <span
                       v-for="alias in selectedPreviewCandidate.aliases"
                       :key="alias"
+                      :class="{
+                        'has-audit-conflict': candidateAliasConflict(selectedPreviewCandidate, alias),
+                      }"
+                      :title="
+                        candidateAliasConflict(selectedPreviewCandidate, alias)?.message ||
+                        alias
+                      "
                     >{{ alias }}</span>
                   </div>
                   <p v-else>无别名</p>
                 </section>
                 <section class="candidate-summary-section">
-                  <p class="eyebrow">模型归纳</p>
-                  <p>{{ selectedPreviewCandidate.summary }}</p>
+                  <p class="eyebrow">
+                    模型归纳 · {{ selectedPreviewCandidate.summaries.length }} 条
+                  </p>
+                  <div class="candidate-summary-list">
+                    <p
+                      v-for="summary in selectedPreviewCandidate.summaries"
+                      :key="summary"
+                    >
+                      {{ summary }}
+                    </p>
+                  </div>
                   <small>这是模型生成的解释，不是原文引用。</small>
                 </section>
                 <section class="candidate-evidence-section">
@@ -2692,8 +3342,12 @@ onBeforeUnmount(() => {
               class="source-order-view"
             >
               <div class="source-order-toolbar">
-                <label>
-                  <span>阅读文档</span>
+                <label class="source-order-search">
+                  <span>搜索候选</span>
+                  <input v-model="previewCandidateQuery" placeholder="名称、摘要或别名" />
+                </label>
+                <label class="source-order-document">
+                  <span>文档</span>
                   <select
                     v-model="sourceOrderDocId"
                     @change="loadSourceOrderDocument(sourceOrderDocId)"
@@ -2706,9 +3360,28 @@ onBeforeUnmount(() => {
                     >{{ document.title }}</option>
                   </select>
                 </label>
+                <label class="source-order-channel">
+                  <span>来源通道</span>
+                  <select v-model="previewCandidateChannelId">
+                    <option value="">全部通道</option>
+                    <option
+                      v-for="channel in previewCandidateChannels"
+                      :key="channel.channelId"
+                      :value="channel.channelId"
+                    >{{ channel.name }}</option>
+                  </select>
+                </label>
+                <label class="source-order-audit">
+                  <span>审查状态</span>
+                  <select v-model="previewCandidateAuditFilter">
+                    <option value="all">全部候选</option>
+                    <option value="issues">仅有疑点</option>
+                    <option value="unreviewed">未执行 LLM 审查</option>
+                  </select>
+                </label>
                 <div class="source-order-stats">
                   <strong>{{ sourceOrderCoveredBlockCount }} / {{ sourceOrderBlocks.length }}</strong>
-                  <span>个原文块关联了候选</span>
+                  <span>个原文块有关联候选</span>
                 </div>
                 <div class="source-language-control">
                   <span>显示语言</span>
@@ -2798,6 +3471,10 @@ onBeforeUnmount(() => {
                               candidate.candidate_id,
                               block.block_id,
                             ),
+                            'is-in-checklist': isPreviewCandidateInChecklist(candidate),
+                            'has-audit-issue': ['suspicious', 'uncertain'].includes(
+                              candidate.audit_status,
+                            ),
                           }"
                         >
                           <header>
@@ -2820,6 +3497,19 @@ onBeforeUnmount(() => {
                                 </template>
                                 <template v-else>也引用了本段</template>
                               </small>
+                              <span
+                                v-if="isPreviewCandidateInChecklist(candidate)"
+                                class="source-candidate-baseline"
+                              >
+                                ✓ 已加入 · {{ checklistPriorityLabel(previewCandidatePriority(candidate)) }}
+                              </span>
+                              <span
+                                v-if="candidate.audit_status !== 'not_requested'"
+                                class="source-candidate-audit"
+                                :class="`audit-${candidate.audit_status}`"
+                              >
+                                {{ candidateAuditStatusLabel(candidate.audit_status) }}
+                              </span>
                             </div>
                             <button
                               type="button"
@@ -2834,14 +3524,62 @@ onBeforeUnmount(() => {
                               )
                             "
                           >
-                            <p>{{ candidate.summary }}</p>
+                            <p
+                              v-for="summary in candidate.summaries"
+                              :key="summary"
+                              class="candidate-compact-summary"
+                            >
+                              {{ summary }}
+                            </p>
+                            <div
+                              v-if="candidateSelectionReasons(candidate).length"
+                              class="source-candidate-reason"
+                            >
+                              <strong>抽取理由</strong>
+                              <p>{{ candidateSelectionReasons(candidate)[0].reason }}</p>
+                              <small v-if="candidateSelectionReasons(candidate).length > 1">
+                                另有 {{ candidateSelectionReasons(candidate).length - 1 }}
+                                条通道依据
+                              </small>
+                            </div>
                             <footer>
-                              <span>{{ candidate.source_block_ids.length }} 个证据块</span>
-                              <button
-                                type="button"
-                                :disabled="busy"
-                                @click="appendCandidateToChecklist(candidate)"
-                              >加入质量校验基准</button>
+                              <span class="candidate-evidence-count">
+                                {{ candidate.source_block_ids.length }} 个证据块
+                              </span>
+                              <div
+                                v-if="isPreviewCandidateInChecklist(candidate)"
+                                class="source-candidate-existing"
+                              >
+                                <strong>已在基准</strong>
+                                <span>
+                                  以 {{ checklistPriorityLabel(previewCandidatePriority(candidate)) }}
+                                </span>
+                              </div>
+                              <div v-else class="source-candidate-actions">
+                                <label class="candidate-priority-control">
+                                  <span>以</span>
+                                  <select
+                                    aria-label="加入质量校验基准时的优先级"
+                                    :value="previewCandidatePriority(candidate)"
+                                    @change="
+                                      setCandidateChecklistPriority(
+                                        candidate.candidate_id,
+                                        $event,
+                                      )
+                                    "
+                                  >
+                                    <option value="must">必须（Must）</option>
+                                    <option value="should">应该（Should）</option>
+                                    <option value="nice_to_have">最好有</option>
+                                    <option value="noise">噪声</option>
+                                  </select>
+                                </label>
+                                <button
+                                  type="button"
+                                  :disabled="busy"
+                                  @click="appendCandidateToChecklist(candidate)"
+                                >加入质量校验基准</button>
+                              </div>
                             </footer>
                           </template>
                         </article>
@@ -3267,30 +4005,215 @@ onBeforeUnmount(() => {
           <div>
             <p class="eyebrow">CANDIDATE IN SOURCE CONTEXT</p>
             <h3 id="source-candidate-title">{{ sourceCandidateDetail.name }}</h3>
-            <span>{{ documentTitle(sourceCandidateDetail.doc_id) }}</span>
+            <div class="candidate-title-meta">
+              <span>{{ documentTitle(sourceCandidateDetail.doc_id) }}</span>
+              <span
+                v-if="sourceCandidateDetail.title_standalone_clear !== null"
+                class="candidate-disambiguation-chip"
+                :class="{
+                  changed: sourceCandidateDetail.name_changed,
+                  clear: !sourceCandidateDetail.name_changed,
+                }"
+              >
+                {{ sourceCandidateDetail.name_changed ? "标题已消歧" : "标题无需消歧" }}
+              </span>
+              <span
+                v-if="isPreviewCandidateInChecklist(sourceCandidateDetail)"
+                class="candidate-baseline-badge"
+              >
+                已在质量校验基准 · 以
+                {{ checklistPriorityLabel(previewCandidatePriority(sourceCandidateDetail)) }}
+              </span>
+            </div>
           </div>
           <button type="button" @click="closeSourceCandidateDetail">关闭</button>
         </header>
         <div class="candidate-meta">
-          <span
-            v-for="channelId in sourceCandidateDetail.channel_ids"
-            :key="channelId"
-          >{{ channelNameForId(channelId) }}</span>
           <span>{{ sourceCandidateDetail.source_block_ids.length }} 个证据块</span>
         </div>
+        <section
+          v-if="candidateChannelDefinitions(sourceCandidateDetail).length"
+          class="candidate-channel-definitions"
+        >
+          <div class="candidate-group-heading">
+            <strong>来源通道与判断标准</strong>
+            <span>{{ candidateChannelDefinitions(sourceCandidateDetail).length }}</span>
+          </div>
+          <div class="candidate-channel-definition-list">
+            <article
+              v-for="channel in candidateChannelDefinitions(sourceCandidateDetail)"
+              :key="channel.channelId"
+            >
+              <strong>{{ channel.definition.name }}</strong>
+              <dl>
+                <div>
+                  <dt>语义触发条件</dt>
+                  <dd>{{ channel.definition.activation || "未填写" }}</dd>
+                </div>
+                <div>
+                  <dt>包含条件</dt>
+                  <dd>
+                    <span
+                      v-for="criterion in channel.definition.include_criteria"
+                      :key="criterion"
+                      class="criterion-chip"
+                    >{{ criterion }}</span>
+                    <span
+                      v-if="!channel.definition.include_criteria.length"
+                      class="criterion-empty"
+                    >未填写</span>
+                  </dd>
+                </div>
+                <div>
+                  <dt>排除条件</dt>
+                  <dd>
+                    <span
+                      v-for="criterion in channel.definition.exclude_criteria"
+                      :key="criterion"
+                      class="criterion-chip excluded"
+                    >{{ criterion }}</span>
+                    <span
+                      v-if="!channel.definition.exclude_criteria.length"
+                      class="criterion-empty"
+                    >未填写</span>
+                  </dd>
+                </div>
+              </dl>
+            </article>
+          </div>
+        </section>
+        <section class="candidate-reason-section">
+          <div class="candidate-group-heading">
+            <strong>抽取理由</strong>
+            <span>{{ candidateSelectionReasons(sourceCandidateDetail).length }}</span>
+          </div>
+          <div
+            v-if="candidateSelectionReasons(sourceCandidateDetail).length"
+            class="candidate-reason-list"
+          >
+            <article
+              v-for="reason in candidateSelectionReasons(sourceCandidateDetail)"
+              :key="`${reason.channel_id}-${reason.operation}-${reason.window_index}-${reason.reason}`"
+            >
+              <div>
+                <span>{{ channelNameForId(reason.channel_id) }}</span>
+                <small>
+                  {{ selectionReasonOperationLabel(reason.operation) }} ·
+                  窗口 {{ reason.window_index + 1 }} ·
+                  {{ reason.source_block_ids.length }} 个证据块
+                </small>
+              </div>
+              <p>{{ reason.reason }}</p>
+            </article>
+          </div>
+          <p v-else class="candidate-reason-missing">
+            模型未提供抽取理由，请结合通道规则和原文证据人工判断。
+          </p>
+        </section>
+        <section
+          v-if="
+            sourceCandidateDetail.name_anchor_reason ||
+            sourceCandidateDetail.name_anchor_source_block_ids.length
+          "
+          class="candidate-reason-section"
+        >
+          <div class="candidate-group-heading">
+            <strong>标题消歧</strong>
+            <span>{{ candidateTitleKindLabel(sourceCandidateDetail.title_kind) }}</span>
+          </div>
+          <p v-if="sourceCandidateDetail.name_changed">
+            原名称：{{ sourceCandidateDetail.provisional_name }}
+          </p>
+          <p v-if="sourceCandidateDetail.missing_anchor_types.length">
+            缺失锚点：
+            {{
+              sourceCandidateDetail.missing_anchor_types
+                .map(titleAnchorTypeLabel)
+                .join("、")
+            }}
+          </p>
+          <p v-if="sourceCandidateDetail.name_anchor_reason">
+            {{ sourceCandidateDetail.name_anchor_reason }}
+          </p>
+          <details v-if="sourceCandidateDetail.name_anchor_source_block_ids.length">
+            <summary>查看锚点来源</summary>
+            <p
+              v-for="blockId in sourceCandidateDetail.name_anchor_source_block_ids"
+              :key="blockId"
+            >
+              {{ blockId }}
+            </p>
+          </details>
+        </section>
+        <section
+          v-if="
+            activePreview?.semantic_audit_enabled ||
+            sourceCandidateDetail.audit_findings.length
+          "
+          class="candidate-audit-section"
+          :class="`audit-${sourceCandidateDetail.audit_status}`"
+        >
+          <div class="candidate-group-heading">
+            <strong>候选审查</strong>
+            <span>{{ candidateAuditStatusLabel(sourceCandidateDetail.audit_status) }}</span>
+          </div>
+          <p
+            v-if="sourceCandidateDetail.audit_reason"
+            class="candidate-audit-reason"
+          >
+            {{ sourceCandidateDetail.audit_reason }}
+          </p>
+          <ul v-if="sourceCandidateDetail.audit_findings.length">
+            <li
+              v-for="finding in sourceCandidateDetail.audit_findings"
+              :key="`${finding.code}-${finding.alias || ''}-${finding.message}`"
+            >
+              <strong>{{ candidateAuditFindingLabel(finding.code) }}</strong>
+              <span>{{ finding.message }}</span>
+            </li>
+          </ul>
+          <p
+            v-else-if="sourceCandidateDetail.audit_status === 'clean'"
+            class="candidate-audit-clean"
+          >
+            LLM 审查未发现明确疑点，不代表候选已被证明为绝对正确。
+          </p>
+          <p
+            v-else-if="sourceCandidateDetail.audit_status === 'not_requested'"
+            class="candidate-audit-unreviewed"
+          >
+            本次未完成 LLM 候选审查。
+          </p>
+        </section>
         <section class="candidate-alias-section">
           <strong>别名</strong>
           <div v-if="sourceCandidateDetail.aliases.length" class="candidate-alias-list">
             <span
               v-for="alias in sourceCandidateDetail.aliases"
               :key="alias"
+              :class="{
+                'has-audit-conflict': candidateAliasConflict(sourceCandidateDetail, alias),
+              }"
+              :title="
+                candidateAliasConflict(sourceCandidateDetail, alias)?.message ||
+                alias
+              "
             >{{ alias }}</span>
           </div>
           <p v-else>无别名</p>
         </section>
         <section class="candidate-summary-section">
-          <p class="eyebrow">模型归纳</p>
-          <p>{{ sourceCandidateDetail.summary }}</p>
+          <p class="eyebrow">
+            模型归纳 · {{ sourceCandidateDetail.summaries.length }} 条
+          </p>
+          <div class="candidate-summary-list">
+            <p
+              v-for="summary in sourceCandidateDetail.summaries"
+              :key="summary"
+            >
+              {{ summary }}
+            </p>
+          </div>
           <small>这是模型生成的解释，不是原文引用。</small>
         </section>
         <section class="candidate-evidence-section">
@@ -3319,12 +4242,41 @@ onBeforeUnmount(() => {
         </section>
         <footer class="source-candidate-dialog-actions">
           <button type="button" @click="closeSourceCandidateDetail">返回原文阅读</button>
-          <button
-            type="button"
-            class="primary-action"
-            :disabled="busy"
-            @click="addSourceCandidateToChecklist(sourceCandidateDetail)"
-          >加入质量校验基准</button>
+          <div
+            v-if="isPreviewCandidateInChecklist(sourceCandidateDetail)"
+            class="dialog-candidate-existing"
+          >
+            <strong>已在质量校验基准</strong>
+            <span>
+              以 {{ checklistPriorityLabel(previewCandidatePriority(sourceCandidateDetail)) }}
+            </span>
+          </div>
+          <div v-else class="dialog-submit-actions">
+            <label class="candidate-priority-control">
+              <span>以</span>
+              <select
+                aria-label="加入质量校验基准时的优先级"
+                :value="previewCandidatePriority(sourceCandidateDetail)"
+                @change="
+                  setCandidateChecklistPriority(
+                    sourceCandidateDetail.candidate_id,
+                    $event,
+                  )
+                "
+              >
+                <option value="must">必须（Must）</option>
+                <option value="should">应该（Should）</option>
+                <option value="nice_to_have">最好有</option>
+                <option value="noise">噪声</option>
+              </select>
+            </label>
+            <button
+              type="button"
+              class="primary-action"
+              :disabled="busy"
+              @click="addSourceCandidateToChecklist(sourceCandidateDetail)"
+            >加入质量校验基准</button>
+          </div>
         </footer>
       </section>
     </div>
@@ -3961,11 +4913,52 @@ onBeforeUnmount(() => {
 
 .source-candidate-dialog-actions {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
   gap: 9px;
   margin-top: 16px;
   padding-top: 14px;
   border-top: 1px solid rgba(37, 71, 50, 0.12);
+}
+
+.dialog-submit-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  padding: 6px;
+  border: 1px solid rgba(37, 71, 50, 0.1);
+  border-radius: 12px;
+  background: #f4f8f2;
+}
+
+.dialog-submit-actions .candidate-priority-control select {
+  min-width: 132px;
+  min-height: 34px;
+  padding: 5px 28px 5px 9px;
+  border-radius: 9px;
+}
+
+.dialog-submit-actions button {
+  min-height: 36px;
+  white-space: nowrap;
+}
+
+.dialog-candidate-existing {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  border: 1px solid rgba(43, 108, 68, 0.16);
+  border-radius: 11px;
+  padding: 8px 11px;
+  color: #64776a;
+  background: #f2f8f1;
+  font-size: 0.74rem;
+}
+
+.dialog-candidate-existing strong {
+  color: #286442;
 }
 
 .confirmation-dialog {
@@ -4275,6 +5268,21 @@ onBeforeUnmount(() => {
 
 .inline-check input {
   width: auto;
+}
+
+.semantic-audit-option {
+  flex-wrap: wrap;
+  padding: 9px 11px;
+  border: 1px solid rgba(37, 104, 65, 0.14);
+  border-radius: 10px;
+  background: #f5f9f3;
+}
+
+.semantic-audit-option small {
+  flex-basis: 100%;
+  padding-left: 24px;
+  color: #748278;
+  font-size: 0.7rem;
 }
 
 .advanced-profile-settings {
@@ -4638,25 +5646,89 @@ onBeforeUnmount(() => {
 .candidate-toolbar-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-left: auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  grid-area: actions;
+  min-width: 0;
+}
+
+.candidate-result-count {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-height: 36px;
+  padding: 6px 10px;
+  border: 1px solid rgba(37, 71, 50, 0.12);
+  border-radius: 10px;
+  color: #6c7d72;
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.9) inset;
+  white-space: nowrap;
+}
+
+.candidate-result-count strong {
+  color: #245b39;
+  font-size: 0.96rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.candidate-result-count span {
+  font-size: 0.7rem;
+}
+
+.candidate-result-count .candidate-checked-count {
+  margin-left: 3px;
+  border-left: 1px solid rgba(37, 71, 50, 0.14);
+  padding-left: 8px;
+  color: #2d7048;
+  font-weight: 700;
+}
+
+.candidate-result-count .candidate-audit-issue-count {
+  margin-left: 3px;
+  border-left: 1px solid rgba(161, 112, 39, 0.18);
+  padding-left: 8px;
+  color: #8a6429;
+  font-weight: 700;
 }
 
 .candidate-browser-toolbar {
   display: grid;
+  grid-template-areas:
+    "search document channel audit"
+    "actions actions actions actions";
   grid-template-columns:
     minmax(180px, 1.5fr)
     minmax(140px, 1fr)
     minmax(140px, 1fr)
-    minmax(150px, 1fr)
-    auto;
-  gap: 9px;
+    minmax(130px, 0.8fr);
+  gap: 10px;
   align-items: end;
   margin-top: 14px;
-  padding: 12px;
-  border: 1px solid rgba(37, 71, 50, 0.12);
-  border-radius: 12px;
-  background: #f7faf5;
+  padding: 13px 14px;
+  border: 1px solid rgba(37, 71, 50, 0.11);
+  border-radius: 15px;
+  background: linear-gradient(180deg, #fbfdf9 0%, #f4f8f1 100%);
+  box-shadow:
+    0 8px 22px rgba(35, 64, 44, 0.05),
+    0 1px 0 rgba(255, 255, 255, 0.9) inset;
+}
+
+.candidate-search-field {
+  grid-area: search;
+}
+
+.candidate-document-field {
+  grid-area: document;
+}
+
+.candidate-channel-field {
+  grid-area: channel;
+}
+
+.candidate-audit-field {
+  grid-area: audit;
 }
 
 .preview-view-switch {
@@ -4689,43 +5761,47 @@ onBeforeUnmount(() => {
   min-width: 0;
   color: #5c6f63;
   font-size: 0.72rem;
+  font-weight: 650;
 }
 
 .candidate-browser-toolbar input,
 .candidate-browser-toolbar select {
   width: 100%;
-  min-height: 34px;
-  border: 1px solid rgba(37, 71, 50, 0.18);
-  border-radius: 8px;
-  padding: 7px 9px;
+  min-height: 36px;
+  border: 1px solid rgba(37, 71, 50, 0.14);
+  border-radius: 10px;
+  padding: 7px 10px;
   color: #2e4937;
-  background: rgba(255, 255, 255, 0.94);
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(32, 58, 40, 0.03);
   font: inherit;
   font-size: 0.76rem;
 }
 
 .candidate-workspace {
   display: grid;
-  grid-template-columns: minmax(250px, 320px) minmax(0, 1fr);
-  gap: 14px;
+  grid-template-columns: minmax(260px, 310px) minmax(0, 1fr);
+  gap: 16px;
   margin-top: 14px;
   align-items: start;
 }
 
 .candidate-navigation {
   display: grid;
-  gap: 12px;
+  align-content: start;
+  gap: 14px;
   max-height: 720px;
   overflow: auto;
-  padding: 12px;
-  border: 1px solid rgba(37, 71, 50, 0.12);
-  border-radius: 13px;
-  background: #f7faf5;
+  padding: 13px;
+  border: 1px solid rgba(37, 71, 50, 0.11);
+  border-radius: 16px;
+  background: linear-gradient(180deg, #f8fbf6 0%, #f2f7f0 100%);
+  box-shadow: 0 10px 26px rgba(35, 64, 44, 0.05);
 }
 
 .candidate-group {
   display: grid;
-  gap: 6px;
+  gap: 7px;
 }
 
 .candidate-group-heading {
@@ -4733,7 +5809,14 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  position: sticky;
+  top: -13px;
+  z-index: 1;
+  margin: -3px -3px 0;
+  padding: 8px 3px 6px;
   color: #3b5947;
+  background: rgba(248, 251, 246, 0.96);
+  backdrop-filter: blur(8px);
 }
 
 .candidate-group-heading strong {
@@ -4754,27 +5837,53 @@ onBeforeUnmount(() => {
 }
 
 .candidate-navigation button {
+  position: relative;
   display: grid;
-  gap: 3px;
+  gap: 4px;
   width: 100%;
-  padding: 9px 10px;
-  border: 1px solid transparent;
-  border-radius: 9px;
-  background: rgba(255, 255, 255, 0.78);
-  box-shadow: none;
+  padding: 11px 12px 11px 24px;
+  border: 1px solid rgba(37, 71, 50, 0.08);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 1px 2px rgba(35, 64, 44, 0.025);
   text-align: left;
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease,
+    box-shadow 150ms ease,
+    transform 150ms ease;
+}
+
+.candidate-navigation button::before {
+  position: absolute;
+  top: 16px;
+  left: 10px;
+  width: 6px;
+  height: 6px;
+  border: 1px solid rgba(47, 103, 67, 0.28);
+  border-radius: 50%;
+  background: #fff;
+  content: "";
 }
 
 .candidate-navigation button:hover:not(:disabled) {
   border-color: rgba(37, 104, 65, 0.24);
-  transform: none;
+  background: #fff;
+  box-shadow: 0 5px 14px rgba(35, 74, 47, 0.07);
+  transform: translateY(-1px);
 }
 
 .candidate-navigation button.active,
 .candidate-navigation button.active:hover {
-  border-color: #30774d;
-  background: #e4f1e7;
-  box-shadow: 0 4px 12px rgba(36, 87, 53, 0.08);
+  border-color: rgba(40, 104, 63, 0.48);
+  background: linear-gradient(135deg, #eaf5eb 0%, #f8fcf7 100%);
+  box-shadow: 0 7px 18px rgba(36, 87, 53, 0.1);
+}
+
+.candidate-navigation button.active::before {
+  border-color: #2c7048;
+  background: #2c7048;
+  box-shadow: 0 0 0 4px rgba(44, 112, 72, 0.1);
 }
 
 .candidate-navigation button strong {
@@ -4796,30 +5905,187 @@ onBeforeUnmount(() => {
   -webkit-line-clamp: 2;
 }
 
+.candidate-navigation .candidate-navigation-channels {
+  overflow: hidden;
+  color: #467057;
+  font-size: 0.64rem;
+  font-weight: 650;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .candidate-navigation button span {
   color: #7a887f;
   font-size: 0.66rem;
 }
 
+.candidate-navigation-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px 8px;
+}
+
+.candidate-navigation .candidate-baseline-chip {
+  border-radius: 999px;
+  padding: 2px 7px;
+  color: #286442;
+  background: #e3f1e6;
+  font-size: 0.64rem;
+  font-weight: 700;
+}
+
+.candidate-navigation .candidate-audit-chip {
+  border: 1px solid rgba(91, 105, 97, 0.12);
+  border-radius: 999px;
+  padding: 2px 7px;
+  color: #6a786e;
+  background: #f1f4f0;
+  font-size: 0.64rem;
+  font-weight: 700;
+}
+
+.candidate-navigation .candidate-audit-chip.audit-clean {
+  border-color: rgba(43, 108, 68, 0.12);
+  color: #2d6b48;
+  background: #e9f4e9;
+}
+
+.candidate-navigation .candidate-audit-chip.audit-suspicious {
+  border-color: rgba(166, 95, 39, 0.15);
+  color: #955322;
+  background: #fff1e7;
+}
+
+.candidate-navigation .candidate-audit-chip.audit-uncertain {
+  border-color: rgba(161, 112, 39, 0.15);
+  color: #7e622b;
+  background: #fff8e7;
+}
+
+.candidate-navigation button.is-in-checklist {
+  border-color: rgba(43, 108, 68, 0.2);
+  background: linear-gradient(135deg, #f4faf3 0%, #fbfdf9 100%);
+}
+
+.candidate-navigation button.is-in-checklist::before {
+  display: grid;
+  width: 12px;
+  height: 12px;
+  place-items: center;
+  border-color: #3a7b52;
+  color: #fff;
+  background: #3a7b52;
+  content: "✓";
+  font-size: 0.5rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.candidate-navigation button.active.is-in-checklist {
+  border-color: rgba(40, 104, 63, 0.56);
+  background: linear-gradient(135deg, #e5f3e7 0%, #f9fcf8 100%);
+  box-shadow: 0 7px 18px rgba(36, 87, 53, 0.1);
+}
+
 .candidate-inspector {
   min-width: 0;
-  padding: 18px;
-  border: 1px solid rgba(37, 71, 50, 0.14);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.78);
+  padding: 20px;
+  border: 1px solid rgba(37, 71, 50, 0.11);
+  border-radius: 17px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 12px 30px rgba(35, 64, 44, 0.07);
+}
+
+.candidate-inspector.is-in-checklist {
+  border-color: rgba(43, 108, 68, 0.26);
 }
 
 .candidate-inspector > header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid rgba(37, 71, 50, 0.1);
+ }
+
+.candidate-add-action,
+.candidate-priority-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.candidate-add-action {
+  flex: 0 0 auto;
+  padding: 6px;
+  border: 1px solid rgba(37, 71, 50, 0.1);
+  border-radius: 13px;
+  background: #f5f9f3;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.9) inset;
+}
+
+.candidate-add-action label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.candidate-add-action label > span,
+.candidate-priority-control > span {
+  color: #6d7d72;
+  font-size: 0.68rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.candidate-add-action select,
+.candidate-priority-control select {
+  min-height: 34px;
+  padding: 5px 28px 5px 9px;
+  border-radius: 9px;
+  font-size: 0.72rem;
+}
+
+.candidate-add-action select {
+  min-width: 122px;
+}
+
+.candidate-add-action button {
+  min-height: 36px;
+  padding: 7px 13px;
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+.candidate-add-action button.is-complete:disabled {
+  border-color: rgba(43, 108, 68, 0.16);
+  color: #286442;
+  background: #e4f2e7;
+  box-shadow: none;
+  filter: none;
+  opacity: 1;
+}
+
+.candidate-inspector > header > div:first-child {
+  min-width: 0;
+}
+
+.candidate-inspector .eyebrow {
+  margin: 0;
+  color: #789084;
+  font-size: 0.64rem;
+  font-weight: 800;
+  letter-spacing: 0.13em;
 }
 
 .candidate-inspector h4 {
-  margin: 3px 0 4px;
+  margin: 5px 0 6px;
   color: #203f2b;
-  font-size: 1.15rem;
+  font-size: clamp(1.15rem, 2vw, 1.38rem);
+  line-height: 1.25;
 }
 
 .candidate-inspector > header span {
@@ -4827,11 +6093,49 @@ onBeforeUnmount(() => {
   font-size: 0.75rem;
 }
 
+.candidate-title-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.candidate-baseline-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid rgba(43, 108, 68, 0.16);
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: #286442 !important;
+  background: #e7f3e9;
+  font-size: 0.68rem !important;
+  font-weight: 700;
+}
+
+.candidate-disambiguation-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid rgba(50, 104, 72, 0.14);
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: #315f44;
+  background: #edf6ee;
+  font-size: 0.66rem;
+  font-weight: 700;
+}
+
+.candidate-disambiguation-chip.changed {
+  border-color: rgba(46, 104, 138, 0.18);
+  color: #2d607d;
+  background: #eaf4fa;
+}
+
 .candidate-meta {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-top: 12px;
+  margin-top: 14px;
 }
 
 .candidate-meta span {
@@ -4841,6 +6145,192 @@ onBeforeUnmount(() => {
   background: #e8f0e5;
   font-size: 0.68rem;
   font-weight: 650;
+}
+
+.candidate-channel-definitions {
+  margin-top: 14px;
+  padding: 13px 14px;
+  border: 1px solid rgba(37, 71, 50, 0.11);
+  border-radius: 12px;
+  background: #f8faf6;
+}
+
+.candidate-channel-definition-list {
+  display: grid;
+  gap: 9px;
+  margin-top: 9px;
+}
+
+.candidate-channel-definition-list article {
+  padding: 11px 12px;
+  border: 1px solid rgba(37, 104, 65, 0.1);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.candidate-channel-definition-list article > strong {
+  color: #295b3d;
+  font-size: 0.78rem;
+}
+
+.candidate-channel-definition-list dl {
+  display: grid;
+  gap: 8px;
+  margin: 9px 0 0;
+}
+
+.candidate-channel-definition-list dl > div {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+}
+
+.candidate-channel-definition-list dt {
+  color: #75847a;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.55;
+}
+
+.candidate-channel-definition-list dd {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 0;
+  color: #40564a;
+  font-size: 0.75rem;
+  line-height: 1.6;
+}
+
+.criterion-chip {
+  border: 1px solid rgba(50, 116, 73, 0.14);
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: #315f44;
+  background: #edf6ee;
+}
+
+.criterion-chip.excluded {
+  border-color: rgba(161, 112, 39, 0.14);
+  color: #7b5f2c;
+  background: #fff8e9;
+}
+
+.criterion-empty {
+  color: #8a978f;
+  font-size: 0.72rem;
+}
+
+.candidate-reason-section {
+  margin-top: 14px;
+  padding: 13px 14px;
+  border: 1px solid rgba(54, 97, 72, 0.14);
+  border-radius: 12px;
+  background: #f8fbf7;
+}
+
+.candidate-reason-section details {
+  margin-top: 9px;
+  color: #65766b;
+  font-size: 0.72rem;
+}
+
+.candidate-reason-section details p {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.candidate-reason-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.candidate-reason-list article {
+  padding: 10px 11px;
+  border-left: 3px solid #6c9b7b;
+  border-radius: 0 9px 9px 0;
+  background: #fff;
+}
+
+.candidate-reason-list article > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.candidate-reason-list article > div span {
+  color: #2f6746;
+  font-size: 0.72rem;
+  font-weight: 750;
+}
+
+.candidate-reason-list article > div small {
+  color: #7b897f;
+  font-size: 0.65rem;
+}
+
+.candidate-reason-list article > p {
+  margin: 7px 0 0;
+  color: #3f5547;
+  font-size: 0.78rem;
+  line-height: 1.65;
+}
+
+.candidate-reason-missing {
+  margin: 9px 0 0;
+  color: #8a6b2d;
+  font-size: 0.72rem;
+}
+
+.candidate-audit-section {
+  margin-top: 14px;
+  padding: 13px 14px;
+  border: 1px solid rgba(37, 71, 50, 0.12);
+  border-radius: 12px;
+  background: #f8faf7;
+}
+
+.candidate-audit-section.audit-suspicious,
+.candidate-audit-section.audit-uncertain {
+  border-color: rgba(161, 112, 39, 0.23);
+  background: #fffaf1;
+}
+
+.candidate-audit-section .candidate-audit-reason,
+.candidate-audit-clean,
+.candidate-audit-unreviewed {
+  margin: 9px 0 0;
+  color: #53675b;
+  font-size: 0.76rem;
+  line-height: 1.6;
+}
+
+.candidate-audit-section ul {
+  display: grid;
+  gap: 7px;
+  margin: 9px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.candidate-audit-section li {
+  display: grid;
+  grid-template-columns: 122px minmax(0, 1fr);
+  gap: 9px;
+  padding: 8px 9px;
+  border-radius: 8px;
+  color: #5d675f;
+  background: rgba(255, 255, 255, 0.82);
+  font-size: 0.74rem;
+  line-height: 1.55;
+}
+
+.candidate-audit-section li strong {
+  color: #92511f;
 }
 
 .candidate-alias-section {
@@ -4876,6 +6366,14 @@ onBeforeUnmount(() => {
   font-size: 0.7rem;
 }
 
+.candidate-alias-list span.has-audit-conflict {
+  border-color: rgba(176, 91, 36, 0.34);
+  color: #91491f;
+  background: #fff1e7;
+  text-decoration: line-through;
+  text-decoration-color: rgba(145, 73, 31, 0.5);
+}
+
 .candidate-alias-section > p {
   margin: 2px 0 0;
   color: #7b887f;
@@ -4890,14 +6388,25 @@ onBeforeUnmount(() => {
 }
 
 .candidate-summary-section {
-  border: 1px solid rgba(54, 97, 72, 0.12);
-  background: #f7faf7;
+  border: 1px solid rgba(54, 97, 72, 0.1);
+  background: linear-gradient(180deg, #f9fbf8 0%, #f5f9f4 100%);
 }
 
 .candidate-summary-section p {
   margin: 7px 0 0;
   color: #3e5447;
   line-height: 1.7;
+}
+
+.candidate-summary-section .candidate-summary-list p {
+  color: #3f5547;
+  font-size: 0.78rem;
+  line-height: 1.65;
+}
+
+.candidate-summary-list {
+  display: grid;
+  gap: 7px;
 }
 
 .candidate-summary-section small {
@@ -4907,9 +6416,16 @@ onBeforeUnmount(() => {
   font-size: 0.68rem;
 }
 
+.candidate-compact-summary {
+  margin: 5px 0 0;
+  color: #52645a;
+  line-height: 1.65;
+}
+
 .candidate-evidence-section {
+  border: 1px solid rgba(71, 117, 137, 0.14);
   border-left: 4px solid #5b8ca2;
-  background: #f3f8fa;
+  background: linear-gradient(180deg, #f6fafc 0%, #f0f7fa 100%);
 }
 
 .source-order-view {
@@ -4918,54 +6434,95 @@ onBeforeUnmount(() => {
 
 .source-order-toolbar {
   display: grid;
-  grid-template-columns: minmax(210px, 1fr) auto auto auto;
-  gap: 14px;
+  grid-template-areas:
+    "search document channel audit"
+    "stats stats language filter";
+  grid-template-columns:
+    minmax(170px, 1.1fr)
+    minmax(180px, 1.2fr)
+    minmax(140px, 0.9fr)
+    minmax(140px, 0.9fr);
+  gap: 10px 14px;
   align-items: end;
-  padding: 13px;
-  border: 1px solid rgba(37, 71, 50, 0.13);
-  border-radius: 12px;
-  background: #f6faf4;
+  padding: 14px 15px;
+  border: 1px solid rgba(37, 71, 50, 0.11);
+  border-radius: 15px;
+  background: linear-gradient(180deg, #fbfdf9 0%, #f3f8f0 100%);
+  box-shadow:
+    0 8px 22px rgba(35, 64, 44, 0.05),
+    0 1px 0 rgba(255, 255, 255, 0.9) inset;
 }
 
-.source-order-toolbar > label:first-child {
+.source-order-document,
+.source-order-search,
+.source-order-channel,
+.source-order-audit {
   display: grid;
   gap: 6px;
   color: #52675a;
   font-size: 0.76rem;
+  font-weight: 650;
 }
 
-.source-order-toolbar select {
+.source-order-document {
+  grid-area: document;
+}
+
+.source-order-search {
+  grid-area: search;
+}
+
+.source-order-channel {
+  grid-area: channel;
+}
+
+.source-order-audit {
+  grid-area: audit;
+}
+
+.source-order-toolbar select,
+.source-order-toolbar input {
   width: 100%;
-  min-height: 35px;
-  border: 1px solid rgba(37, 71, 50, 0.2);
-  border-radius: 8px;
-  padding: 7px 9px;
+  min-height: 36px;
+  border: 1px solid rgba(37, 71, 50, 0.14);
+  border-radius: 10px;
+  padding: 7px 10px;
   color: #2f4938;
   background: #fff;
+  box-shadow: 0 1px 2px rgba(32, 58, 40, 0.03);
   font: inherit;
 }
 
 .source-order-stats {
-  display: grid;
-  gap: 2px;
+  grid-area: stats;
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 188px;
+  padding: 0 5px 8px;
   text-align: right;
 }
 
 .source-order-stats strong {
   color: #25613e;
-  font-size: 1.1rem;
+  font-size: 1.05rem;
+  font-variant-numeric: tabular-nums;
 }
 
 .source-order-stats span {
   color: #748278;
-  font-size: 0.7rem;
+  font-size: 0.72rem;
 }
 
 .source-language-control {
-  display: grid;
-  gap: 5px;
+  grid-area: language;
+  display: flex;
+  align-items: center;
+  gap: 9px;
   color: #52675a;
   font-size: 0.72rem;
+  font-weight: 650;
 }
 
 .source-language-switch {
@@ -4993,6 +6550,15 @@ onBeforeUnmount(() => {
 }
 
 .source-order-filter {
+  grid-area: filter;
+  justify-self: end;
+  min-height: 36px;
+  padding: 7px 11px;
+  border: 1px solid rgba(37, 71, 50, 0.1);
+  border-radius: 10px;
+  color: #4f6658;
+  background: rgba(255, 255, 255, 0.78);
+  font-size: 0.72rem;
   white-space: nowrap;
 }
 
@@ -5011,16 +6577,16 @@ onBeforeUnmount(() => {
 
 .source-comparison-list {
   display: grid;
-  gap: 12px;
-  margin-top: 14px;
+  gap: 14px;
+  margin-top: 16px;
 }
 
 .source-section-band {
-  margin-top: 8px;
+  margin-top: 10px;
   border-bottom: 1px solid rgba(37, 71, 50, 0.16);
-  padding: 7px 3px;
+  padding: 8px 4px;
   color: #365943;
-  font-size: 0.8rem;
+  font-size: 0.82rem;
   font-weight: 750;
   letter-spacing: 0.02em;
 }
@@ -5035,13 +6601,14 @@ onBeforeUnmount(() => {
 .source-text-block,
 .source-linked-candidates {
   min-width: 0;
-  padding: 14px;
-  border: 1px solid rgba(37, 71, 50, 0.12);
-  border-radius: 12px;
+  padding: 16px;
+  border: 1px solid rgba(37, 71, 50, 0.1);
+  border-radius: 15px;
+  box-shadow: 0 7px 20px rgba(35, 64, 44, 0.04);
 }
 
 .source-text-block {
-  background: #fff;
+  background: rgba(255, 255, 255, 0.96);
 }
 
 .source-comparison-row.uncovered .source-text-block {
@@ -5113,15 +6680,26 @@ onBeforeUnmount(() => {
 .source-linked-candidates {
   display: grid;
   align-content: start;
-  gap: 9px;
-  background: #f5f9f4;
+  gap: 10px;
+  background: linear-gradient(180deg, #f7faf5 0%, #f1f6ef 100%);
 }
 
 .source-linked-candidate {
-  padding: 11px;
-  border: 1px solid rgba(37, 104, 65, 0.14);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.9);
+  padding: 13px 14px;
+  border: 1px solid rgba(37, 104, 65, 0.11);
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 3px 10px rgba(35, 70, 46, 0.045);
+  transition:
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    transform 150ms ease;
+}
+
+.source-linked-candidate:hover {
+  border-color: rgba(37, 104, 65, 0.24);
+  box-shadow: 0 8px 20px rgba(35, 70, 46, 0.08);
+  transform: translateY(-1px);
 }
 
 .source-linked-candidate header,
@@ -5130,6 +6708,13 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+.source-linked-candidate footer {
+  margin-top: 11px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(37, 71, 50, 0.08);
+  flex-wrap: wrap;
 }
 
 .source-linked-candidate header > div {
@@ -5143,6 +6728,7 @@ onBeforeUnmount(() => {
   color: #254532;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 0.9rem;
 }
 
 .source-linked-candidate header small,
@@ -5153,7 +6739,9 @@ onBeforeUnmount(() => {
 
 .source-linked-candidate header button {
   min-height: 28px;
-  padding: 4px 8px;
+  padding: 4px 9px;
+  border-color: rgba(37, 104, 65, 0.14);
+  border-radius: 8px;
   font-size: 0.7rem;
   white-space: nowrap;
 }
@@ -5161,20 +6749,93 @@ onBeforeUnmount(() => {
 .source-linked-candidate > p {
   display: -webkit-box;
   overflow: hidden;
-  margin: 8px 0;
+  margin: 9px 0 0;
   color: #506459;
   font-size: 0.76rem;
-  line-height: 1.55;
+  line-height: 1.62;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
 }
 
+.source-candidate-reason {
+  margin-top: 9px;
+  padding: 8px 10px;
+  border-left: 3px solid #7b9d86;
+  border-radius: 0 8px 8px 0;
+  background: #f3f8f2;
+}
+
+.source-candidate-reason strong {
+  color: #456653;
+  font-size: 0.67rem;
+}
+
+.source-candidate-reason p {
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 4px 0 0;
+  color: #52665a;
+  font-size: 0.72rem;
+  line-height: 1.55;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.source-candidate-reason small {
+  display: block;
+  margin-top: 4px;
+  color: #728177;
+  font-size: 0.64rem;
+}
+
+.candidate-evidence-count {
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: #edf4ea;
+}
+
+.source-candidate-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.source-candidate-existing {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: auto;
+  color: #64776a;
+  font-size: 0.68rem;
+}
+
+.source-candidate-existing strong {
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: #286442;
+  background: #e4f2e7;
+  font-size: 0.66rem;
+}
+
 .source-linked-candidate footer button {
   min-height: 28px;
-  padding: 4px 8px;
+  padding: 5px 9px;
   color: #285f3d;
+  border-radius: 8px;
   font-size: 0.68rem;
   white-space: nowrap;
+}
+
+.source-linked-candidate footer .candidate-priority-control {
+  gap: 6px;
+}
+
+.source-linked-candidate footer .candidate-priority-control select {
+  min-height: 28px;
+  padding: 4px 24px 4px 8px;
+  border-radius: 8px;
+  font-size: 0.68rem;
 }
 
 .source-linked-candidate.is-compact {
@@ -5190,6 +6851,52 @@ onBeforeUnmount(() => {
 .source-linked-candidate.is-compact header small {
   color: #597360;
   font-style: italic;
+}
+
+.source-linked-candidate.is-in-checklist:not(.is-compact) {
+  border-color: rgba(43, 108, 68, 0.24);
+  background: linear-gradient(180deg, #fbfdf9 0%, #f4faf3 100%);
+}
+
+.source-candidate-baseline {
+  width: fit-content;
+  margin-top: 2px;
+  border-radius: 999px;
+  padding: 2px 7px;
+  color: #2b6945;
+  background: #e4f2e7;
+  font-size: 0.64rem;
+  font-weight: 700;
+}
+
+.source-candidate-audit {
+  width: fit-content;
+  margin-top: 2px;
+  border-radius: 999px;
+  padding: 2px 7px;
+  color: #6a786e;
+  background: #eef2ed;
+  font-size: 0.64rem;
+  font-weight: 700;
+}
+
+.source-candidate-audit.audit-clean {
+  color: #2d6b48;
+  background: #e6f3e8;
+}
+
+.source-candidate-audit.audit-suspicious {
+  color: #955322;
+  background: #fff0e4;
+}
+
+.source-candidate-audit.audit-uncertain {
+  color: #7e622b;
+  background: #fff7e5;
+}
+
+.source-linked-candidate.has-audit-issue:not(.is-compact) {
+  border-color: rgba(166, 95, 39, 0.24);
 }
 
 .uncovered-block-note {
@@ -5232,6 +6939,17 @@ onBeforeUnmount(() => {
   color: #255c3d;
   background: #e6f2e8;
   font-size: 0.76rem;
+}
+
+.preview-diagnostic-notice {
+  margin: 10px 0 0;
+  padding: 9px 11px;
+  border: 1px solid rgba(184, 132, 38, 0.22);
+  border-radius: 9px;
+  color: #765a22;
+  background: #fff8e8;
+  font-size: 0.76rem;
+  line-height: 1.55;
 }
 
 .candidate-card p {
@@ -5486,11 +7204,11 @@ onBeforeUnmount(() => {
 
 @media (max-width: 1200px) {
   .candidate-browser-toolbar {
+    grid-template-areas:
+      "search document"
+      "channel audit"
+      "actions actions";
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .candidate-browser-toolbar .candidate-toolbar-actions {
-    grid-column: 1 / -1;
   }
 }
 
@@ -5504,6 +7222,11 @@ onBeforeUnmount(() => {
   }
 
   .source-order-toolbar {
+    grid-template-areas:
+      "search document"
+      "channel audit"
+      "stats stats"
+      "language filter";
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -5551,6 +7274,16 @@ onBeforeUnmount(() => {
     grid-template-columns: 1fr;
   }
 
+  .candidate-browser-toolbar {
+    grid-template-areas:
+      "search"
+      "document"
+      "channel"
+      "audit"
+      "actions";
+    grid-template-columns: 1fr;
+  }
+
   .checklist-item-row {
     grid-template-columns: 1fr 1fr;
   }
@@ -5574,8 +7307,7 @@ onBeforeUnmount(() => {
 
   .candidate-toolbar-actions {
     width: 100%;
-    justify-content: space-between;
-    margin-left: 0;
+    justify-content: flex-start;
   }
 
   .preview-history-heading {
@@ -5588,11 +7320,26 @@ onBeforeUnmount(() => {
   }
 
   .source-order-toolbar {
+    grid-template-areas:
+      "search"
+      "document"
+      "channel"
+      "audit"
+      "stats"
+      "language"
+      "filter";
     grid-template-columns: 1fr;
   }
 
   .source-order-stats {
+    justify-content: flex-start;
+    min-width: 0;
+    padding: 0;
     text-align: left;
+  }
+
+  .source-order-filter {
+    justify-self: start;
   }
 
   .source-candidate-dialog {
@@ -5607,11 +7354,64 @@ onBeforeUnmount(() => {
 
   .source-candidate-dialog-actions {
     flex-direction: column-reverse;
+    align-items: stretch;
+  }
+
+  .dialog-submit-actions {
+    align-items: stretch;
+    flex-direction: column;
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .dialog-submit-actions .candidate-priority-control {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .dialog-submit-actions button {
+    width: 100%;
   }
 
   .candidate-inspector > header {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .candidate-add-action {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .candidate-add-action label {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .candidate-add-action select,
+  .candidate-add-action button {
+    width: 100%;
+  }
+
+  .candidate-channel-definition-list dl > div {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+
+  .candidate-audit-section li {
+    grid-template-columns: 1fr;
+    gap: 3px;
+  }
+
+  .source-candidate-actions {
+    align-items: stretch;
+    flex-direction: column;
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .source-candidate-actions button {
+    width: 100%;
   }
 
   .info-tooltip > [role="tooltip"] {

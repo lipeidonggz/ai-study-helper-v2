@@ -63,6 +63,34 @@ class _SingleCandidateProvider:
         max_output_tokens: int | None = None,
     ) -> ChatCompletionResult:
         payload = json.loads(messages[-1].content)
+        if "文档级标题消歧器" in messages[0].content:
+            content = json.dumps(
+                {
+                    "items": [
+                        {
+                            "candidate_ref": candidate["candidate_ref"],
+                            "provisional_name": candidate["provisional_name"],
+                            "title_kind": "proper_name",
+                            "standalone_clear": True,
+                            "missing_anchor_types": [],
+                            "final_name": candidate["provisional_name"],
+                            "aliases": candidate["aliases"],
+                            "anchor_source_block_ids": candidate["source_block_ids"][:1],
+                            "reason": "测试文档上下文提供了名称锚点。",
+                        }
+                        for candidate in payload["candidates"]
+                    ]
+                },
+                ensure_ascii=False,
+            )
+            return ChatCompletionResult(
+                content=content,
+                request_id="fake-document-anchor-api-1",
+                actual_model_id=self.profile.model_id,
+                finish_reason="stop",
+                input_tokens=20,
+                output_tokens=10,
+            )
         if "简体中文翻译器" in messages[0].content:
             self.translation_request_count += 1
             content = json.dumps(
@@ -92,7 +120,8 @@ class _SingleCandidateProvider:
                     {
                         "name": "Alpha",
                         "aliases": [],
-                        "summary": "Alpha 是独立知识对象。",
+                        "summaries": ["Alpha 是独立知识对象。"],
+                        "selection_reason": "正文提供了 Alpha 的稳定名称和独立说明。",
                         "source_block_ids": [block_id],
                     }
                 ]
@@ -134,7 +163,7 @@ def _profile_config() -> dict[str, object]:
                 "include_criteria": ["稳定名称"],
                 "exclude_criteria": ["导航"],
                 "granularity_rule": "一个对象一个候选。",
-                "coverage_audit_enabled": False,
+                "omission_retry_enabled": False,
             }
         ],
         "exclude_criteria": [],
@@ -225,7 +254,7 @@ def test_channel_attribute_suggestion_api_returns_unapplied_draft(tmp_path: Path
                     "include_criteria": ["存在稳定名称"],
                     "exclude_criteria": ["只有导航提及"],
                     "granularity_rule": "一个独立对象对应一个 candidate。",
-                    "coverage_audit_enabled": False,
+                    "omission_retry_enabled": False,
                 },
                 ensure_ascii=False,
             )
@@ -329,7 +358,8 @@ def test_profile_preview_api_runs_and_paginates_candidates(tmp_path: Path) -> No
                 },
             )
             plan.raise_for_status()
-            assert plan.json()["estimated_model_calls"] == 1
+            assert plan.json()["estimated_document_anchor_calls"] == 1
+            assert plan.json()["estimated_model_calls"] == 2
             assert plan.json()["estimated_total_tokens"] == (
                 plan.json()["estimated_input_tokens"] + plan.json()["estimated_output_tokens"]
             )
@@ -365,6 +395,12 @@ def test_profile_preview_api_runs_and_paginates_candidates(tmp_path: Path) -> No
             assert candidates.json()["total"] == 1
             candidate = candidates.json()["candidates"][0]
             assert candidate["name"] == "Alpha"
+            assert candidate["summaries"] == ["Alpha 是独立知识对象。"]
+            assert "summary" not in candidate
+            assert "summary_variants" not in candidate
+            assert candidate["selection_reasons"][0]["reason"] == (
+                "正文提供了 Alpha 的稳定名称和独立说明。"
+            )
             assert candidate["evidence_blocks"][0]["text"]
             block_id = candidate["evidence_blocks"][0]["block_id"]
             translated = await client.post(

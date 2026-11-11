@@ -120,6 +120,72 @@ def search_snapshot_index(
     )
 
 
+def read_snapshot_block_vectors(
+    snapshot_root: Path,
+    *,
+    block_ids: tuple[str, ...],
+    dimension: int,
+) -> dict[str, list[float]]:
+    """按固定 snapshot 的 block ID 读取已持久化 dense vectors。"""
+
+    if not block_ids:
+        return {}
+    if len(block_ids) != len(set(block_ids)):
+        raise RetrievalFailure(
+            "snapshot_integrity_error",
+            "block vector lookup contains duplicate IDs",
+        )
+    index_root = snapshot_root / "index" / "lance"
+    if not index_root.is_dir():
+        raise RetrievalFailure(
+            "collection_unavailable",
+            "collection index directory is missing",
+        )
+    quoted_ids = ", ".join(f"'{block_id.replace("'", "''")}'" for block_id in block_ids)
+    try:
+        table = lancedb.connect(str(index_root)).open_table(BLOCKS_TABLE_NAME)
+        rows = (
+            table.search()
+            .where(f"block_id IN ({quoted_ids})")
+            .select(["block_id", "vector_dimension", "vector"])
+            .limit(len(block_ids) + 1)
+            .to_list()
+        )
+    except Exception as error:
+        raise RetrievalFailure(
+            "tool_internal_error",
+            f"collection block vector lookup failed: {type(error).__name__}",
+        ) from error
+
+    vectors: dict[str, list[float]] = {}
+    for row in rows:
+        block_id = row.get("block_id")
+        vector = row.get("vector")
+        vector_dimension = row.get("vector_dimension")
+        if (
+            not isinstance(block_id, str)
+            or not block_id
+            or block_id in vectors
+            or vector_dimension != dimension
+            or not isinstance(vector, list)
+            or len(vector) != dimension
+            or not all(isinstance(value, int | float) for value in vector)
+        ):
+            raise RetrievalFailure(
+                "snapshot_integrity_error",
+                "persisted block vector is malformed",
+            )
+        vectors[block_id] = [float(value) for value in vector]
+
+    if set(vectors) != set(block_ids):
+        missing = sorted(set(block_ids) - set(vectors))
+        raise RetrievalFailure(
+            "snapshot_integrity_error",
+            f"persisted block vectors are missing: {', '.join(missing)}",
+        )
+    return vectors
+
+
 def reciprocal_rank_fusion(
     dense_rows: tuple[dict[str, Any], ...] | list[dict[str, Any]],
     keyword_rows: tuple[dict[str, Any], ...] | list[dict[str, Any]],
