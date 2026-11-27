@@ -37,6 +37,7 @@ from app.wiki.leaf_coverage import (
     CoverageLedger,
     CoverageNotReadyError,
     FrozenForest,
+    framework_content_sha256,
     load_active_coverage_ledger,
     load_frozen_forest,
 )
@@ -421,6 +422,13 @@ def test_frozen_forest_resource_matches_current_profile() -> None:
     assert len(forest.all_leaf_ids) == CURRENT_LEAF_COUNT
     assert forest.revision_id == "kf_c1b79b163bfcb2a93844"
     assert "K01.01" in forest.leaves_by_root["K01"]
+
+
+def test_framework_content_hash_is_stable_across_checkout_line_endings() -> None:
+    lf_payload = b'{"status":"complete"}\n'
+    crlf_payload = lf_payload.replace(b"\n", b"\r\n")
+
+    assert framework_content_sha256(lf_payload) == framework_content_sha256(crlf_payload)
 
 
 def test_leaf_selection_prompt_is_compatible_with_json_object_mode() -> None:

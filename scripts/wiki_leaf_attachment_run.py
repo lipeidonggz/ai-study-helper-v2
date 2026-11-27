@@ -34,6 +34,7 @@ from app.providers.chat import (
     DeepSeekChatProvider,
 )
 from app.storage.credentials import CHAT_API_KEY_USERNAME, WindowsCredentialStore
+from app.wiki.leaf_coverage import framework_content_sha256
 from wiki_leaf_support_probe import (
     MAX_OUTPUT_TOKENS,
     MODEL_ID,
@@ -71,15 +72,11 @@ DEFAULT_LEAF_CONCURRENCY = 20
 MAX_REQUEST_ATTEMPTS = 3
 RETRY_BASE_SECONDS = 2.0
 
-DATA_ROOT = Path(os.environ["LOCALAPPDATA"]) / "com.lipeidong.aistudyhelper"
+LOCAL_APP_DATA_ROOT = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+DATA_ROOT = LOCAL_APP_DATA_ROOT / "com.lipeidong.aistudyhelper"
 SNAPSHOT_ROOT = DATA_ROOT / "collections" / SNAPSHOT_ID
 ATTACHMENT_ROOT = DATA_ROOT / "wiki-leaf-attachments" / SNAPSHOT_ID
-FOREST_PATH = (
-    BACKEND_ROOT
-    / ".runtime"
-    / "role_knowledge_framework_tree_expansion_batch_20261123T113731009302Z"
-    / "role_knowledge_forest.json"
-)
+FOREST_PATH = BACKEND_ROOT / "resources" / "role_knowledge_forest.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,7 +320,7 @@ def load_framework(forest_path: Path = FOREST_PATH) -> Framework:
     leaves = load_leaves(forest)
     if len(leaves) != EXPECTED_LEAF_COUNT:
         raise RuntimeError(f"role knowledge forest leaf count mismatch: {len(leaves)}")
-    forest_hash = sha256_bytes(forest_bytes)
+    forest_hash = framework_content_sha256(forest_bytes)
     return Framework(
         forest_sha256=forest_hash,
         revision_id=f"kf_{forest_hash[:20]}",

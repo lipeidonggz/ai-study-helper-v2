@@ -431,6 +431,7 @@ finalization mode 时，`{{RESPONSE_POLICY}}` 会先插入以下最终化政策�
   - 目标文件 Ruff formatter／lint。
   - 目标文件 Pyright：`backend/app/resources.py`、`backend/app/wiki/leaf_coverage.py`、`backend/app/agent/runtime.py`、`backend/app/agent/tool_adapter.py`、`backend/app/agent/prompt.py`、`backend/app/tracing/store.py`。
 - 结果：上述命令在 2026-11-27 当前工作区通过；覆盖测试共 15 项，Agent 协议／工厂／运行时回归共 60 项通过，目标文件 Ruff 为 0 errors、Pyright 为 0 errors。
+- 干净 Linux checkout 修复：远端质量检查暴露 5 个测试因模块导入强依赖 `LOCALAPPDATA`、1 个框架 profile 校验因 CRLF／LF 原始字节差异而失败；测试还直接读取本机 15 篇运行时快照。现已将框架指纹改为跨 checkout 换行稳定的内容 hash，探针路径改为仓库冻结资源与安全回退，并把运行器测试改为自包含 fixture。定向 pytest 21 项通过，LF 与 CRLF 资源均加载为 revision `kf_c1b79b163bfcb2a93844`。
 - 真实数据只读校验：snapshot `s_6b787258ba7d700c`、attachment run `att_20261126T144721347314Z` 成功通过绑定校验；冻结框架为 revision `kf_c1b79b163bfcb2a93844`、24 roots、620 leaves，账本含 7,843 条支持关系并覆盖 526 个 block。
 - 覆盖的不变量：资源与账本绑定、分支隔离、叶／block 去重、usage／cache／trace、非法 JSON、输出截断、单分支失败、全分支失败、预算预检、实际超预估、执行中取消、默认工具可见性和旧 Wiki 工具退出。
 

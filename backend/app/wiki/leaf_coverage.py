@@ -45,6 +45,19 @@ CURRENT_ROOT_COUNT = 24
 CURRENT_LEAF_COUNT = 620
 CURRENT_BLOCK_COUNT = 526
 
+
+def framework_content_sha256(raw: bytes) -> str:
+    """计算不受 checkout 换行策略影响的冻结框架内容指纹。
+
+    当前 profile 的 revision 是在 Windows CRLF 工作区中冻结的。Git 在 Linux
+    检出同一 blob 时会使用 LF；统一转换为 CRLF 后再计算 SHA-256，保证框架
+    身份不会因开发平台变化而漂移。
+    """
+
+    normalized = raw.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+    return hashlib.sha256(normalized).hexdigest()
+
+
 LEAF_SELECTION_SYSTEM_PROMPT = """你是知识节点选择器。
 
 【任务】
@@ -343,7 +356,7 @@ def load_frozen_forest(
         forest = json.loads(raw)
     except (OSError, ValueError) as error:
         raise CoverageNotReadyError("coverage_framework_unavailable", str(error)) from error
-    digest = hashlib.sha256(raw).hexdigest()
+    digest = framework_content_sha256(raw)
     if digest != profile.framework_sha256:
         raise CoverageNotReadyError(
             "coverage_framework_hash_mismatch",

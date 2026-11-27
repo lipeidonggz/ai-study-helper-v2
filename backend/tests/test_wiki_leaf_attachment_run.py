@@ -25,14 +25,61 @@ def load_runner() -> ModuleType:
     return module
 
 
-def test_inventory_and_framework_are_fully_bound() -> None:
+def test_inventory_and_framework_loaders_validate_fixture_contract(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     runner = load_runner()
+    snapshot_id = "snapshot-test"
+    block_set_name = "doc#v0001.blocks.json"
+    block_set = {
+        "doc_id": "doc",
+        "doc_version": "v0001",
+        "blocks": [
+            {
+                "block_id": "doc#v0001#b00001",
+                "section_path": ["section"],
+                "text": "Fixture evidence.",
+                "content_hash": "block-hash",
+            }
+        ],
+    }
+    block_set_bytes = (json.dumps(block_set, ensure_ascii=False) + "\n").encode()
+    (tmp_path / block_set_name).write_bytes(block_set_bytes)
+    manifest = {
+        "snapshot_id": snapshot_id,
+        "status": "ready",
+        "completeness": "complete",
+        "failed_documents": [],
+        "totals": {"blocks": 1},
+        "documents": [
+            {
+                "doc_id": "doc",
+                "doc_version": "v0001",
+                "block_count": 1,
+                "artifact_refs": [
+                    {
+                        "kind": "block_set",
+                        "snapshot_ref": block_set_name,
+                        "sha256": runner.sha256_bytes(block_set_bytes),
+                    }
+                ],
+            }
+        ],
+    }
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner, "SNAPSHOT_ID", snapshot_id)
+    monkeypatch.setattr(runner, "EXPECTED_DOCUMENT_COUNT", 1)
+    monkeypatch.setattr(runner, "EXPECTED_BLOCK_COUNT", 1)
 
-    inventory = runner.load_inventory()
+    inventory = runner.load_inventory(tmp_path)
     framework = runner.load_framework()
 
-    assert len(inventory.blocks) == 526
-    assert len({block.block_id for block in inventory.blocks}) == 526
+    assert len(inventory.blocks) == 1
+    assert inventory.blocks[0].block_id == "doc#v0001#b00001"
     assert len(framework.roots) == 24
     assert len(framework.leaves) == 620
     assert framework.revision_id == "kf_c1b79b163bfcb2a93844"
@@ -105,7 +152,13 @@ def test_stored_failed_output_can_be_repaired_without_new_call() -> None:
 def test_invalid_root_preflight_falls_back_to_all_roots(monkeypatch) -> None:
     runner = load_runner()
     framework = runner.load_framework()
-    block = runner.load_inventory().blocks[0]
+    block = runner.InputBlock(
+        block_id="doc#v0001#b00001",
+        document_id="doc",
+        section_path=["section"],
+        text="Fixture evidence.",
+        content_hash="block-hash",
+    )
 
     class InvalidRootProvider:
         async def complete(self, messages, *, max_output_tokens=None):
@@ -139,7 +192,13 @@ def test_invalid_root_preflight_falls_back_to_all_roots(monkeypatch) -> None:
 def test_leaf_verdict_preserves_cache_usage(monkeypatch) -> None:
     runner = load_runner()
     framework = runner.load_framework()
-    block = runner.load_inventory().blocks[0]
+    block = runner.InputBlock(
+        block_id="doc#v0001#b00001",
+        document_id="doc",
+        section_path=["section"],
+        text="Fixture evidence.",
+        content_hash="block-hash",
+    )
     leaf = next(iter(framework.leaves.values()))
 
     class CachedLeafProvider:

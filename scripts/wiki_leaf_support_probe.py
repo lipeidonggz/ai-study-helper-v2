@@ -30,17 +30,10 @@ from app.providers.chat import (
 )
 from app.storage.credentials import CHAT_API_KEY_USERNAME, WindowsCredentialStore
 
-FOREST_PATH = (
-    BACKEND_ROOT
-    / ".runtime"
-    / "role_knowledge_framework_tree_expansion_batch_20261123T113731009302Z"
-    / "role_knowledge_forest.json"
-)
+FOREST_PATH = BACKEND_ROOT / "resources" / "role_knowledge_forest.json"
+LOCAL_APP_DATA_ROOT = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
 SNAPSHOT_ROOT = (
-    Path(os.environ["LOCALAPPDATA"])
-    / "com.lipeidong.aistudyhelper"
-    / "collections"
-    / "s_6b787258ba7d700c"
+    LOCAL_APP_DATA_ROOT / "com.lipeidong.aistudyhelper" / "collections" / "s_6b787258ba7d700c"
 )
 BLOCK_SET_PATH = (
     SNAPSHOT_ROOT / "documents" / "doc_fd4dec9976e041308e2b39ed797c75d1" / "v0001" / "blocks.json"
