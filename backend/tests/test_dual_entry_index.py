@@ -5,6 +5,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -23,6 +24,7 @@ from app.dual_entry_index.induction import (
     SUMMARY_SYSTEM_PROMPT,
     TERM_SENSE_SYSTEM_PROMPT,
     ConsolidationBatchResult,
+    DeepSeekJsonClient,
     InductionFailure,
     InductionUsage,
     JsonChatResult,
@@ -2321,6 +2323,61 @@ def test_stage_system_prompts_keep_stage_specific_output_contracts() -> None:
     assert "根对象只能有 summaries" in SUMMARY_SYSTEM_PROMPT
     assert "不生成概念摘要" not in CONSOLIDATION_SYSTEM_PROMPT
     assert "不得合并" in SUMMARY_SYSTEM_PROMPT
+
+
+def test_term_sense_prompt_requires_independent_nominal_reference() -> None:
+    assert "术语资格只有一条" in TERM_SENSE_SYSTEM_PROMPT
+    assert "独立作为名词性指称" in TERM_SENSE_SYSTEM_PROMPT
+    assert "习用缩写" in TERM_SENSE_SYSTEM_PROMPT
+    assert "作者、人物、组织、产品、文档和来源等名称" in TERM_SENSE_SYSTEM_PROMPT
+    assert "有限动词、分词、形容词" in TERM_SENSE_SYSTEM_PROMPT
+    assert "只作为同一原文块中另一个更长名词性词面" in TERM_SENSE_SYSTEM_PROMPT
+    assert "信息增量" not in TERM_SENSE_SYSTEM_PROMPT
+
+
+@pytest.mark.parametrize(
+    ("thinking_enabled", "expected_type"),
+    ((False, "disabled"), (True, "enabled")),
+)
+def test_deepseek_json_client_only_enables_thinking_when_requested(
+    monkeypatch: pytest.MonkeyPatch,
+    thinking_enabled: bool,
+    expected_type: str,
+) -> None:
+    requests: list[dict[str, object]] = []
+
+    class _Completions:
+        async def create(self, **kwargs: object) -> object:
+            requests.append(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"ok": true}'),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=2),
+                model="deepseek-flash",
+            )
+
+    class _AsyncOpenAI:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+            self.chat = SimpleNamespace(completions=_Completions())
+
+    monkeypatch.setattr("app.dual_entry_index.induction.AsyncOpenAI", _AsyncOpenAI)
+    client = DeepSeekJsonClient("test-key", thinking_enabled=thinking_enabled)
+
+    result = asyncio.run(
+        client.complete_json(
+            system_prompt="system",
+            user_prompt="user",
+            max_output_tokens=100,
+        )
+    )
+
+    assert result.payload == {"ok": True}
+    assert requests[0]["extra_body"] == {"thinking": {"type": expected_type}}
 
 
 def test_consolidation_output_budget_splits_independent_components() -> None:

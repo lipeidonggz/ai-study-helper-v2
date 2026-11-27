@@ -56,9 +56,9 @@ from app.dual_entry_index.reconciliation import (
 )
 from app.dual_entry_index.scanner import CandidateScanner, ScanContractError
 
-COMPILER_VERSION = "dual-entry-stage51-v15"
-INDUCTION_CONTRACT_VERSION = "stage51-induction-v14"
-COMPILE_CONTRACT_VERSION = "stage51-compile-v14"
+COMPILER_VERSION = "dual-entry-stage51-v17"
+INDUCTION_CONTRACT_VERSION = "stage51-induction-v16"
+COMPILE_CONTRACT_VERSION = "stage51-compile-v16"
 StageName = Literal[
     "scan",
     "term_judgement",

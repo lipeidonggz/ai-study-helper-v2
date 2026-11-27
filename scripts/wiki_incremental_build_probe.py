@@ -15,14 +15,14 @@ from pathlib import Path
 BACKEND_ROOT = Path(__file__).resolve().parents[1] / "backend"
 sys.path.insert(0, str(BACKEND_ROOT))
 
-from app.providers.chat import DeepSeekChatProvider
-from app.providers.embeddings import DashScopeEmbeddingProvider
-from app.storage.credentials import (
+from app.providers.chat import DeepSeekChatProvider  # noqa: E402
+from app.providers.embeddings import DashScopeEmbeddingProvider  # noqa: E402
+from app.storage.credentials import (  # noqa: E402
     CHAT_API_KEY_USERNAME,
     EMBEDDING_API_KEY_USERNAME,
     WindowsCredentialStore,
 )
-from app.wiki.profile_knowledge_map import (
+from app.wiki.profile_knowledge_map import (  # noqa: E402
     ProfileKnowledgeMapError,
     ProfileKnowledgeMapService,
     SearchWikiTopicV2Service,

@@ -18,20 +18,20 @@ import keyring
 BACKEND_ROOT = Path(__file__).resolve().parents[1] / "backend"
 sys.path.insert(0, str(BACKEND_ROOT))
 
-from app.dual_entry_index.artifacts import (
+from app.dual_entry_index.artifacts import (  # noqa: E402
     load_stage51_artifact,
     publish_scan_result,
     publish_stage51_artifact,
 )
-from app.dual_entry_index.compiler import Stage51Compiler
-from app.dual_entry_index.induction import (
+from app.dual_entry_index.compiler import Stage51Compiler  # noqa: E402
+from app.dual_entry_index.induction import (  # noqa: E402
     DEFAULT_BASE_URL,
     DEFAULT_MODEL_ID,
     DeepSeekJsonClient,
     LLMTermSenseInducer,
 )
-from app.dual_entry_index.scanner import CandidateScanner
-from app.dual_entry_index.snapshot import (
+from app.dual_entry_index.scanner import CandidateScanner  # noqa: E402
+from app.dual_entry_index.snapshot import (  # noqa: E402
     SnapshotLoader,
     find_active_snapshot,
     select_snapshot_documents,
