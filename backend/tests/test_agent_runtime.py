@@ -34,6 +34,7 @@ from app.providers.embeddings import FakeEmbeddingProvider
 from app.retrieval.service import RetrievalReadService
 from app.tracing.catalog import TraceCatalog
 from app.tracing.store import TraceStore
+from app.wiki.leaf_coverage import CoverageLedger, FrozenForest
 
 TOKEN = "agent-runtime-test-token"
 TRACE_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
@@ -235,6 +236,60 @@ def test_agent_runtime_executes_tool_and_finishes(tmp_path: Path) -> None:
     assert model_events[1].payload["usage_source"] == "provider"
     assert "harness_status" in chat_provider.requests[1][1].content
     assert "result_tokens" not in chat_provider.requests[1][1].content
+
+
+def test_agent_runtime_exposes_coverage_tool_without_legacy_wiki_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    embedding_provider = _prepare_snapshot(tmp_path)
+    forest = FrozenForest(
+        revision_id="test-revision",
+        sha256="test-sha256",
+        roots=(
+            {
+                "node_id": "root-a",
+                "title": "Root A",
+                "description": "",
+                "exclusions": [],
+                "children": [{"node_id": "leaf-a", "children": []}],
+            },
+        ),
+        leaves_by_root={"root-a": frozenset({"leaf-a"})},
+        all_leaf_ids=frozenset({"leaf-a"}),
+    )
+    ledger = CoverageLedger(
+        attachment_run_id="att_test",
+        snapshot_id="snapshot-test",
+        framework_revision_id="test-revision",
+        framework_sha256="test-sha256",
+        block_ids_by_leaf={"leaf-a": ()},
+        support_count=0,
+    )
+    monkeypatch.setattr("app.agent.runtime.load_frozen_forest", lambda: forest)
+    monkeypatch.setattr(
+        "app.agent.runtime.load_active_coverage_ledger",
+        lambda *_args, **_kwargs: ledger,
+    )
+    chat_provider = FakeChatProvider([_finish("已确认。")])
+    runtime = AgentRuntime(
+        tmp_path,
+        chat_provider=chat_provider,
+        embedding_provider=embedding_provider,
+    )
+
+    result = asyncio.run(runtime.run("有哪些要点？"))
+
+    assert result.status == "succeeded"
+    first_turn_prompt = "\n".join(message.content for message in chat_provider.requests[0])
+    assert "search_coverage_blocks" in first_turn_prompt
+    for legacy_tool_name in (
+        "search_wiki_topics",
+        "read_wiki_page",
+        "get_topic_evidence",
+        "search_wiki_topic_v2",
+    ):
+        assert legacy_tool_name not in first_turn_prompt
 
 
 def test_runtime_emits_structured_claim_annotation_without_editing_answer(
@@ -1199,7 +1254,7 @@ def test_protected_agent_api_runs_with_injected_providers(tmp_path: Path) -> Non
     assert result["answer"] == "API 运行成功"
     assert result["answer_completeness"] == "complete"
     assert result["limitations"] == []
-    assert result["prompt_bundle_version"] == "chat-v19"
+    assert result["prompt_bundle_version"] == "chat-v22"
     assert result["observation_token_counter_version"] == "chat-budget-conservative-v1"
     assert result["citation_annotations"]["status"] == "not_applicable"
     assert result["citation_annotation_model_calls"] == 0

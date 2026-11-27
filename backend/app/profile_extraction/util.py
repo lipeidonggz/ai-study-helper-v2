@@ -96,6 +96,21 @@ def ordered_unique(values: Iterable[str]) -> list[str]:
     return result
 
 
+def ordered_unique_normalized_text(values: Iterable[str]) -> list[str]:
+    """按内容归一化键去重，同时保留首次出现的原始文本顺序。"""
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = " ".join(value.split())
+        key = normalize_name(text)
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+    return result
+
+
 def split_blocks(
     blocks: Sequence[RetrievalBlock],
     *,

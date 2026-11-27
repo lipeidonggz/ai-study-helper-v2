@@ -9,7 +9,7 @@ export interface ExtractionChannel {
   include_criteria: string[];
   exclude_criteria: string[];
   granularity_rule: string;
-  coverage_audit_enabled: boolean;
+  omission_retry_enabled: boolean;
 }
 
 /** 模型为单个通道生成的其余属性，不包含名称、目的或通道 ID。 */
@@ -18,7 +18,7 @@ export interface ChannelAttributeSuggestion {
   include_criteria: string[];
   exclude_criteria: string[];
   granularity_rule: string;
-  coverage_audit_enabled: boolean;
+  omission_retry_enabled: boolean;
   request_id: string;
 }
 
@@ -87,10 +87,20 @@ export interface PreviewRunPlan {
   document_ids: string[];
   block_count: number;
   window_count: number;
+  estimated_extraction_calls: number;
+  estimated_document_anchor_calls: number;
+  estimated_document_anchor_input_tokens: number;
+  estimated_document_anchor_output_tokens: number;
+  estimated_semantic_audit_calls: number;
+  estimated_name_scope_audit_calls: number;
+  estimated_name_meaning_audit_calls: number;
   estimated_model_calls: number;
   estimated_input_tokens: number;
   estimated_output_tokens: number;
   estimated_total_tokens: number;
+  document_anchor_soft_input_tokens: number;
+  document_anchor_hard_input_tokens: number;
+  document_anchor_max_candidates: number;
   reusable_run_id: string | null;
   provider_ready: boolean;
 }
@@ -104,6 +114,24 @@ export type PreviewRunStatus =
   | "cancelled"
   | "interrupted";
 
+/** 一个通道窗口对候选为何被提取的简短、可追溯说明。 */
+export interface CandidateSelectionReason {
+  channel_id: string;
+  operation: "discovery" | "omission_retry";
+  window_index: number;
+  reason: string;
+  source_block_ids: string[];
+}
+
+/** 一个候选的确定性或 LLM 审查疑点。 */
+export interface CandidateAuditFinding {
+  code: string;
+  message: string;
+  alias: string | null;
+  conflicting_candidate_id: string | null;
+  evidence_block_ids: string[];
+}
+
 /** 文档级 Profile 比较候选及其直接证据。 */
 export interface PreviewCandidate {
   candidate_id: string;
@@ -112,9 +140,27 @@ export interface PreviewCandidate {
   ordinal: number;
   name: string;
   normalized_name: string;
+  provisional_name: string | null;
+  title_kind:
+    | "proper_name"
+    | "acronym"
+    | "common_concept"
+    | "relation"
+    | "principle"
+    | "method"
+    | "other"
+    | null;
+  title_standalone_clear: boolean | null;
+  missing_anchor_types: Array<"actor" | "system" | "product" | "scope">;
+  name_changed: boolean;
   aliases: string[];
-  summary: string;
-  summary_variants: string[];
+  summaries: string[];
+  selection_reasons?: CandidateSelectionReason[];
+  name_anchor_source_block_ids: string[];
+  name_anchor_reason: string | null;
+  audit_status: "not_requested" | "clean" | "suspicious" | "uncertain";
+  audit_reason: string | null;
+  audit_findings: CandidateAuditFinding[];
   source_block_ids: string[];
   evidence_blocks: Array<{
     block_id: string;
@@ -140,6 +186,38 @@ export interface EvidenceTranslationResponse {
   request_ids: string[];
 }
 
+/** Run 创建时冻结的通道判断标准。 */
+export interface PreviewChannelDefinition {
+  name: string;
+  activation: string;
+  include_criteria: string[];
+  exclude_criteria: string[];
+}
+
+/** 一个文档的整篇上下文名称锚定状态。 */
+export interface PreviewDocumentAnchorResult {
+  status:
+    | "not_needed"
+    | "completed"
+    | "over_budget"
+    | "candidate_limit_exceeded"
+    | "truncated_output"
+    | "invalid_json"
+    | "invalid_schema"
+    | "failed";
+  candidate_count: number;
+  estimated_input_tokens: number;
+  output_token_budget: number;
+  soft_input_tokens: number;
+  hard_input_tokens: number;
+  error: string | null;
+  request_id: string | null;
+  actual_input_tokens: number;
+  actual_output_tokens: number;
+  finish_reason: string | null;
+  returned_chars: number;
+}
+
 /** Preview Run 的可追溯状态摘要。 */
 export interface PreviewRunSummary {
   run_id: string;
@@ -148,6 +226,24 @@ export interface PreviewRunSummary {
   profile_id: string;
   profile_hash: string;
   profile_name: string;
+  channel_names: Record<string, string>;
+  channel_definitions: Record<string, PreviewChannelDefinition>;
+  semantic_audit_enabled: boolean;
+  semantic_audit_prompt_version: string | null;
+  name_scope_audit_prompt_version: string | null;
+  name_meaning_audit_prompt_version: string | null;
+  document_anchor_prompt_version: string | null;
+  document_anchor_policy_version: string | null;
+  document_anchor_results: Record<string, PreviewDocumentAnchorResult>;
+  semantic_audit_status:
+    | "disabled"
+    | "pending"
+    | "running"
+    | "completed"
+    | "partial"
+    | "failed"
+    | "interrupted";
+  semantic_audit_error: string | null;
   document_scope: string[];
   status: PreviewRunStatus;
   preview_fingerprint: string;
@@ -438,6 +534,7 @@ export class ProfileExtractionClient {
     profileId: string,
     snapshotId: string,
     documentIds: string[],
+    semanticAuditEnabled: boolean,
   ): Promise<PreviewRunPlan> {
     return this.request("/api/extraction-preview-runs/plan", {
       method: "POST",
@@ -446,6 +543,7 @@ export class ProfileExtractionClient {
         snapshot_id: snapshotId,
         document_ids: documentIds,
         execution_mode: "reuse_if_exact",
+        semantic_audit_enabled: semanticAuditEnabled,
       }),
     });
   }
@@ -455,6 +553,7 @@ export class ProfileExtractionClient {
     snapshotId: string,
     documentIds: string[],
     forceNew: boolean,
+    semanticAuditEnabled: boolean,
   ): Promise<PreviewRunDetail> {
     return this.request("/api/extraction-preview-runs", {
       method: "POST",
@@ -463,6 +562,7 @@ export class ProfileExtractionClient {
         snapshot_id: snapshotId,
         document_ids: documentIds,
         execution_mode: forceNew ? "force_new" : "reuse_if_exact",
+        semantic_audit_enabled: semanticAuditEnabled,
       }),
     });
   }

@@ -72,3 +72,5 @@ def test_agent_execution_service_accepts_frozen_evaluation_settings(
     assert runtime._config.max_context_tokens == 20_000
     assert runtime._retrieval_profile.top_k == 9
     assert runtime._prompt_bundle is frozen_prompt
+    assert runtime._enable_coverage_tool is True
+    assert runtime._enable_wiki_tools is False

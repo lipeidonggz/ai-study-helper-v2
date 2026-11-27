@@ -101,5 +101,4 @@ class AgentExecutionService:
             ),
             trace_store=self._trace_store,
             trace_mode=settings.trace_mode,
-            enable_wiki_tools=True,
         )

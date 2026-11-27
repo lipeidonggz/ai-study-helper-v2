@@ -10,6 +10,7 @@ from app.providers.chat import (
     DEEPSEEK_MODEL_ID,
     ChatMessage,
     ChatProviderError,
+    ChatProviderProfile,
     DeepSeekChatProvider,
 )
 
@@ -49,7 +50,12 @@ def test_deepseek_chat_provider_uses_openai_compatible_contract(
                         finish_reason="stop",
                     )
                 ],
-                usage=SimpleNamespace(prompt_tokens=11, completion_tokens=2),
+                usage=SimpleNamespace(
+                    prompt_tokens=11,
+                    completion_tokens=2,
+                    prompt_cache_hit_tokens=7,
+                    prompt_cache_miss_tokens=4,
+                ),
             )
 
     class FakeClient:
@@ -77,10 +83,48 @@ def test_deepseek_chat_provider_uses_openai_compatible_contract(
     assert captured["max_tokens"] == 8
     assert captured["response_format"] == {"type": "json_object"}
     assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning_effort" not in captured
     assert result.content == "OK"
     assert result.request_id == "request-1"
     assert result.input_tokens == 11
     assert result.output_tokens == 2
+    assert result.cache_hit_tokens == 7
+    assert result.cache_miss_tokens == 4
+
+
+def test_deepseek_chat_provider_reads_cache_usage_from_model_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCompletions:
+        async def create(self, **_kwargs):
+            return SimpleNamespace(
+                model=DEEPSEEK_MODEL_ID,
+                _request_id="request-extra",
+                choices=[
+                    SimpleNamespace(message=SimpleNamespace(content="OK"), finish_reason="stop")
+                ],
+                usage=SimpleNamespace(
+                    prompt_tokens=10,
+                    completion_tokens=1,
+                    model_extra={
+                        "prompt_cache_hit_tokens": 6,
+                        "prompt_cache_miss_tokens": 4,
+                    },
+                ),
+            )
+
+    class FakeClient:
+        def __init__(self, **_kwargs) -> None:
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("app.providers.chat.AsyncOpenAI", FakeClient)
+
+    result = asyncio.run(
+        DeepSeekChatProvider("test-key").complete([ChatMessage(role="user", content="reply OK")])
+    )
+
+    assert result.cache_hit_tokens == 6
+    assert result.cache_miss_tokens == 4
 
 
 def test_deepseek_chat_provider_requires_key() -> None:
@@ -116,7 +160,12 @@ def test_deepseek_chat_provider_streams_deltas_and_usage(
                 model=DEEPSEEK_MODEL_ID,
                 _request_id="stream-request",
                 choices=[],
-                usage=SimpleNamespace(prompt_tokens=9, completion_tokens=2),
+                usage=SimpleNamespace(
+                    prompt_tokens=9,
+                    completion_tokens=2,
+                    prompt_cache_hit_tokens=6,
+                    prompt_cache_miss_tokens=3,
+                ),
             ),
         ]
     )
@@ -132,10 +181,20 @@ def test_deepseek_chat_provider_streams_deltas_and_usage(
 
     monkeypatch.setattr("app.providers.chat.AsyncOpenAI", FakeClient)
 
+    profile = ChatProviderProfile(
+        provider="deepseek",
+        model_id=DEEPSEEK_MODEL_ID,
+        base_url=DEEPSEEK_BASE_URL,
+        temperature=0.0,
+        max_output_tokens=8192,
+        thinking_enabled=True,
+        reasoning_effort="low",
+    )
+
     async def collect():
         return [
             chunk
-            async for chunk in DeepSeekChatProvider("test-key").stream(
+            async for chunk in DeepSeekChatProvider("test-key", profile=profile).stream(
                 [ChatMessage(role="user", content="stream")],
                 max_output_tokens=16,
             )
@@ -146,9 +205,16 @@ def test_deepseek_chat_provider_streams_deltas_and_usage(
     assert captured["stream"] is True
     assert captured["stream_options"] == {"include_usage": True}
     assert captured["response_format"] == {"type": "json_object"}
+    assert captured["extra_body"] == {
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": "low",
+    }
+    assert "reasoning_effort" not in captured
     assert "".join(chunk.delta for chunk in chunks) == "答案"
     assert chunks[-1].result is not None
     assert chunks[-1].result.input_tokens == 9
     assert chunks[-1].result.output_tokens == 2
+    assert chunks[-1].result.cache_hit_tokens == 6
+    assert chunks[-1].result.cache_miss_tokens == 3
     assert chunks[-1].result.finish_reason == "stop"
     assert stream.closed is True

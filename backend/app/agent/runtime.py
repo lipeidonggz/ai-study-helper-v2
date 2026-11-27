@@ -37,6 +37,7 @@ from app.agent.tool_adapter import (
     AgentToolAdapter,
     CompositeToolAdapter,
     RetrievalToolAdapter,
+    ToolExecutionContext,
     ToolUnavailableError,
 )
 from app.providers.chat import (
@@ -53,6 +54,14 @@ from app.tracing.models import TraceMode, TraceStatus
 from app.tracing.store import TraceSession, TraceSpanHandle, TraceStore, new_trace_id
 from app.wiki.build_service import WikiBuildService
 from app.wiki.errors import WikiCompilationError
+from app.wiki.leaf_coverage import (
+    CoverageEvidenceService,
+    CoverageNotReadyError,
+    CoverageToolAdapter,
+    load_active_coverage_ledger,
+    load_frozen_forest,
+)
+from app.wiki.profile_knowledge_map import SearchWikiTopicV2Service
 from app.wiki.tool_adapter import WikiToolAdapter
 
 AGENT_LOOP_VERSION = "react-structured-v4"
@@ -73,6 +82,8 @@ TOOL_ACTIVITY_LABELS = {
     "search_wiki_topics": "正在查看 Wiki 主题入口",
     "read_wiki_page": "正在读取 Wiki 页面",
     "get_topic_evidence": "正在读取 Wiki 主题证据",
+    "search_wiki_topic_v2": "正在检索知识地图主题证据",
+    "search_coverage_blocks": "正在检查知识覆盖范围",
 }
 
 
@@ -130,6 +141,7 @@ class AgentRunResult:
     agent_turns: int
     tool_calls: int
     model_calls: int
+    retry_count: int
     input_tokens: int
     output_tokens: int
     sources: list[dict[str, Any]]
@@ -152,6 +164,7 @@ class _AgentGraphState(TypedDict, total=False):
     agent_turns: int
     tool_calls: int
     model_calls: int
+    retry_count: int
     input_tokens: int
     output_tokens: int
     tools_enabled: bool
@@ -221,6 +234,7 @@ class AgentRuntime:
         trace_store: TraceStore | None = None,
         trace_mode: TraceMode = "off",
         enable_wiki_tools: bool = False,
+        enable_coverage_tool: bool = True,
     ) -> None:
         self._data_root = data_root.resolve()
         self._chat_provider = chat_provider
@@ -232,6 +246,7 @@ class AgentRuntime:
         self._trace_store = trace_store
         self._trace_mode = trace_mode
         self._enable_wiki_tools = enable_wiki_tools
+        self._enable_coverage_tool = enable_coverage_tool
 
     async def run(
         self,
@@ -285,23 +300,67 @@ class AgentRuntime:
                             search_profile=self._retrieval_profile,
                         )
                     ]
+                    coverage_status = "disabled"
+                    coverage_attachment_run_id: str | None = None
+                    coverage_framework_revision_id: str | None = None
+                    if self._enable_coverage_tool:
+                        try:
+                            forest = load_frozen_forest()
+                            ledger = load_active_coverage_ledger(
+                                self._data_root,
+                                reader.snapshot_id,
+                                forest,
+                                expected_block_count=sum(
+                                    document.block_count for document in reader.manifest.documents
+                                ),
+                            )
+                        except CoverageNotReadyError as error:
+                            coverage_status = error.code
+                        else:
+                            coverage_status = "ready"
+                            coverage_attachment_run_id = ledger.attachment_run_id
+                            coverage_framework_revision_id = ledger.framework_revision_id
+                            tool_adapters.append(
+                                CoverageToolAdapter(
+                                    CoverageEvidenceService(
+                                        reader=reader,
+                                        provider=self._chat_provider,
+                                        token_counter=self._token_counter,
+                                        forest=forest,
+                                        ledger=ledger,
+                                    )
+                                )
+                            )
                     wiki_status = "disabled"
                     wiki_build_id: str | None = None
                     if self._enable_wiki_tools:
+                        knowledge_map_id = SearchWikiTopicV2Service(
+                            self._data_root
+                        ).active_map_id_for_selected_profile(reader.snapshot_id)
+                        wiki_build_ready = False
                         try:
                             wiki_build = WikiBuildService(self._data_root).active_for_snapshot(
                                 reader.snapshot_id
                             )
                         except WikiCompilationError:
-                            wiki_status = "not_ready_for_snapshot"
+                            wiki_status = (
+                                "ready"
+                                if knowledge_map_id is not None
+                                else "not_ready_for_snapshot"
+                            )
                         else:
+                            wiki_build_ready = True
                             wiki_status = "ready"
                             wiki_build_id = wiki_build.build_id
+                        if wiki_build_ready or knowledge_map_id is not None:
                             tool_adapters.append(
                                 WikiToolAdapter(
                                     self._data_root,
                                     snapshot_id=reader.snapshot_id,
                                     embedding_provider=self._embedding_provider,
+                                    chat_provider=self._chat_provider,
+                                    knowledge_map_id=knowledge_map_id,
+                                    enable_legacy_tools=wiki_build_ready,
                                 )
                             )
                     adapter = CompositeToolAdapter(tool_adapters)
@@ -310,6 +369,9 @@ class AgentRuntime:
                             tool_contract_version=adapter.contract_version,
                             wiki_status=wiki_status,
                             wiki_build_id=wiki_build_id,
+                            coverage_status=coverage_status,
+                            coverage_attachment_run_id=coverage_attachment_run_id,
+                            coverage_framework_revision_id=coverage_framework_revision_id,
                         )
                     execution = _AgentGraphExecution(
                         question=normalized_question,
@@ -317,6 +379,7 @@ class AgentRuntime:
                         adapter=adapter,
                         wiki_status=wiki_status,
                         wiki_build_id=wiki_build_id,
+                        coverage_status=coverage_status,
                         chat_provider=self._chat_provider,
                         config=self._config,
                         prompt_bundle=self._prompt_bundle,
@@ -426,6 +489,7 @@ class AgentRuntime:
             agent_turns=0,
             tool_calls=0,
             model_calls=0,
+            retry_count=0,
             input_tokens=0,
             output_tokens=0,
             sources=[],
@@ -449,12 +513,7 @@ class AgentRuntime:
                 agent_turns=result.agent_turns,
                 tool_calls=result.tool_calls,
                 model_calls=result.model_calls,
-                retry_count=max(
-                    0,
-                    result.model_calls
-                    - result.agent_turns
-                    - result.citation_annotation_model_calls,
-                ),
+                retry_count=result.retry_count,
                 input_tokens=result.input_tokens,
                 output_tokens=result.output_tokens,
                 answer=result.answer,
@@ -511,6 +570,7 @@ class _AgentGraphExecution:
         adapter: AgentToolAdapter,
         wiki_status: str,
         wiki_build_id: str | None,
+        coverage_status: str,
         chat_provider: ChatProvider,
         config: AgentRunConfig,
         prompt_bundle: PromptBundle,
@@ -525,6 +585,7 @@ class _AgentGraphExecution:
         self._adapter = adapter
         self._wiki_status = wiki_status
         self._wiki_build_id = wiki_build_id
+        self._coverage_status = coverage_status
         self._chat_provider = chat_provider
         self._config = config
         self._prompt_bundle = prompt_bundle
@@ -553,14 +614,19 @@ class _AgentGraphExecution:
                 "build_id": self._wiki_build_id,
             },
         )
+        coverage_status = AgentEvent(
+            event_type="coverage_status",
+            payload={"status": self._coverage_status},
+        )
         if self._emit is not None:
             self._emit(run_started)
             self._emit(snapshot_bound)
             self._emit(wiki_status)
+            self._emit(coverage_status)
         initial: _AgentGraphState = {
             "question": self._question,
             "history": [],
-            "events": [run_started, snapshot_bound, wiki_status],
+            "events": [run_started, snapshot_bound, wiki_status, coverage_status],
             "pending_action": None,
             "final_answer": None,
             "status": "running",
@@ -570,6 +636,7 @@ class _AgentGraphExecution:
             "agent_turns": 0,
             "tool_calls": 0,
             "model_calls": 0,
+            "retry_count": 0,
             "input_tokens": 0,
             "output_tokens": 0,
             "tools_enabled": True,
@@ -614,6 +681,7 @@ class _AgentGraphExecution:
             agent_turns=final.get("agent_turns", 0),
             tool_calls=final.get("tool_calls", 0),
             model_calls=final.get("model_calls", 0),
+            retry_count=final.get("retry_count", 0),
             input_tokens=final.get("input_tokens", 0),
             output_tokens=final.get("output_tokens", 0),
             sources=final.get("sources", []),
@@ -1237,6 +1305,7 @@ class _AgentGraphExecution:
         error = outcome.error
         attempts = outcome.attempts
         model_calls = state.get("model_calls", 0) + attempts
+        retry_count = state.get("retry_count", 0) + max(0, attempts - 1)
         if llm_span is not None and self._trace_session is not None:
             output_artifact = self._trace_session.record_artifact(
                 kind="llm.output",
@@ -1296,6 +1365,7 @@ class _AgentGraphExecution:
                 answer=outcome.emitted_answer or None,
                 extra={
                     "model_calls": model_calls,
+                    "retry_count": retry_count,
                     "input_tokens": (
                         state.get("input_tokens", 0) + current_input + failed_attempt_input_tokens
                     ),
@@ -1337,6 +1407,7 @@ class _AgentGraphExecution:
                 reason=reason,
                 extra={
                     "model_calls": model_calls,
+                    "retry_count": retry_count,
                     "input_tokens": state.get("input_tokens", 0) + failed_input_tokens,
                     "output_tokens": (state.get("output_tokens", 0) + failed_output_tokens),
                     **({"final_answer": outcome.emitted_answer} if outcome.emitted_answer else {}),
@@ -1423,6 +1494,7 @@ class _AgentGraphExecution:
                         ),
                         "agent_turns": agent_turns,
                         "model_calls": model_calls,
+                        "retry_count": retry_count,
                         "input_tokens": input_tokens,
                         "output_tokens": output_tokens,
                         "tools_enabled": False,
@@ -1475,6 +1547,7 @@ class _AgentGraphExecution:
                         "limitations": limitations,
                         "agent_turns": agent_turns,
                         "model_calls": model_calls,
+                        "retry_count": retry_count,
                         "input_tokens": input_tokens,
                         "output_tokens": output_tokens,
                         "tools_enabled": False,
@@ -1535,6 +1608,7 @@ class _AgentGraphExecution:
                 "pending_action": None,
                 "agent_turns": agent_turns,
                 "model_calls": model_calls,
+                "retry_count": retry_count,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "tools_enabled": not enter_finalization,
@@ -1613,6 +1687,7 @@ class _AgentGraphExecution:
                 "termination_reason": "finish",
                 "agent_turns": agent_turns,
                 "model_calls": model_calls,
+                "retry_count": retry_count,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "tools_enabled": tools_enabled,
@@ -1653,6 +1728,7 @@ class _AgentGraphExecution:
                     "limitations": limitations,
                     "agent_turns": agent_turns,
                     "model_calls": model_calls,
+                    "retry_count": retry_count,
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
                     "tools_enabled": False,
@@ -1669,6 +1745,7 @@ class _AgentGraphExecution:
             "pending_action": action,
             "agent_turns": agent_turns,
             "model_calls": model_calls,
+            "retry_count": retry_count,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "tools_enabled": True,
@@ -1732,7 +1809,25 @@ class _AgentGraphExecution:
             ),
         )
         try:
-            execution = await self._adapter.execute(action.tool_name, action.arguments)
+            remaining_request_tokens = max(
+                0,
+                self._config.max_request_tokens
+                - state.get("input_tokens", 0)
+                - state.get("output_tokens", 0)
+                - self._config.finalization_reserve_tokens,
+            )
+            execution = await self._adapter.execute(
+                action.tool_name,
+                action.arguments,
+                execution_context=ToolExecutionContext(
+                    remaining_request_tokens=remaining_request_tokens,
+                    max_context_tokens=self._config.max_context_tokens,
+                    max_output_tokens=self._config.max_output_tokens,
+                    cancellation=self._cancellation,
+                    trace_session=self._trace_session,
+                    trace_span=tool_span,
+                ),
+            )
         except ToolUnavailableError:
             if tool_span is not None and self._trace_session is not None:
                 self._trace_session.end_span(
@@ -1778,12 +1873,39 @@ class _AgentGraphExecution:
 
         if self._cancellation.is_cancelled:
             if tool_span is not None and self._trace_session is not None:
+                tool_span.attributes.update(execution.trace_attributes)
                 self._trace_session.end_span(
                     tool_span,
                     status="error",
                     error_code="canceled_by_user",
                 )
-            return self._canceled_state(state, events=events)
+            return self._canceled_state(
+                state,
+                events=events,
+                extra={
+                    "model_calls": state.get("model_calls", 0) + execution.model_calls,
+                    "retry_count": state.get("retry_count", 0) + execution.retry_count,
+                    "input_tokens": state.get("input_tokens", 0) + execution.input_tokens,
+                    "output_tokens": state.get("output_tokens", 0) + execution.output_tokens,
+                },
+            )
+        model_calls = state.get("model_calls", 0) + execution.model_calls
+        retry_count = state.get("retry_count", 0) + execution.retry_count
+        input_tokens = state.get("input_tokens", 0) + execution.input_tokens
+        output_tokens = state.get("output_tokens", 0) + execution.output_tokens
+        if execution.model_calls > 0:
+            self._record_event(
+                events,
+                AgentEvent(
+                    event_type="usage_update",
+                    payload={
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "input_source": "provider",
+                        "output_source": "provider",
+                    },
+                ),
+            )
         source_refs = _source_refs(action.tool_name, execution.payload)
         merged_sources = _merge_sources(state.get("sources", []), source_refs)
         evidence_refs = _evidence_blocks(execution.payload)
@@ -1801,6 +1923,15 @@ class _AgentGraphExecution:
                 {
                     "app.payload_artifact": payload_artifact.model_dump(mode="json"),
                     "app.source_count": len(source_refs),
+                }
+            )
+            tool_span.attributes.update(execution.trace_attributes)
+            tool_span.attributes.update(
+                {
+                    "app.model_calls": execution.model_calls,
+                    "app.retry_count": execution.retry_count,
+                    "app.cache_hit_tokens": execution.cache_hit_tokens,
+                    "app.cache_miss_tokens": execution.cache_miss_tokens,
                 }
             )
             if self._trace_session.mode == "full":
@@ -1898,6 +2029,10 @@ class _AgentGraphExecution:
                 "events": events,
                 "pending_action": None,
                 "tool_calls": state.get("tool_calls", 0) + 1,
+                "model_calls": model_calls,
+                "retry_count": retry_count,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
                 "tools_enabled": False,
                 "finalization_mode": True,
                 "next_context_estimate": (
@@ -1919,6 +2054,10 @@ class _AgentGraphExecution:
             "events": events,
             "pending_action": None,
             "tool_calls": state.get("tool_calls", 0) + 1,
+            "model_calls": model_calls,
+            "retry_count": retry_count,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
             "next_context_estimate": prospective,
             "limitations": limitations,
             "sources": merged_sources,
