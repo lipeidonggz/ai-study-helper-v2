@@ -149,7 +149,7 @@ def test_release_prompt_bundle_has_stable_version_and_hash() -> None:
     first = release_prompt_bundle()
     second = release_prompt_bundle()
 
-    assert first.version == "chat-v19"
+    assert first.version == "chat-v22"
     assert first.template_hash == second.template_hash
     assert len(first.template_hash) == 64
     assert "{{RESPONSE_POLICY}}" in first.template
@@ -162,18 +162,40 @@ def test_release_prompt_bundle_has_stable_version_and_hash() -> None:
     assert "原因与结果" in first.template
     assert "不能改变各事实在关系中的角色" in first.template
     assert "收益是……；代价是……" in first.template
-    assert "不得使用“以……为代价”等单一连接词" in first.template
+    assert "不得用含糊的单向连接词压缩双方关系" in first.template
+    assert "<runtime_contract>" in first.template
+    assert "<grounding_rules>" in first.template
+    assert "<coverage_rules>" in first.template
+    assert "<answer_rules>" in first.template
+    assert "<evidence_rules>" not in first.template
+    assert "<source_rules>" not in first.template
+    assert "工具返回的 block 是候选原文材料，不自动构成证据" in first.template
+    assert "只有其内容确实直接支持拟写入答案的文档主张时，才构成该主张的证据" in first.template
     assert "section_path 只描述该 block" in first.template
     assert "不是完整文档目录或章节数量声明" in first.template
-    assert "不得把它自行改写为“文章开头”" in first.template
+    assert "不得自行改写成“文章开头”" in first.template
     assert "只有工具结果明确给出可核验的先后关系" in first.template
     assert "区分“通用知识”和“文档事实”" in first.template
     assert "以下是通用背景，不是原文表述" in first.template
     assert "不能用模型知识代替" in first.template
-    assert "对同时包含通用解释和文档事实的问题" in first.template
-    assert "当前知识库范围内找出全部或更多相关主题" in first.template
-    assert "应先用它取得预编译的主题入口和覆盖线索" in first.template
-    assert "`get_topic_evidence` 回到原始 block" in first.template
+    assert "文档直接表述、基于原文的推断还是模型补充" in first.template
+    assert "某次相关度检索没有返回结果，不能证明" in first.template
+    assert "语义覆盖单位" not in first.template
+    assert "候选原文、Top-k 结果或当前已读到的 block 不能自动代表全集" in first.template
+    assert "工具表明检索未完整完成、结果被截断" in first.template
+    assert "检索过程完整，也不自动等于现实知识已被穷尽" in first.template
+    for tool_name in (
+        "list_documents",
+        "get_outline",
+        "search_blocks",
+        "list_blocks",
+        "get_blocks",
+        "scan_term",
+        "search_wiki_topics",
+        "get_topic_evidence",
+        "search_coverage_blocks",
+    ):
+        assert tool_name not in first.template
     for case_specific_token in (
         "83%",
         "93%",
@@ -207,10 +229,26 @@ def test_finalization_prompt_requires_structured_finish() -> None:
 def test_outline_contract_distinguishes_default_root_from_single_section() -> None:
     outline = next(item for item in tool_descriptors() if item.name == "get_outline")
 
-    assert TOOL_CONTRACT_VERSION == "retrieval-tools-v5"
+    assert TOOL_CONTRACT_VERSION == "retrieval-tools-v6"
     assert "path=[]" in outline.description
     assert "解析 fallback" in outline.description
     assert "只有一个章节" in outline.description
+
+
+def test_tool_descriptions_separate_candidate_blocks_from_evidence() -> None:
+    descriptors = {item.name: item for item in tool_descriptors()}
+    outline = descriptors["get_outline"]
+    search_blocks = descriptors["search_blocks"]
+    get_blocks = descriptors["get_blocks"]
+
+    assert "结构信息，不是正文内容" in outline.description
+    assert "不能单独支持文档事实" in outline.description
+    assert "候选原文块" in search_blocks.description
+    assert "不自动构成证据" in search_blocks.description
+    assert "不能用于完整枚举或完整覆盖" in search_blocks.description
+    assert "候选证据" not in search_blocks.description
+    assert "读取完整原文" in get_blocks.description
+    assert "完整证据" not in get_blocks.description
 
 
 def test_tool_descriptors_render_input_and_output_schemas() -> None:
@@ -241,11 +279,11 @@ def test_list_blocks_contract_requires_explicit_descendant_scope() -> None:
 
     assert "include_descendants" in properties
     assert "省略 section_paths 表示整篇" in descriptor.description
-    assert "include_descendants=false" in release_prompt_bundle().template
+    assert "false 只返回该节直属块" in descriptor.description
     source_attribution = release_prompt_bundle().template
     assert "“不是原句”不能直接判为“没有原文依据”" in source_attribution
     assert "基于原文的推断”或“模型补充”" in source_attribution
-    assert "<answer_coverage>" in release_prompt_bundle().template
-    assert "不得只写其中一个最显眼的要素" in release_prompt_bundle().template
-    assert "<output_structure>" in release_prompt_bundle().template
+    assert "<coverage_rules>" in release_prompt_bundle().template
+    assert "不得只覆盖其中最显眼的一项" in release_prompt_bundle().template
+    assert "<answer_rules>" in release_prompt_bundle().template
     assert "威胁模型" not in release_prompt_bundle().template

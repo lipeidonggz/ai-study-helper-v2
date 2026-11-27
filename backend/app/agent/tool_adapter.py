@@ -29,7 +29,7 @@ from app.retrieval.models import (
 )
 from app.retrieval.service import RetrievalSnapshotReader
 
-TOOL_CONTRACT_VERSION = "retrieval-tools-v5"
+TOOL_CONTRACT_VERSION = "retrieval-tools-v6"
 TOOL_WHITELIST = (
     "list_documents",
     "get_outline",
@@ -73,10 +73,42 @@ class ToolDescriptor:
 
 @dataclass(frozen=True, slots=True)
 class ToolExecution:
-    """一次工具执行的 Agent payload 与内部诊断。"""
+    """一次工具执行的公共 payload、内部诊断和实际模型开销。"""
 
     payload: dict[str, Any]
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    model_calls: int = 0
+    retry_count: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_hit_tokens: int = 0
+    cache_miss_tokens: int = 0
+    trace_attributes: dict[str, Any] = field(default_factory=dict)
+
+
+class ToolCancellationToken(Protocol):
+    """宏工具内部并发分支需要的最小取消接口。"""
+
+    @property
+    def is_cancelled(self) -> bool:
+        """返回用户是否已经请求取消。"""
+        ...
+
+    async def wait(self) -> None:
+        """等待用户取消。"""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class ToolExecutionContext:
+    """Harness 传给单次工具执行的预算与 trace 上下文。"""
+
+    remaining_request_tokens: int
+    max_context_tokens: int
+    max_output_tokens: int
+    cancellation: ToolCancellationToken | None = None
+    trace_session: Any | None = None
+    trace_span: Any | None = None
 
 
 class ToolUnavailableError(Exception):
@@ -96,7 +128,13 @@ class AgentToolAdapter(Protocol):
         """返回工具组合的稳定契约版本。"""
         ...
 
-    async def execute(self, tool_name: str, arguments: dict[str, Any]) -> ToolExecution:
+    async def execute(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        execution_context: ToolExecutionContext | None = None,
+    ) -> ToolExecution:
         """执行一个可用工具。"""
         ...
 
@@ -190,7 +228,7 @@ def tool_descriptors() -> list[ToolDescriptor]:
             description=(
                 "查看一篇或多篇文档的章节结构，返回章节路径、规模与首句。"
                 "需要建立整体图景、换一种形态整理，或先确定后续读取哪些章节时调用；"
-                "返回结果是结构信息，不是文档内容的完整证据。"
+                "返回结果是结构信息，不是正文内容，不能单独支持文档事实。"
                 "若文档未识别出章节标题，返回 path=[]、title=文档标题、depth=0 的默认根节；"
                 "这是解析 fallback，不表示原文在语义上只有一个章节。"
             ),
@@ -207,9 +245,10 @@ def tool_descriptors() -> list[ToolDescriptor]:
         ToolDescriptor(
             name="search_blocks",
             description=(
-                "需要按语义查找候选证据时调用；按语义与关键词混合检索相关块，"
-                "可按文档限定范围，返回排序后的前 5 条候选（块引用＋完整正文）。"
-                "它是候选召回，不是完整枚举；确认精确字符串是否存在应使用 scan_term。"
+                "需要按语义查找少量候选原文块时调用；按语义与关键词混合检索相关块，"
+                "可按文档限定范围，返回排序后的前 5 条候选（块引用＋完整原文）。"
+                "这些 block 只是候选原文材料，不自动构成证据，也不能用于完整枚举或完整覆盖。"
+                "确认精确字符串是否存在应使用 scan_term。"
             ),
             input_schema={
                 "type": "object",
@@ -259,10 +298,10 @@ def tool_descriptors() -> list[ToolDescriptor]:
         ToolDescriptor(
             name="get_blocks",
             description=(
-                "需要按已知 block_id 精确补全完整正文时调用。"
-                "scan_term 返回 snippet；若该 snippet 足以定位且需要完整证据，"
+                "需要按已知 block_id 精确读取完整原文时调用。"
+                "scan_term 返回 snippet；若该 snippet 足以定位且需要完整原文，"
                 "应使用本工具读取原 block。"
-                "search_blocks 已返回完整正文，不需要再次调用本工具。"
+                "search_blocks 已返回完整原文，不需要再次调用本工具。"
                 "任一 block_id 不存在时整次失败，不返回部分结果。"
             ),
             input_schema={
@@ -333,7 +372,13 @@ class RetrievalToolAdapter:
 
         return TOOL_CONTRACT_VERSION
 
-    async def execute(self, tool_name: str, arguments: dict[str, Any]) -> ToolExecution:
+    async def execute(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        execution_context: ToolExecutionContext | None = None,
+    ) -> ToolExecution:
         """校验参数并执行一个工具；业务失败作为公共 error payload 返回。"""
 
         if tool_name not in self._descriptors:
@@ -473,13 +518,23 @@ class CompositeToolAdapter:
 
         return "+".join(adapter.contract_version for adapter in self._adapters)
 
-    async def execute(self, tool_name: str, arguments: dict[str, Any]) -> ToolExecution:
+    async def execute(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        execution_context: ToolExecutionContext | None = None,
+    ) -> ToolExecution:
         """将工具调用路由到唯一所属的子工具集。"""
 
         adapter = self._routes.get(tool_name)
         if adapter is None:
             raise ToolUnavailableError(tool_name)
-        return await adapter.execute(tool_name, arguments)
+        return await adapter.execute(
+            tool_name,
+            arguments,
+            execution_context=execution_context,
+        )
 
 
 def _public_error(

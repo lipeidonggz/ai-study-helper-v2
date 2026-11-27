@@ -122,7 +122,7 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 
 ### T2 get_outline
 
-**工具说明（给模型）**：查看一篇或多篇文档的章节结构，返回章节路径、规模与首句。需要建立整体图景、换一种形态整理，或先确定后续读取哪些章节时调用；返回结果是结构信息，不是文档内容的完整证据。
+**工具说明（给模型）**：查看一篇或多篇文档的章节结构，返回章节路径、规模与首句。需要建立整体图景、换一种形态整理，或先确定后续读取哪些章节时调用；返回结果是结构信息，不是正文内容，不能单独支持文档事实。
 
 **输入**：`doc_ids: string[]`<br> **调用示例**：`{"doc_ids":["doc_a5","doc_o2"]}`<br> **输出**：`documents[]`，按 doc 分组——每项含 `doc_id / doc_title / source_label` ＋ `sections`［path[]、ordinal、title、depth、`own_blocks`、`own_context_tokens`、`subtree_blocks`、`subtree_context_tokens`、first_line］；doc 不存在时该项返回公共 `error`；**无章节文档**（未识别出任何章节标题）返回根节（`path: []`、title＝文档标题、`depth: 0`）<br> **返回示例**：`{"documents":[{"doc_id":"doc_a5","doc_title":"How we contain Claude","source_label":"Anthropic","sections":[{"path":["Patterns for containing agents","Pattern 3: The local VM"],"ordinal":"3.3","title":"Pattern 3: The local VM (Claude Cowork)","depth":2,"own_blocks":3,"own_context_tokens":540,"subtree_blocks":5,"subtree_context_tokens":980,"first_line":"Claude Cowork runs on a user's desktop…"}]},{"doc_id":"doc_o2","doc_title":"Harness engineering","source_label":"OpenAI","sections":[{"path":["…"],"ordinal":"1","title":"…","depth":1,"own_blocks":4,"own_context_tokens":700,"subtree_blocks":6,"subtree_context_tokens":1100,"first_line":"…"}]}]}`<br>doc 不存在：`{"documents":[{"doc_id":"doc_missing","error":{"code":"scope_not_found","message":"doc not found","retryable":false}}]}`<br>无章节文档：`{"documents":[{"doc_id":"doc_x","doc_title":"Untitled","source_label":"Local","sections":[{"path":[],"title":"Untitled","depth":0,"own_blocks":12,"own_context_tokens":3200,"subtree_blocks":12,"subtree_context_tokens":3200,"first_line":"…"}]}]}`<br> **约束**：**【质量属性·可靠性】**doc 不存在按 doc 返回公共错误；`documents[]` 保持输入 `doc_ids` 顺序，重复 id 取首次；`own_*` 只统计该节直属块，`subtree_*` 统计该节及全部后代；无章节文档返回根节（`path: []`、title＝文档标题、`depth: 0`）；重名标题 path 唯一化；章节顺序按原文；不做摘要、不返回 block id。
 
@@ -134,7 +134,7 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 
 ### T3 search_blocks
 
-**工具说明（给模型）**：需要按语义查找候选证据时调用；按语义与关键词混合检索相关块，可按文档限定范围，返回排序后的前 N 条候选（块引用＋全文）。它是候选召回，不是完整枚举；确认精确字符串是否存在应使用 `scan_term`。
+**工具说明（给模型）**：需要按语义查找少量候选原文块时调用；按语义与关键词混合检索相关块，可按文档限定范围，返回排序后的前 N 条候选（块引用＋完整原文）。这些 block 只是候选原文材料，不自动构成证据，也不能用于完整枚举或完整覆盖；确认精确字符串是否存在应使用 `scan_term`。
 
 **输入**：`query: string`；可选 `doc_ids?: string[]`（省略＝全库）<br> **调用示例**：`{"query":"Pattern 3 的隔离边界","doc_ids":["doc_a5"]}`<br> **输出**：`blocks[]`（公共块返回形态）＋`empty_reason`；块按相关度从高到低排列，初版最多 5 条<br> **返回示例**：`{"blocks":[{"block_id":"a5#c012","doc_id":"doc_a5","doc_title":"How we contain Claude","source_label":"Anthropic","section_path":["…"],"text":"…约 83%…"}],"empty_reason":null}`<br> 无匹配：`{"blocks":[],"empty_reason":"no_match"}`；空知识库：`{"blocks":[],"empty_reason":"collection_empty"}`；有效但无块的文档范围：`{"blocks":[],"empty_reason":"scope_empty"}`<br> **约束**：检索结果返回块全文；**N 固定为 5**，不暴露给 Agent；**它是 Top-N 候选召回，不声称全集**；结果顺序即排名；不返回分数（分数只进 trace，供调试与调参）；**检索模式（向量／关键词／混合）由工具内部固定为混合，不交给 Agent。**显式 `doc_ids` 中任一文档不存在时返回 `scope_not_found`，不得只搜其余文档后伪装成完整范围；query embedding 上游失败且重试无效时返回 `upstream_unavailable`，**不静默降级成纯关键词检索**，避免同一工具在故障时悄然改变语义。<br>**【质量属性·一致性】**结果先按 RRF 分数降序排列；分数相同时，依次按 `doc_id`、`block_index`、`block_id` 升序排列。**【质量属性·可靠性】**空结果原因由 `empty_reason` 表达。
 
@@ -150,7 +150,7 @@ Agentic 是超集。给它一个检索工具，它完全可以只调一次就回
 
 ### T5 get_blocks
 
-**工具说明（给模型）**：需要按已知 `block_id` 精确补全完整正文时调用。`scan_term` 返回 snippet；若该 snippet 足以定位且需要完整证据，应使用本工具读取原 block。`search_blocks` 已返回完整正文，不需要再次调用本工具。任一 `block_id` 不存在时整次失败，不返回部分结果。
+**工具说明（给模型）**：需要按已知 `block_id` 精确读取完整原文时调用。`scan_term` 返回 snippet；若该 snippet 足以定位且需要完整原文，应使用本工具读取原 block。`search_blocks` 已返回完整原文，不需要再次调用本工具。任一 `block_id` 不存在时整次失败，不返回部分结果。
 
 **输入**：`block_ids: string[]`（至少 1 个）<br> **调用示例**：`{"block_ids":["a5#b00002","a5#b00004"]}`<br> **输出**：`blocks[]`（公共块返回形态）＋`total`；结果按去重后的输入顺序，`blocks.length = total`<br> **约束**：同一 ID 重复出现时取首次；只读取当前请求绑定的 collection 快照；任一 ID 不存在时返回 `scope_not_found`，不得返回其余已知块；不做章节展开或相邻 block 推断；工具返回完整正文，不计算 token、不做上下文预算判断。
 

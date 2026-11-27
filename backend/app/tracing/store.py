@@ -532,12 +532,19 @@ class TraceSession:
         tool_contract_version: str,
         wiki_status: str,
         wiki_build_id: str | None,
+        coverage_status: str | None = None,
+        coverage_attachment_run_id: str | None = None,
+        coverage_framework_revision_id: str | None = None,
     ) -> None:
-        """记录请求实际绑定的工具组合与 Wiki 可用状态。"""
+        """记录请求实际绑定的工具组合、Wiki 与覆盖账本状态。"""
 
         self._versions["tool_contract_version"] = tool_contract_version
         self._versions["wiki_status"] = wiki_status
         self._versions["wiki_build_id"] = wiki_build_id
+        if coverage_status is not None:
+            self._versions["coverage_status"] = coverage_status
+            self._versions["coverage_attachment_run_id"] = coverage_attachment_run_id
+            self._versions["coverage_framework_revision_id"] = coverage_framework_revision_id
 
     def finish(
         self,

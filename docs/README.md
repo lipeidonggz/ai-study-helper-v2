@@ -9,10 +9,22 @@
 - 阶段：实现阶段，027 claim-aware 引用标注已完成，028 评测失败分类拆分已实现。
 - 实现状态：桌面运行链、入库、collection 快照、文档工作台、后台交付、检索与 Agent 运行链、流式问答、本地 trace 诊断和逐 criterion 评测判定已实现。
 - LLM Wiki 初版：069–074 已完成 snapshot topic map、身份账本、topic build/search、topic 叙述页、增量更新和 Agent 三工具接入；真实 c13 的主题 rediscovery 成立，主 Agent 的开放找全效果继续由 BL-0012 跟踪。
+- 知识组织 v1.0：16 号已由沛东确认并成为当前设计基线，固定 15 篇全量叶节点证据挂接和 c13-003 候选原文接入链路已跑通；093 已完成真实问答、trace、成本边界和反向解释验收。原 16 号探索稿作为 v0 历史归档保留；回答证据选择和默认上下文成本仍需后续优化。
 - Profile 抽取第一阶段已实现 Profile 管理、Preview Run、文档清单和 Profile 比较，并补充
   总量优先的成本反馈、运行中动效、带持久缓存的英文证据翻译和按原文顺序的候选覆盖视图；
   076–080 已完成批次验收，反向解释和 B 级决策均已确认。
   旧 11 号实现不再作为新方向基线。
+- Profile-Driven LLM Wiki 的总体设计入口已收敛到 13 号文档；11 号保留为历史设计与失败
+  依据，12 号保留为过去的 Profile 抽取设计记录；13 号已自包含吸收其中仍有效的内容。
+  083 保留单篇到 15 篇的闭环验收，084
+  记录规模化就绪 P0 的持久化 Topic／Group 向量、active map 和自适应证据选择。13 号
+  §3.8、§6.7、§7.6、§7.7、§8.7 已记录下一版“检索契约反推编译产物”原则、Topic／Group
+  全局收敛、Profile Aspect Schema、Catalog-first Aspect 编译以及 Aspect-aware 检索。
+  086 已验证 merge-only 消除 Group 膨胀，但三次重复编译仍有 Group 边界漂移并导致一次地图
+  c13 回退；当前阻断待设计审核。13 号第 7 节已改写为“Candidate→Topic→Group 增量 Ledger”
+  目标设计，旧一次性 v4 流程移入历史附录 C。087–089 已实现 Topic／Group Ledger 计划与
+  executor 主路径、候选同级 `summaries[]`、7.6 WorkSet Topic 身份解析、判断审计和 typed
+  Topic operation；真实新 Extraction Run 与 c13 复核仍待应用所有者重启后执行。
 - 当前工作：全部 active Judge criteria 已迁移到 v4；c14 为 9/10，c15 达到 9/10；cf-001 收敛为“目标范围可见”并以 10/10 通过；cf-002 新数据 10/10 通过，稳定同时说明能力边界和文档指代不明。c13 原题恢复与千篇规模检索链路登记为 [BL-0012](development/backlog.md)；全量用例回归待统一执行。
 
 ## 设计基线
@@ -30,7 +42,12 @@
 | [09](design/09-technology-selection.md) | 技术选型与总体架构 | v0.4 · 实现基线 |
 | [10](design/10-document-detail-design.md) | 文档详情页信息架构与数据边界 | 已审核 · 首版实现基线 |
 | [11](design/11-llm-wiki-compilation.md) | LLM Wiki 全库编译、主题台账、页面与回源 | 历史设计与实现记录；新方向以 12 号为准 |
-| [12](design/12-profile-driven-wiki-extraction.md) | Profile 驱动的候选抽取、条目页与受控导航链接 | 第一阶段已实现并完成批次验收 |
+| [12](design/12-profile-driven-wiki-extraction.md) | Profile 驱动的候选抽取、条目页与受控导航链接 | 历史设计记录；有效内容已吸收到自包含的 13 号设计 |
+| [13](design/13-profile-driven-wiki-evidence-retrieval.md) | Profile-Driven LLM Wiki 开放主题证据检索总体设计 | 增量 Ledger 第 7 节目标设计 · v6 WorkSet 实现；历史 v4 见附录 B |
+| [14](design/14-dual-entry-concept-function-knowledge-index.md) | 双入口概念—功能知识索引与开放视角证据检索 | 候选设计 · 待审核，不替换 13 号基线 |
+| [15](design/15-双分面关系知识组织模型.md) | 以知识对象域分面与关系分面组织知识库并支持找全检索 | 讨论中的候选设计 · 当前先验证关系分面 |
+| [15.1](design/15.1-关系观察轴与二级关系设计.md) | 关系观察轴、部分轴下二级关系及其验证设计 | 候选设计 · 轴线待盲审，尚未冻结 |
+| [16](design/16-使用角色驱动的领域知识组织.md) | 使用角色驱动的领域知识组织：角色任务框架、全量叶节点证据挂接、24 分支选叶和候选原文接入 | v1.0 设计基线（已确认）· 固定 15 篇证据闭环和 c13-003 端到端链路已跑通 · 默认上下文成本和回答证据选择仍待优化 |
 
 01–09 已于 2026-10-20 审核，并作为当前实现基线；03 已于 2026-10-29 完成 c6、c8、c11、c13、c14 和 c15 判据修订并更新为 v0.10，09 已依据 ADR 0004 更新为 v0.4。后续修改必须保留变更原因，同时更新本索引。
 
@@ -44,6 +61,8 @@
 | [`decisions/`](decisions/) | 技术取舍与 ADR | `NNNN-短描述.md` |
 | `development/slices/` | 垂直切片的实现记录 | `NNN-短描述.md` |
 | `development/experiments/` | 性能、质量和兼容性实验 | `YYYY-MM-DD-短描述.md` |
+| `development/references/` | 外部论文、规范和资料的本地中文译稿与研究笔记 | `短描述.md` |
+| `development/design-thinking.md` | 尚未定稿但值得跨切片保留的设计思考与假设 | 固定文件，条目使用 `T-NNN` |
 | `publishing/` | 面向外部读者的文章草稿 | `NN-短描述.md` |
 | `operations/` | 安装、排障、备份与升级说明 | 按使用场景命名 |
 
@@ -52,6 +71,11 @@
 当前已记录：
 
 - [实现待办](development/backlog.md)
+- [设计思考记录](development/design-thinking.md)
+- [Function-Relation-First LLM Wiki 讨论稿](development/function-relation-first-llm-wiki.md)
+- [功能关系分类评审稿](development/function-relation-taxonomy-review.md)
+- [语料自发现功能关系模式简明思路](development/corpus-discovered-function-relations.md)
+- [开放关系类型发现论文中文译稿](development/references/open-relation-type-discovery-papers.md)
 - [对外文章草稿](publishing/README.md)
 - [对外文章写作规范](publishing/writing-guide.md)
 - [异步 GitHub 交付与依赖门禁](operations/async-github-delivery.md)
@@ -73,6 +97,7 @@
 - [0016 · 证据覆盖范围不得小于结论影响范围](decisions/0016-evidence-scope-cannot-exceed-tool-results.md)
 - [0017 · 精确 block 读取与显式章节范围](decisions/0017-exact-block-read-and-explicit-section-scope.md)
 - [0018 · 引用语义支持阶段性改为软质量门禁](decisions/0018-citation-support-as-soft-quality-gate.md)
+- [0019 · 使用角色驱动的领域知识组织确立为 v1.0 设计基线](decisions/0019-role-driven-knowledge-organization-v1.md)
 - [0008 · Harness 统一计算 Tool Observation token](decisions/0008-harness-owned-result-token-accounting.md)
 - [切片控制契约与证据包模板](development/slices/TEMPLATE.md)
 - [001 · 桌面 sidecar 最小启动链（已完成）](development/slices/001-desktop-sidecar-bootstrap.md)
@@ -141,6 +166,34 @@
 - [2026-10-29 · c13 新数据基线](development/experiments/2026-10-29-c13-fresh-baseline.md)
 - [2026-10-31 · LLM Wiki 证据地图 c13-003 探索](development/experiments/2026-10-31-llm-wiki-evidence-map-c13.md)
 - [2026-11-01 · LLM Wiki 全库编译与 c13 固定快照验证](development/experiments/2026-11-01-llm-wiki-compilation.md)
+- [2026-11-12 · 5.1 概念索引紧凑协议性能实验](development/experiments/2026-11-12-stage51-compact-protocol-performance.md)
+- [2026-11-12 · 5.1 v5 最新单篇运行产出复核](development/experiments/2026-11-12-stage51-v5-output-gap-review.md)
+- [2026-11-12 · 5.1 术语与义项判断拆分及最终摘要实验](development/experiments/2026-11-12-stage51-stage-split-summary.md)
+- [2026-11-13 · 5.1 v12 阶段系统提示词与 O2 稳定性实验](development/experiments/2026-11-13-stage51-v12-stage-prompts-o2.md)
+- [2026-11-13 · 5.1 v14 分量信封与纯摘要协议实验](development/experiments/2026-11-13-stage51-v14-component-envelopes.md)
+- [2026-11-13 · 5.1 v16 术语信息增量资格实验](development/experiments/2026-11-13-stage51-v16-information-increment.md)
+- [2026-11-13 · 5.1 v17 术语独立指称资格实验](development/experiments/2026-11-13-stage51-v17-independent-reference.md)
+- [2026-11-13 · 关系抽取三波实验与当前基线](development/experiments/2026-11-13-stage51-direct-relations.md)
+- [2026-11-16 · D04 整篇文档单次约束抽取实验](development/experiments/2026-11-16-whole-document-constrain-probe.md)
+- [2026-11-13 · 当前 15 篇知识库的找全类问题集](development/experiments/2026-11-13-agent-exhaustive-question-set.md)
+- [2026-11-17 · FrameNet 框架词元对 C15 的来源流转覆盖实验](development/experiments/2026-11-17-framenet-c15-lexical-coverage.md)
+- [2026-11-18 · 角色卡候选 thinking 生成与第二阶段归并实验](development/experiments/2026-11-18-audience-generation-and-merge.md)
+- [2026-11-19 · 角色候选生成提示词三次回放](development/experiments/2026-11-19-role-candidate-generation.md)
+- [2026-11-20 · 任务树直接生成知识主题 A 实验](development/experiments/2026-11-20-task-tree-direct-topic-generation.md)
+- [2026-11-21 · 知识主题生成的两层语义审查闭环实验](development/experiments/2026-11-21-topic-semantic-review-loop.md)
+- [2026-11-21 · 任务树到知识需求再到候选知识主题的两阶段实验](development/experiments/2026-11-21-task-to-knowledge-need-pipeline.md)
+- [2026-11-22 · 任务树直接生成知识主题森林实验](development/experiments/2026-11-22-direct-task-tree-to-knowledge-topics.md)
+- [2026-11-22 · 三棵任务树的知识主题充分性审查](development/experiments/2026-11-22-task-tree-knowledge-topic-sufficiency.md)
+- [2026-11-22 · 树 2 知识主题对树 1 任务的跨树充分性审查](development/experiments/2026-11-22-tree2-topics-for-tree1-task-sufficiency.md)
+- [2026-11-22 · 三套冻结知识森林对三棵任务树的 3×3 覆盖审查](development/experiments/2026-11-22-three-task-trees-knowledge-forest-coverage.md)
+- [2026-11-23 · 角色知识框架展开与架构师覆盖候选实验](development/experiments/2026-11-23-role-knowledge-framework-expanded-candidate.md)
+- [2026-11-23 · 角色知识框架提示词减法实验](development/experiments/2026-11-23-role-knowledge-framework-prompt-reduction.md)
+- [2026-11-23 · 角色知识框架两阶段分层生成思路](development/experiments/2026-11-23-角色知识框架两阶段分层生成.md)
+- [2026-11-24 · 知识库证据挂接实验](development/experiments/2026-11-24-知识库证据挂接.md)
+- [2026-11-25 · 证据挂接跨块泛化实验](development/experiments/2026-11-25-证据挂接跨块泛化.md)
+- [2026-11-25 · 叶节点颗粒度审计与拆分实验](development/experiments/2026-11-25-叶节点颗粒度审计与拆分.md)
+- [2026-11-27 · 固定 15 篇文档的全量叶节点证据挂接实验](development/experiments/2026-11-27-15-doc-leaf-attachment.md)
+- [2026-11-27 · 使用角色驱动的领域知识组织 v0 设计草稿（历史归档）](development/experiments/2026-11-27-role-knowledge-design-v0-draft.md)
 - [2026-10-29 · Judge reason-first 输出顺序校准](development/experiments/2026-10-29-judge-reason-first.md)
 - [2026-10-29 · c13 开放范围补充检索问题分析](development/experiments/2026-10-29-c13-open-scope-retrieval-analysis.md)
 - [2026-10-29 · c14 新数据基线](development/experiments/2026-10-29-c14-fresh-baseline.md)
@@ -191,6 +244,19 @@
 - [078 · 文档清单与 Profile 比较（已完成）](development/slices/078-profile-comparison.md)
 - [079 · 试抽取反馈与证据翻译（已完成）](development/slices/079-preview-feedback-and-evidence-translation.md)
 - [080 · 按原文顺序检查候选覆盖（已完成）](development/slices/080-source-order-coverage-view.md)
+- [081 · 文档级候选标题消歧（已完成）](development/slices/081-document-level-candidate-anchor.md)
+- [082 · 逐通道候选累积与增量补充（已完成）](development/slices/082-sequential-channel-candidate-accumulation.md)
+- [083 · search_wiki_topic_v2 单文档到 15 篇的证据检索验收（实现完成，待确认）](development/slices/083-c13-minimal-wiki-closed-loop.md)
+- [084 · Profile Wiki 地图规模化就绪改造（P0 实现完成，待确认与 50 篇验证）](development/slices/084-scale-ready-profile-wiki-map.md)
+- [085 · Aspect-aware 全局 Wiki 地图与证据选择（契约实现完成，c13 噪声稳定性未通过）](development/slices/085-aspect-aware-global-wiki-map.md)
+- [086 · Group 生成与收敛稳定性（A4／A6 阻断，待设计审核）](development/slices/086-group-convergence-stability.md)
+- [087 · 增量 Knowledge Map Ledger 内核与 Delta 计划（planner 实现完成，执行器待实现）](development/slices/087-incremental-map-ledger-core.md)
+- [088 · 增量 Knowledge Map Executor（MVP 可检索路径完成，v5 固定地图 routing 稳定性未通过）](development/slices/088-incremental-map-executor.md)
+- [089 · 候选同级摘要契约与 Topic Ledger WorkSet（代码完成，真实新 Run 待执行）](development/slices/089-flat-candidate-summaries.md)
+- [090 · 双入口概念索引 5.1 独立编译（实现完成，真实单篇运行已完成，质量待复核）](development/slices/090-dual-entry-stage51-concept-index.md)
+- [091 · 5.1 全量增量统一与单篇质量闭环（实现中）](development/slices/091-stage51-unified-reconciliation.md)
+- [092 · 固定 15 篇文档的全量叶节点证据挂接（已完成）](development/slices/092-15-doc-leaf-attachment.md)
+- [093 · 主 Agent 叶节点覆盖证据接入与提示词语义分层（已完成）](development/slices/093-agent-coverage-evidence-integration.md)
 - [009 · 用户模型设置人工验收清单（已完成）](development/manual-tests/009-model-settings.md)
 - [076–080 · Profile 抽取功能批次验收（已完成）](development/manual-tests/076-078-profile-extraction-workflow.md)
 

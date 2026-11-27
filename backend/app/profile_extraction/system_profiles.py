@@ -56,7 +56,7 @@ def technical_profile_config() -> ExtractionProfileConfig:
                     "离开承载对象后仍能独立解释或检索的对象成为 candidate；属性、原因、"
                     "效果和普通细节留在承载对象的 evidence 中。"
                 ),
-                coverage_audit_enabled=False,
+                omission_retry_enabled=False,
             ),
             ExtractionChannel(
                 channel_id="ec_2222222222222222",
@@ -71,7 +71,7 @@ def technical_profile_config() -> ExtractionProfileConfig:
                     "一个具名对象对应一个 candidate；内部实现若本身有稳定名称、独立作用"
                     "和事实，可以独立成为 candidate，但不能充当所属对象的 alias。"
                 ),
-                coverage_audit_enabled=False,
+                omission_retry_enabled=False,
             ),
             ExtractionChannel(
                 channel_id="ec_3333333333333333",
@@ -88,7 +88,7 @@ def technical_profile_config() -> ExtractionProfileConfig:
                     "一个 candidate 只表达一种结构关系；父机制、具体实现和应用对象如需"
                     "同时存在，保持平级并分别绑定证据。"
                 ),
-                coverage_audit_enabled=False,
+                omission_retry_enabled=False,
             ),
             ExtractionChannel(
                 channel_id="ec_4444444444444444",
@@ -107,7 +107,7 @@ def technical_profile_config() -> ExtractionProfileConfig:
                     "父机制和具有独立事实的具体实现分别成为 candidate，不得互为 alias，"
                     "不得由共现自动生成对象与机制组合 candidate。"
                 ),
-                coverage_audit_enabled=False,
+                omission_retry_enabled=False,
             ),
         ],
         exclude_criteria=[

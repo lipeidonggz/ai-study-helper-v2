@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -34,6 +34,7 @@ class ChatProviderProfile:
     temperature: float
     max_output_tokens: int
     thinking_enabled: bool
+    reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +55,8 @@ class ChatCompletionResult:
     finish_reason: str | None
     input_tokens: int
     output_tokens: int
+    cache_hit_tokens: int = 0
+    cache_miss_tokens: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +79,30 @@ class ChatProviderError(Exception):
         """返回不包含凭证和用户正文的错误摘要。"""
 
         return self.message
+
+
+def _extract_usage_token_counts(usage: object | None) -> tuple[int, int, int, int]:
+    """从标准字段或供应商扩展字段读取输入、输出和缓存命中的 token。"""
+
+    if usage is None:
+        return 0, 0, 0, 0
+    usage_extra = getattr(usage, "model_extra", None)
+
+    def read_token(name: str) -> int:
+        value = getattr(usage, name, None)
+        if value is None and isinstance(usage_extra, Mapping):
+            value = usage_extra.get(name)
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    return (
+        read_token("prompt_tokens"),
+        read_token("completion_tokens"),
+        read_token("prompt_cache_hit_tokens"),
+        read_token("prompt_cache_miss_tokens"),
+    )
 
 
 class ChatProvider(Protocol):
@@ -317,7 +344,14 @@ class DeepSeekChatProvider:
                 max_tokens=max_output_tokens or self.profile.max_output_tokens,
                 response_format={"type": "json_object"},
                 extra_body={
-                    "thinking": {"type": "enabled" if self.profile.thinking_enabled else "disabled"}
+                    "thinking": {
+                        "type": "enabled" if self.profile.thinking_enabled else "disabled"
+                    },
+                    **(
+                        {"reasoning_effort": self.profile.reasoning_effort}
+                        if self.profile.reasoning_effort is not None
+                        else {}
+                    ),
                 },
             )
         except AuthenticationError as error:
@@ -362,6 +396,9 @@ class DeepSeekChatProvider:
                 retryable=False,
             )
         usage = response.usage
+        input_tokens, output_tokens, cache_hit_tokens, cache_miss_tokens = (
+            _extract_usage_token_counts(usage)
+        )
         response_headers = getattr(getattr(response, "response", None), "headers", None)
         request_id = str(getattr(response, "_request_id", "") or "")
         if not request_id and response_headers is not None:
@@ -373,8 +410,10 @@ class DeepSeekChatProvider:
             request_id=request_id,
             actual_model_id=response.model,
             finish_reason=response.choices[0].finish_reason,
-            input_tokens=usage.prompt_tokens if usage is not None else 0,
-            output_tokens=usage.completion_tokens if usage is not None else 0,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_hit_tokens=cache_hit_tokens,
+            cache_miss_tokens=cache_miss_tokens,
         )
 
     async def stream(
@@ -410,6 +449,8 @@ class DeepSeekChatProvider:
         request_id = ""
         input_tokens = 0
         output_tokens = 0
+        cache_hit_tokens = 0
+        cache_miss_tokens = 0
         try:
             response = await self._client.chat.completions.create(
                 model=self.profile.model_id,
@@ -420,7 +461,14 @@ class DeepSeekChatProvider:
                 stream=True,
                 stream_options={"include_usage": True},
                 extra_body={
-                    "thinking": {"type": "enabled" if self.profile.thinking_enabled else "disabled"}
+                    "thinking": {
+                        "type": "enabled" if self.profile.thinking_enabled else "disabled"
+                    },
+                    **(
+                        {"reasoning_effort": self.profile.reasoning_effort}
+                        if self.profile.reasoning_effort is not None
+                        else {}
+                    ),
                 },
             )
             async for chunk in response:
@@ -428,8 +476,12 @@ class DeepSeekChatProvider:
                 request_id = str(getattr(chunk, "_request_id", "") or request_id)
                 usage = chunk.usage
                 if usage is not None:
-                    input_tokens = usage.prompt_tokens
-                    output_tokens = usage.completion_tokens
+                    (
+                        input_tokens,
+                        output_tokens,
+                        cache_hit_tokens,
+                        cache_miss_tokens,
+                    ) = _extract_usage_token_counts(usage)
                 for choice in chunk.choices:
                     finish_reason = choice.finish_reason or finish_reason
                     delta = choice.delta.content
@@ -482,5 +534,7 @@ class DeepSeekChatProvider:
                 finish_reason=finish_reason,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                cache_hit_tokens=cache_hit_tokens,
+                cache_miss_tokens=cache_miss_tokens,
             ),
         )

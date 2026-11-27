@@ -31,6 +31,7 @@ from app.retrieval.hybrid import (
     DEFAULT_HYBRID_RETRIEVAL_PROFILE,
     FusedCandidate,
     HybridRetrievalProfile,
+    read_snapshot_block_vectors,
     search_snapshot_index,
 )
 from app.retrieval.models import (
@@ -167,6 +168,38 @@ class RetrievalSnapshotReader:
         """返回 reader 固定的快照 manifest。"""
 
         return self._manifest
+
+    def read_block_vectors(
+        self,
+        block_ids: list[str],
+        *,
+        provider: EmbeddingProvider,
+    ) -> dict[str, list[float]]:
+        """读取当前 snapshot 已持久化的 block vectors，不调用 embedding provider。"""
+
+        unique_ids = tuple(_deduplicate_non_empty(block_ids, "block_ids"))
+        versions = self._manifest.versions
+        if versions is None:
+            raise RetrievalFailure(
+                "collection_unavailable",
+                "collection has no embedding profile",
+            )
+        if provider.profile != versions.embedding_profile:
+            raise RetrievalFailure(
+                "collection_unavailable",
+                "query embedding provider does not match the collection block vectors",
+            )
+        expected_index_ref = f"collections/{self.snapshot_id}/index/lance"
+        if self._manifest.index_ref != expected_index_ref:
+            raise RetrievalFailure(
+                "snapshot_integrity_error",
+                "collection index reference does not match snapshot",
+            )
+        return read_snapshot_block_vectors(
+            self._snapshot_root,
+            block_ids=unique_ids,
+            dimension=versions.embedding_profile.dimension,
+        )
 
     def list_documents(
         self,

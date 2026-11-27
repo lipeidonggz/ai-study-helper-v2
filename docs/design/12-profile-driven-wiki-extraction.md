@@ -1,9 +1,146 @@
 # 12 Profile-Driven Wiki Extraction
 
-- 状态：第一阶段实现和 076–080 批次验收完成（2026-11-03）
+- 状态：Profile 抽取第一阶段和 076–082 验收完成（2026-11-05）；正式抽取后的审查处置待定
 - 开始日期：2026-11-02
 - 关联设计：[11 LLM Wiki 编译设计](11-llm-wiki-compilation.md)
-- 当前目的：先完成 Profile 自定义、比较和确定闭环；页面、构建、检索和增量后续再定
+- 当前目的：先完成 Profile 自定义、比较、确定、候选累积、标题消歧和原文分析闭环；页面、构建、检索和增量后续再定
+
+## 指导原则：以评测驱动一个概率性的语义系统
+
+LLM Wiki 虽然表现为一条“抽取 → 合并 → 页面 → 索引”的编译管线，但它的语义核心仍然
+由大模型完成。它和 Agent 有同类特征：
+
+- 同一份输入、同一套配置，重复运行可能得到不同候选、不同摘要或不同页面组织；
+- 某一轮“看起来不错”不代表系统稳定具备该能力；
+- 某些错误只有进入下游页面或问答后才暴露，而上游错误会被后续编译放大；
+- Prompt、模型、上下文窗口和采样参数的微小变化，都可能改变最终知识集合。
+
+因此，不能把 LLM Wiki 当成输入输出完全确定的普通编译器，也不能用一次运行通过、
+一次人工抽读或一个演示结果证明产品可用。**LLM Wiki 的产品化必须像 Agent 一样接受
+评测驱动，并把输出浮动视为需要测量、约束和管理的系统属性。**
+
+这里的“接受浮动性”不等于纵容错误，更不等于接受偶发伪造、证据错挂、静默截断或
+不可追溯结果。它表示：
+
+1. 不承诺语义输出逐字稳定，而承诺输入、版本、执行条件和评测口径可追溯；
+2. 不用单次结果代表能力，用固定样本上的多次运行、分布和质量边界判断能力；
+3. 不要求模型绝对不犯错，但要求错误可发现、可比较、可阻断、可回退；
+4. 不把平均值当作唯一结论，证据、安全和身份等硬约束不能被总体通过率覆盖。
+
+本原则是 LLM Wiki 产品化的长期指导，不表示下列能力已经全部实现。具体实现范围仍以
+本设计后续阶段和切片状态为准；尚未实现的能力不能被当作已经具备的产品保证。
+
+系统可以概括为“**确定性的工程外壳 + 概率性的语义内核**”。
+
+### 确定性工程外壳
+
+以下内容必须确定、可复现和可审计：
+
+- snapshot、文档版本和 block 身份；
+- Profile、Prompt、编译器、模型和参数版本；
+- 输入范围、窗口策略、预算、并发和失败语义；
+- source evidence 的合法性与回源关系；
+- 运行状态、usage、诊断、审查结果和比较记录；
+- 旧结果的不可变性、新配置的新 run 语义和回滚路径。
+
+这些机制不能证明语义结论正确，但必须保证：一旦语义质量变化，团队知道变化发生在
+什么输入、模型和配置之下，并能重现比较现场。
+
+### 概率性语义内核
+
+以下内容默认具有浮动性：
+
+- 哪些内容被视为值得提取的知识对象；
+- 名称、别名、摘要、粒度和边界如何形成；
+- 同一主题是否被合并、拆分或遗漏；
+- 页面如何组织，以及下游检索是否恰好召回所需证据；
+- LLM 审查本身给出的质量判断。
+
+因此，“系统质量”不能被定义成某一次输出的静态属性。更准确的定义是：
+
+> 在固定输入、版本和评测口径下，系统长期产出的质量分布，以及它对明确高危害错误的
+> 阻断能力。
+
+需要分别观察的浮动来源至少包括：
+
+| 波动来源 | 要回答的问题 |
+| --- | --- |
+| 重复采样 | 相同输入和配置重复运行时，结果是否落在可接受范围？ |
+| 配置敏感性 | 只修改 Prompt、模型、窗口或审查规则时，哪些质量发生系统变化？ |
+| 输入泛化 | 从调参文档迁移到未参与调整的文档时，质量与稳定性是否仍成立？ |
+| 下游传播 | 上游候选变化如何影响页面、检索和最终问答？ |
+
+稳定不等于正确，质量也不等于稳定。一个稳定但错误的结果不能发布；一个平均质量尚可、
+却经常漏掉 must 项的结果同样不可依赖。
+
+### 评测驱动的研发闭环
+
+LLM Wiki 的评测不能只做最后问答，也不应只做中间结构检查。至少需要覆盖四层：
+
+| 层级 | 评什么 | 不能证明什么 |
+| --- | --- | --- |
+| 确定性契约 | snapshot、source、schema、ID、引用和失败语义 | 不能证明语义质量 |
+| 语义抽取与审查 | 候选覆盖、噪声、粒度、别名、理由和 evidence 支持 | 不能证明页面与最终问答有效 |
+| 重复稳定性 | 同配置多次运行的结果分布与波动 | 不能把“稳定”当成“正确” |
+| 下游任务 | 页面可用性、检索召回、引用可信和问答结果 | 不能单独定位上游抽取根因 |
+
+每一轮语义改动都应遵守与 Agent 相同的闭环：
+
+```text
+固定代表样本和现场
+→ 记录当前基线与失败模式
+→ 修改 Profile、Prompt、模型或实现
+→ 在等价执行条件上重复运行
+→ 比较质量、稳定性、成本和高危害反例
+→ 决定采用、回退或继续拆分问题
+```
+
+评测集、质量校验基准和冻结输出来源于产品目的与用户任务，不能反过来只由当前模型
+已经擅长输出的内容拼成。否则评测只会证明“模型在做它本来就会做的事”。
+
+### 浮动性必须成为产品能力
+
+产品不能把模型波动藏在后台，也不能要求普通用户通过多次阅读原始输出自行猜测。
+试抽取、Profile 比较、质量校验基准、抽取理由、确定性检查和可选 LLM 审查，都是把
+浮动性变成可观察产品信息的手段，而不是可有可无的调试功能。
+
+用户至少应能看到：
+
+- 本次结果基于哪个 snapshot、文档版本、Profile、Prompt 和模型；
+- 哪些是关键期望项、哪些是噪声、哪些无法判断；
+- 哪些问题是确定性的，哪些来自概率性的 LLM 审查；
+- 哪些结果重复出现、哪些发生波动；
+- 本轮比较结论能否被后续新 run 或新版本推翻。
+
+“用户确认”只代表用户在当前证据下接受该结果，不代表系统获得了永久正确性。任何
+Profile、Prompt、模型、snapshot 或抽取实现变化，都必须形成新的可比较现场。
+
+### 不可被浮动性侵蚀的边界
+
+接受语义浮动不等于降低工程红线。以下错误始终是阻断项，不能通过平均质量、多数运行或
+人工确认来抵消：
+
+- 事实不由绑定 evidence 支持；
+- candidate 引用不属于当前 snapshot 或文档版本的 block；
+- 把成员、分类项或仅共现对象伪装成同一身份或明确事实；
+- 失败、截断或缺失被静默标记成成功；
+- 运行时结果无法追溯到 Profile、Prompt、模型和输入版本；
+- 下游页面或回答篡改来源归属。
+
+确定性检查和硬约束负责限制系统“最坏能坏到哪里”；评测负责衡量系统“通常有多好、
+有多稳、为此付出多少成本”。两者缺一不可。
+
+### 对当前 Profile 阶段的直接含义
+
+当前阶段虽然只完成 Profile 配置、试抽取和比较，也必须遵循上述总原则：
+
+- 单次 Preview 是样本观察，不是 Profile 质量证明；
+- 相同输入的重复运行必须保留，用于稳定性比较，不能被新 run 覆盖；
+- 两个 Profile 只有在 snapshot、文档版本、质量基准和可追溯配置一致时才能比较；
+- 确定性 evidence/alias 检查只是语义质量的必要条件，不能替代人工或 LLM 审查；
+- 没有质量校验基准、held-out 检查或重复运行的 Profile，可以继续编辑和使用，但其结论
+  必须明确标为“未充分验证”；
+- Preview、审查和比较发现的问题优先用于改进 Profile，不由系统静默修改结果。
 
 ## 当前阶段目标与范围
 
@@ -475,6 +612,10 @@ held-out 记录属于后续语义质量评估，不进入第一阶段六类持�
 
 这些结果可以作为硬失败或明确 warning。
 
+其中，模型返回的 alias 如果未出现在该 candidate 自己的 evidence 中，视为辅助字段
+不可验证：系统应丢弃该 alias、保留 candidate 和有效 evidence，并在 Preview Run
+诊断中记录 `candidate_alias_dropped`。单个无效 alias 不得导致整次抽取失败。
+
 #### 启发式检查
 
 程序可以生成“疑似问题”，但不能自动定性：
@@ -801,7 +942,7 @@ Profile 不保留独立的 `focus_targets`。用户通过一个或多个职责�
 - `include_criteria`：必须满足的准入条件；
 - `exclude_criteria`：该通道明确排除的情况；
 - `granularity_rule`：什么情况下应独立成为一个 candidate；
-- `coverage_audit_enabled`：是否对该通道执行遗漏检查。
+- `omission_retry_enabled`：是否对该通道执行遗漏补抽。
 
 `activation` 是编译进通道 Prompt 的语义适用条件，由模型结合当前 evidence 判断；
 它不是程序级硬过滤，也不会在调用模型前单独执行一次确定性筛选。
@@ -823,6 +964,13 @@ source_block_ids
 - 多个通道发现同一 candidate 时按 D39 的 normalized primary name 规则精确去重；
 - 用户可手工新增、编辑、删除和排列通道，也可接受 LLM 生成的通道草案；
 - Profile 冻结后修改通道必须创建新 Profile。
+
+所有通道共同遵守 candidate name 契约：`name` 是候选列表中的独立定位标识，用户知道
+当前 Profile 领域时，仅凭标题就应能初步判断它指向什么。名称可以表示概念、机制、风险、
+关系、原则或方法，但必须使用简洁的命名形式，不能直接使用完整句、祈使句或建议句。
+普通词、泛称或比喻脱离正文后仍可能指向多个对象时，应使用 evidence 已支持的最小对象、
+系统或场景锚定，不得机械添加领域前缀或组合 evidence 不支持的名称。正文同时给出缩写
+和完整名称时优先使用可独立理解的完整名称，原文同指术语保留为 alias。
 
 ### D26：Profile 保存时校验通道与排除规则冲突
 
@@ -883,7 +1031,11 @@ draft 保存和冻结／确定使用采用不同校验强度：
 - evidence 只能来自当前 snapshot；
 - source block IDs 必须真实且不越界；
 - 不引入外部知识；
-- aliases 必须同指、同层且出现在 candidate 自己的 evidence 中；
+- candidate name 必须在当前 Profile 命名空间内可独立定位；禁止把完整句、祈使句或
+  建议句直接作为名称，泛称的最小锚点必须由 evidence 支持；
+- aliases 必须符合同一对象的不同名称这一关系，出现在 candidate 自己的 evidence 中，
+  且与 name 同抽象层级；对象包含的成员、组成项、类型实例、子类或分类项不得作为
+  alias；
 - 不生成 facet；
 - 不生成 parent／child 或 typed relation；
 - 输出字段和 JSON 契约固定；
@@ -1039,9 +1191,15 @@ Profile 编辑界面只决定字段的呈现层级，不改变已有 Profile 数
 每个清单项必须绑定当前文档版本和 snapshot 中的至少一个 source block。允许的来源：
 
 - 系统基于当前文档生成的初始建议；
-- 用户从 Profile A 的 Preview Run 中选择 candidate；
-- 用户从 Profile B 的 Preview Run 中选择 candidate；
+- 用户从 Profile A 的 Preview Run 中选择 candidate，并在该候选加入时选择
+  `must`、`should`、`nice_to_have` 或 `noise`；
+- 用户从 Profile B 的 Preview Run 中选择 candidate，并在该候选加入时选择
+  `must`、`should`、`nice_to_have` 或 `noise`；
 - 用户手工填写，并手选原文 block 作为证据。
+
+候选加入优先级属于候选级临时选择，不设置跨候选共享的全局优先级。用户在候选列表、
+原文顺序视图或候选详情弹窗中为某条候选选择优先级后，只有该候选加入清单时使用该值；
+未选择时默认 `should`。切换 Preview Run 时未提交的临时选择失效。
 
 系统生成初始清单时必须独立于两个被比较 Profile，只使用当前文档、当前 snapshot
 以及用户显式填写的非 Profile 专属评测说明。不得读取 Profile A 或 Profile B 的
@@ -1283,7 +1441,7 @@ V20 中的 `mechanism_application` 通过同一 window、共享 source block 和
 
 #### 通用设置
 
-- 四个通道的 `coverage_audit_enabled` 首版默认均为 `false`；
+- 四个通道的 `omission_retry_enabled` 首版默认均为 `false`；
 - 后续通过同一组文档对照开启遗漏补抽前后的召回、噪声、粒度和 token 成本，再决定默认值；
 - `mechanism_application` 不属于任何通道，也不得由固定管线恢复；
 - 四个通道共享同一 candidate schema、证据校验和失败契约；
@@ -1622,11 +1780,220 @@ completed run 提供两个结果视图：
 翻译，可以在“原文／中文”显示模式之间切换；切到中文时按需补齐当前文档尚未缓存的
 英文块，翻译不改变左右两侧的覆盖关系。
 
+候选浏览、原文顺序视图和候选详情弹窗必须区分“已加入现有质量校验基准”和“尚未加入”
+的候选。已加入状态使用同一文档、文档版本和 snapshot 下的基准项，按规范化名称／别名
+完整相同且 evidence 有交集确定性匹配；只共享 evidence 或只有名称相同不得标成已加入。
+已加入候选继续可查看详情，但不能从当前视图重复追加到基准。
+
 同一候选引用多个原文块时，按当前文档的 block 顺序在第一次出现处展示完整候选卡；
 后续块只展示紧凑提示“候选名 + 也引用了本段”，并保留查看详情的入口。这样既不丢失
 多 evidence 关系，也减少同一候选在长文档中的重复视觉负担。
 
 窄屏下逐块双栏改为原文在上、候选在下的单列结构，不把两个独立滚动列表强行并排。
+
+### D49：candidate 必须携带可审核的抽取理由
+
+候选抽取输出在 `name`、`summary`、`source_block_ids` 之外增加
+`selection_reason`。它是审核辅助字段，不是模型内部思维链、不是事实证据，也不参与
+candidate 身份去重或 Python 规则合并。
+
+`selection_reason` 使用 1–2 句简短中文，说明：
+
+- candidate 命中了当前通道的哪条 activation／include_criteria；
+- 当前绑定的 evidence blocks 中有哪些事实使该条件成立。
+
+理由中凡是关于原文内容的断言，都必须能由该 candidate 绑定的 evidence 直接支持；
+“为什么值得提取”的规则依据来自 Profile，不要求 evidence 原文逐字出现该判断。
+理由不得引入外部知识，不得使用“很重要”等无法验证的泛泛说明，也不得替代
+`source_block_ids` 作为证据。
+
+同一 normalized primary name 由多个通道或窗口发现时，最终 candidate 保存
+`selection_reasons[]`，每项记录 `channel_id`、`operation`、`window_index`、
+`reason` 和该次发现的 `source_block_ids`。界面必须展示全部来源理由；原文顺序卡片
+可以只展示首个理由并提示其他依据数量。
+
+Preview Run 摘要同时返回从冻结配置快照解析出的 `channel_definitions`，每个通道包含
+`name`、`activation`、`include_criteria` 和 `exclude_criteria`。候选详情和候选弹窗
+必须在通道名称下展示这三类判断标准，使审核者能够直接对照 Profile 规则与抽取理由。
+该信息只用于解释和安全回退，不改变 candidate、身份或比较语义。
+
+模型未提供理由时，candidate 仍可进入审核视图，但 Run 必须记录
+`candidate_reason_missing` 诊断，界面不得把缺失理由显示成已通过。
+
+### D50：单文档确定性别名冲突审查始终执行
+
+Preview 和正式抽取在完成单文档 normalized primary name 精确去重后，都必须执行同一套
+确定性别名审查。若 candidate A 的 normalized alias 与同文档 candidate B 的
+normalized primary name 完全相同，则记录：
+
+```text
+alias_matches_separate_candidate
+```
+
+该结果表示“疑似成员、组成项、类型实例、子类或分类项误作 alias”，不直接判断两个候选
+中哪一个错误。原始 alias 和冲突目标必须保留在审查结果中；该 alias 不得用于质量校验
+基准加入、身份匹配或后续检索。候选本身仍保持可见。
+
+正式抽取尚未实现时，该规则仍作为共享候选审查契约；实现正式抽取时必须复用同一逻辑，
+不得退化为只在 Preview 中显示的前端检查。
+
+### D51：Preview 可选批量 LLM 候选审查
+
+试抽取允许用户显式开启 LLM 候选审查，默认关闭。开启后分为三个相互独立的审查：
+
+1. **候选标题区分度审查**：只读取 Profile 领域与用途，以及当前 Run 中全部候选的主
+   标题；不读取 alias、summary、文档标题、正文或 evidence。判断用户只看到候选标题时，
+   是否仍能理解它指向什么，并与当前 Run 的其他标题区分。
+2. **候选名称含义审查**：读取 Profile 领域与用途、候选主标题、alias 和本地 summary；
+   不读取文档标题、正文或 evidence。判断主标题能否比较精确地锚定 summary 的中心对象。
+3. **候选内容审查**：按文档窗口审查去重后的候选，读取当前窗口 evidence、Profile 规则、
+   候选 name／aliases／summary／selection reasons 和 source block IDs。
+
+三种审查都不按每个 candidate 单独调用模型；标题区分度和名称含义审查各在当前 Run 内
+批量调用一次，内容审查按文档窗口调用。三种 Prompt 和模型版本必须分别写入 Run 可追溯
+信息。内容审查输出必须覆盖全部候选，并且只能返回：
+
+- `clean`：未发现明确疑点；
+- `suspicious`：发现明确疑点；
+- `uncertain`：现有证据不足，无法判断。
+
+内容问题代码限定为成员误作 alias、别名不同指、归纳缺证据、名称与 evidence 存在明确
+角色冲突、候选不独立、粒度不符、抽取理由无依据和其他。本地 summary 只要求反映本文档
+对当前对象的信息贡献，不要求独立给出完整定义；跨文档完整性属于后续 canonical topic
+阶段另行决定的事项。
+
+标题区分度审查返回 `clear`、`ambiguous` 或 `uncertain`，`ambiguous` 时给出最小建议
+名称。区分度只要求在“当前知识库 + 当前 Profile”命名空间内成立，不要求全互联网唯一。
+名称较短不等于过泛；稳定专名或当前领域已经明确界定的缩写不需要强制增加领域前缀。
+若用户只看主标题时仍可能指向多个类别或作用范围，则报告
+`name_ambiguous_in_knowledge_base`。候选列表此后即使只展示标题，也必须通过该审查
+显式暴露歧义，不能依赖 summary、正文或 evidence 替标题消歧。
+
+名称含义审查返回 `aligned`、`misaligned` 或 `uncertain`，`misaligned` 时给出最小修正
+名称并报告 `name_meaning_misaligned`。本地 summary 仍只要求反映本文档对当前对象的信息
+贡献，不要求独立给出完整定义。审查只产生审核结果，不重写 candidate、alias、summary
+或 evidence。
+
+LLM 审查与抽取状态分离。审查失败或部分失败时，已完成的抽取候选仍可查看；Run 保留
+Preview 结果，同时通过 `semantic_audit_status` 明确显示 pending、running、completed、
+partial、failed 或 interrupted。
+
+试抽取启动前必须显示开启 LLM 审查所增加的预计调用数和 token。候选界面提供状态标识、
+疑点筛选和逐项审查看法；`clean` 只能显示为“未发现疑点”，不能显示为“已证明正确”。
+
+### D52：候选标题使用文档级 evidence 消歧
+
+窗口 discovery 只负责局部候选和 evidence 绑定；标题中的对象、系统、产品和作用范围
+可能需要整篇文档上下文才能确定。因此，在单文档精确去重后、三类审查前，执行一次
+“文档级标题消歧”：
+
+```text
+窗口 discovery／coverage audit
+→ 单文档 normalized primary name 精确去重
+→ 文档级标题消歧
+→ 内容审查
+→ 标题区分度审查
+→ 名称含义审查
+```
+
+文档级标题消歧直接读取当前文档的全部 blocks，不先额外生成 `central_subjects`、
+`systems`、`actors` 等结构化上下文对象。结构化上下文属于有损中间层，首版不引入；
+只有未来整篇 evidence 无法进入预算时，才另行设计显式降级方案。
+
+边界：
+
+- 候选 summary、selection reason、source block IDs、channel IDs 和候选数量不能变化；
+- 只能修改 final title 和 aliases，并写入标题消歧判断、锚点来源和理由；
+- 不得合并、删除、拆分、新增或重新排序候选；
+- 名称锚点可以来自候选自己的 evidence，也可以来自同一文档的其他 block；
+- 不得使用当前文档和当前 Profile 之外的实体或知识；
+- 中英文互译、同义改写、括号释义和缩写展开本身不构成锚点；
+- `Pattern N`、章节编号和列表序号不得作为名称主体；
+- alias 仍必须出现在候选自己的 evidence 中且与 final name 同指；
+- 标题区分度和名称含义审查仍独立判断，不因完成消歧而跳过。
+
+该阶段不是判官，不直接采用标题审查的 `suggested_name`。它必须先形成结构化判断：
+
+```json
+{
+  "candidate_ref": "ca_...",
+  "provisional_name": "blast radius",
+  "title_kind": "common_concept",
+  "standalone_clear": false,
+  "missing_anchor_types": ["actor", "scope"],
+  "final_name": "AI agent deployment blast radius",
+  "aliases": ["blast radius"],
+  "anchor_source_block_ids": ["..."],
+  "reason": "..."
+}
+```
+
+`title_kind` 使用 `proper_name`、`acronym`、`common_concept`、`relation`、
+`principle`、`method` 或 `other`。`missing_anchor_types` 使用 `actor`、`system`、
+`product` 或 `scope`。
+
+硬约束：
+
+- `standalone_clear=true` 时 final name 必须与 provisional name 相同；
+- `standalone_clear=false` 时必须给出缺失锚点类型和不同 final name；
+- 中英互译、同义改写和括号释义只能证明术语等价，不能作为消歧锚点；
+- final name 必须再次满足候选列表的标题-only 可理解性；
+- provisional name、title kind、standalone clear、missing anchor types 和 name changed
+  必须持久化，确保后续可审计到底改了什么。
+
+预算策略 `document-anchor-32k-64k-v3`：
+
+- 输入软目标 32,000 tokens；
+- 输入硬上限 64,000 tokens；
+- 安全预留 8,192 tokens；
+- 单文档候选上限 150；
+- 输出预算为
+  `min(65536, max(32768, 4096 + candidate_count × 384))`；
+- 每篇文档最多调用一次；0 个候选时不调用；
+- 超过候选数或输入预算时不得截断全文或静默改用摘要，必须记录相应状态并保留
+  provisional 名称。
+
+每文档状态为 `not_needed`、`completed`、`over_budget`、
+`candidate_limit_exceeded`、`truncated_output`、`invalid_json`、`invalid_schema` 或
+`failed`。消歧失败不回滚抽取候选，但候选界面必须明确
+提示该文档名称可能仍依赖局部窗口上下文。
+
+Run 记录 `document_anchor_prompt_version`、`document_anchor_policy_version` 和逐文档
+预算／状态。candidate 记录 provisional/final title、标题类型、标题-only 判断、
+缺失锚点类型、是否改名、锚点来源和理由。文档级标题消歧不解决候选身份重复；它只让
+每个独立候选拥有更清楚的 final title。
+
+### D53：通道按顺序累积候选账本
+
+用户定义的通道不要求语义正交。为避免要求普通用户设计完全互斥的通道，discovery 按
+Profile 中的通道顺序串行执行；通道内部的窗口仍可并发。后续通道接收当前文档已积累的
+完整候选账本：
+
+```json
+{
+  "candidate_ref": "ca_...",
+  "name": "...",
+  "aliases": [],
+  "summaries": [],
+  "source_block_ids": [],
+  "channel_ids": []
+}
+```
+
+模型若在当前窗口发现同一对象，返回已有 `candidate_ref`，而不是新建候选：
+
+- 沿用既有 primary name；
+- 新 summary 作为本文档贡献追加到 `summary_variants`；
+- 新 alias 必须出现在当前窗口 evidence 中；
+- 新 source block IDs、channel ID 和 selection reason 合并到已有候选；
+- 不得把附件中的 summary 当成当前窗口事实，也不能复用附件 source blocks 代替新证据。
+
+若对象或粒度不同，必须返回 `existing_candidate_ref=null` 创建新候选。不同粒度对象不能
+为了减少重复而自动合并。模型给已有引用返回不同 name 时，系统保留已建立 name；差异名称
+在当前 evidence 中真实出现时按 alias 校验，否则丢弃并记录诊断。
+
+通道顺序用于确定性数据流，不表示通道优先级。Profile hash 固定通道顺序，因此同一
+Profile 的累积语义可追溯。后续文档级标题消歧和内容审查只处理累积收敛后的候选账本。
 
 ## 数据模型
 
@@ -1706,7 +2073,7 @@ Profile 不可变。用户实质性调整已冻结的 Profile 时，系统生成
         "只有章节标题、链接或顺带提及"
       ],
       "granularity_rule": "一个可独立学习和检索的知识对象对应一个 candidate。",
-      "coverage_audit_enabled": false
+      "omission_retry_enabled": false
     }
   ],
   "exclude_criteria": [],
@@ -1795,6 +2162,25 @@ Profile 不可变。用户实质性调整已冻结的 Profile 时，系统生成
   "block_hashes": {},
   "preview_fingerprint": "...",
   "status": "completed",
+  "semantic_audit_enabled": true,
+  "semantic_audit_prompt_version": "candidate-semantic-audit-v15",
+  "name_scope_audit_prompt_version": "candidate-name-scope-audit-v3",
+  "name_meaning_audit_prompt_version": "candidate-name-meaning-audit-v1",
+  "document_anchor_prompt_version": "candidate-document-anchor-v2",
+  "document_anchor_policy_version": "document-anchor-32k-64k-v3",
+  "document_anchor_results": {
+    "doc_...": {
+      "status": "completed",
+      "candidate_count": 42,
+      "estimated_input_tokens": 18000,
+      "output_token_budget": 6080,
+      "soft_input_tokens": 32000,
+      "hard_input_tokens": 64000,
+      "error": null
+    }
+  },
+  "semantic_audit_status": "completed",
+  "semantic_audit_error": null,
   "created_at": "...",
   "started_at": "...",
   "completed_at": "...",
@@ -1819,11 +2205,32 @@ Local candidate 是某一篇文档或某个窗口中被发现的局部知识对�
   "doc_version": 1,
   "name": "OS-level sandbox",
   "normalized_name": "os level sandbox",
+  "provisional_name": "OS-level sandbox",
+  "title_kind": "proper_name",
+  "title_standalone_clear": true,
+  "missing_anchor_types": [],
+  "name_changed": false,
   "aliases": [],
   "summary": "操作系统层提供隔离边界的沙箱机制。",
   "summary_variants": [
     "操作系统层提供隔离边界的沙箱机制。"
   ],
+  "selection_reasons": [
+    {
+      "channel_id": "ec_...",
+      "operation": "discovery",
+      "window_index": 0,
+      "reason": "命中“存在稳定名称和独立机制说明”；原文说明了该沙箱的权限边界与效果。",
+      "source_block_ids": ["doc_...#v0001#c1#b00008"]
+    }
+  ],
+  "name_anchor_source_block_ids": [
+    "doc_...#v0001#c1#b00003"
+  ],
+  "name_anchor_reason": "整篇文档说明对象是 Agent 运行环境，因此使用 Agent 运行环境作为最小锚点。",
+  "audit_status": "clean",
+  "audit_reason": "候选、归纳和别名未发现明确疑点。",
+  "audit_findings": [],
   "source_block_ids": [
     "doc_...#v0001#c1#b00008"
   ],
@@ -1837,9 +2244,11 @@ Local candidate 是某一篇文档或某个窗口中被发现的局部知识对�
 
 - `candidate_id` 在 extraction artifact 内唯一，不作为跨 run 的最终身份；
 - 所有 `source_block_ids` 必须属于当前 snapshot 和当前文档版本；
-- `aliases` 必须出现在 candidate 自己的 source blocks 中；
+- `aliases` 必须符合同一对象的不同名称这一关系，并出现在 candidate 自己的
+  source blocks 中；成员、组成项、类型实例、子类和分类项不得作为 alias；
 - `channel_ids` 只用于诊断来源，不参与 candidate 身份；
-- `summary_variants` 只在精确去重合并时合并去重，不生成新摘要；
+- `selection_reasons` 按通道和窗口保留审核理由，不参与 candidate 身份和规则合并；
+- `summary_variants` 保存精确去重或后续通道对同一对象补充的不同归纳，不覆盖主 summary；
 - 不包含 coverage slot、facet、parent ID 或 typed relation；
 - 第一阶段不包含 candidate labels。
 
@@ -2140,6 +2549,8 @@ Review Record 不直接覆盖数据；后续通过显式 assignment、topic revi
 - candidate、canonical topic、page、link 和 index 的最终存储结构；
 - 全库 build、active 指针、切换和回退流程；
 - 检索与问答如何组合 topic 入口、页面和原始 block；
+- 正式抽取用全局 `candidate_semantic_audit_enabled` 控制是否启用单篇 LLM 候选审查；
+  审查失败或发现疑点时如何影响正式 build，需在完整抽取流程 review 时单独决定；
 - 新文档加入、旧文档修改或删除时的增量构建；
 - 构建后手工新增、删除和改绑知识条目；
 - Candidate labels 的最终受控取值；
